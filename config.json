@@ -1,0 +1,167 @@
+{
+  "default_background_image": "",
+  "background_opacity": 1.0,
+  "background_scale_mode": "fit",
+  "default_font_family": "黑体",
+  "default_font_size": 30,
+  "default_line_width": 5,
+  "common_phrases": [
+    "（一）"
+  ],
+  "favorite_fonts": [
+    "SimSun",
+    "Microsoft YaHei",
+    "黑体",
+    "楷体",
+    "Arial"
+  ],
+  "favorite_sizes": [
+    10,
+    12,
+    14,
+    16,
+    18,
+    20,
+    24,
+    30,
+    36,
+    48,
+    72
+  ],
+  "marquee_only_images": true,
+  "insert_image_to_bottom": true,
+  "auto_exit_after_paste": true,
+  "text_snippets": [
+    "（二）",
+    "第一章",
+    "注："
+  ],
+  "marquee_only_connected": false,
+  "marquee_mode": "images",
+  "layer_eye_roles": {
+    "yellow": "left",
+    "red": "left",
+    "green": "left"
+  },
+  "smart_brush_radius": 10,
+  "default_save_dir": "C:\\Users\\A\\Desktop",
+  "insert_image_max_width_ratio": 1.0,
+  "insert_image_default_width": 3524,
+  "insert_image_default_height": 5021,
+  "insert_image_use_custom_size": false,
+  "ftimport_template_text_maps": {
+    "组合_3文字_1图片": {
+      "t1": 0,
+      "t2": 1,
+      "t3": 3
+    },
+    "3文字0": {
+      "t1": 2,
+      "t2": 3,
+      "t3": 1
+    },
+    "组合1": {
+      "t1": 0,
+      "t2": 1,
+      "t3": 3
+    },
+    "组合2": {
+      "t1": 0,
+      "t2": 1,
+      "t3": 3
+    },
+    "组合3": {
+      "t1": 0,
+      "t2": 3,
+      "t3": 2
+    },
+    "组合4": {
+      "t1": 0,
+      "t2": 2,
+      "t3": 3
+    },
+    "组合5": {
+      "t1": 2,
+      "t2": 3,
+      "t3": 1
+    },
+    "组合6": {
+      "t1": 3,
+      "t2": 1,
+      "t3": 2
+    },
+    "组合10": {
+      "t1": 1,
+      "t2": 3,
+      "t3": 2
+    }
+  },
+  "ftimport_excel_path": "F:/ocr/ocr/export_history_files/20260912_152939_775291_西游记402_分组格式.xlsx",
+  "ftimport_template_name": "组合10",
+  "ftimport_unit": "mm",
+  "ftimport_start_x": 280.0,
+  "ftimport_spacing": 50.0,
+  "ftimport_y1": 10.0,
+  "ftimport_y2": 60.0,
+  "ftimport_y3": 100.0,
+  "ftimport_y4": 140.0,
+  "ftimport_y5": 220.0,
+  "ftimport_font_size": 30,
+  "ftimport_font_family": "黑体",
+  "ftimport_img_width": 150.0,
+  "hide_connection_points_when_image_selected": false,
+  "show_text_hover_tooltip": false,
+  "insert_image_fit_canvas": false,
+  "horizontal_move_only": false,
+  "license_expiry_date": "2027-09-30",
+  "image_right_edge_snap_enabled": true,
+  "text_format_presets": [
+    {
+      "name": "2",
+      "format": {
+        "font_family": "微软雅黑",
+        "font_size": 60,
+        "text_color": "#000000",
+        "chars_per_column": 15,
+        "column_spacing": 10,
+        "character_spacing": -50,
+        "manual_line_break": true
+      }
+    },
+    {
+      "name": "b",
+      "format": {
+        "font_family": "微软雅黑",
+        "font_size": 35,
+        "text_color": "#000000",
+        "chars_per_column": 15,
+        "column_spacing": 65,
+        "character_spacing": -5,
+        "manual_line_break": true
+      }
+    },
+    {
+      "name": "a",
+      "format": {
+        "font_family": "微软雅黑",
+        "font_size": 70,
+        "text_color": "#000000",
+        "chars_per_column": 15,
+        "column_spacing": 10,
+        "character_spacing": -40,
+        "manual_line_break": true
+      }
+    }
+  ],
+  "image_top_edge_snap_enabled": true,
+  "display_unit": "mm",
+  "snap_threshold": 40,
+  "startup_horizontal_guides_enabled": false,
+  "startup_horizontal_guides": [
+    944.8818897637796,
+    1889.763779527559,
+    2834.645669291339,
+    3779.527559055118
+  ],
+  "startup_horizontal_guides_unit": "mm"
+}
