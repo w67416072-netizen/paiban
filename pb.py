@@ -9845,7 +9845,7 @@ class MainWindow(QMainWindow):
         
         print("Vertical Layout Engine Started...")
         # 恢复上次窗口大小和停靠面板布局
-        self._restore_window_state()
+        self._has_restored_window_geometry = self._restore_window_state()
         self._update_document_tab_title(self._documents[0])
         
         # 延迟触发加号按钮显示
@@ -10132,8 +10132,9 @@ class MainWindow(QMainWindow):
         s = QSettings("VertiLayout", "VertiLayoutPro")
         geom = s.value("geometry")
         state = s.value("windowState")
+        restored_geometry = False
         if geom:
-            self.restoreGeometry(geom)
+            restored_geometry = self.restoreGeometry(geom)
         if state:
             self.restoreState(state)
         # 恢复层级面板列宽
@@ -10143,6 +10144,7 @@ class MainWindow(QMainWindow):
             self.tree_widget.setColumnWidth(1, int(s.value("tree_col1_width")))
         if s.contains("tree_col2_width"):
             self.tree_widget.setColumnWidth(2, int(s.value("tree_col2_width")))
+        return restored_geometry
 
     def closeEvent(self, event):
         """窗口关闭时提示保存，停止定时器，保存窗口状态"""
@@ -13479,6 +13481,9 @@ class MainWindow(QMainWindow):
             document.dirty = False
             self._update_document_tab_title(document)
         self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+        # 文档标签和视图刚替换完成时尺寸可能尚未更新；下一轮事件循环再适配，
+        # 可确保拖入或菜单打开工程后均以“合适屏幕”显示完整画布。
+        QTimer.singleShot(0, self.view.fit_in_view)
         self.status_bar.showMessage(
             f"已打开: {os.path.basename(path)}（{len(self._documents)} 个文档）", 3000
         )
@@ -14287,5 +14292,9 @@ if __name__ == "__main__":
             sys.exit(0)
 
     w = MainWindow()
-    w.showMaximized()  # 启动时最大化窗口
+    # 首次运行沿用最大化；之后恢复上次关闭时的窗口大小、位置和最大化状态。
+    if w._has_restored_window_geometry:
+        w.show()
+    else:
+        w.showMaximized()
     sys.exit(app.exec())
