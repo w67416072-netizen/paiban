@@ -17,11 +17,20 @@ DEFAULT_FONT_SIZE = 24
 COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
 CORELDRAW_EXPORT_DPI = 600  # Scene pixels to millimeters for CorelDRAW SVG export.
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+def _get_app_dir():
+    """获取应用程序目录：打包后返回 exe 所在目录，开发时返回脚本所在目录。"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller 打包后，exe 所在目录
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = _get_app_dir()
 ASSETS_DIR = os.path.join(APP_DIR, "assets")  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
-CONFIG_FILE = os.path.join(APP_DIR, "config.json")  # 配置文件
+CONFIG_FILE = os.path.join(APP_DIR, "config.json")  # 配置文件（与 exe 同目录）
 DEFAULT_LICENSE_PASSWORD = "12345678"
+LICENSE_EXPIRY_DATETIME_FORMAT = "yyyy-MM-dd HH:mm"
+LAST_LOGIN_TIME_FORMAT = "yyyy-MM-dd HH:mm:ss"
 
 
 def hash_license_password(password):
@@ -29,17 +38,59 @@ def hash_license_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def license_expiry_datetime(expiry_text):
+    """解析授权到期时间，并兼容旧版仅保存日期的配置。"""
+    expiry_text = str(expiry_text or "").strip()
+    if not expiry_text:
+        return None
+
+    expiry = QDateTime.fromString(expiry_text, LICENSE_EXPIRY_DATETIME_FORMAT)
+    if expiry.isValid():
+        return expiry
+
+    # 旧版到期日表示该日期当天可用，迁移后按当天 23:59 到期。
+    legacy_date = QDate.fromString(expiry_text, "yyyy-MM-dd")
+    if legacy_date.isValid():
+        return QDateTime(legacy_date, QTime(23, 59))
+    return None
+
+
 def license_is_valid(config):
-    """检查授权日期；未设置到期日时视为长期有效。"""
+    """检查授权到期时间；未设置时视为长期有效。"""
     expiry_text = str(config.get("license_expiry_date", "") or "").strip()
     if not expiry_text:
         return True, ""
 
-    expiry_date = QDate.fromString(expiry_text, "yyyy-MM-dd")
-    if not expiry_date.isValid():
-        return False, f"授权到期日期无效：{expiry_text}"
-    if QDate.currentDate() > expiry_date:
+    expiry_datetime = license_expiry_datetime(expiry_text)
+    if expiry_datetime is None:
+        return False, f"授权到期时间无效：{expiry_text}"
+    if QDateTime.currentDateTime() >= expiry_datetime:
         return False, f"软件授权已于 {expiry_text} 到期"
+    return True, ""
+
+
+def next_license_expiry_minute():
+    """返回可选的最早到期时间，精确到分钟。"""
+    now = QDateTime.currentDateTime()
+    return QDateTime(now.date(), QTime(now.time().hour(), now.time().minute())).addSecs(60)
+
+
+def validate_and_record_login_time(config_manager):
+    """防止系统时间回拨，并记录本次成功启动的时间。"""
+    now = QDateTime.currentDateTime()
+    last_login_text = str(config_manager.get("last_login_time", "") or "").strip()
+    if last_login_text:
+        last_login = QDateTime.fromString(last_login_text, LAST_LOGIN_TIME_FORMAT)
+        if not last_login.isValid():
+            return False, f"最后登录时间无效：{last_login_text}"
+        if now < last_login:
+            return False, (
+                "检测到电脑系统时间早于最后登录时间。\n"
+                f"最后登录时间：{last_login.toString(LAST_LOGIN_TIME_FORMAT)}\n"
+                f"当前系统时间：{now.toString(LAST_LOGIN_TIME_FORMAT)}"
+            )
+
+    config_manager.set("last_login_time", now.toString(LAST_LOGIN_TIME_FORMAT))
     return True, ""
 
 
@@ -65,12 +116,12 @@ def recover_expired_license(config_manager):
     dialog = QDialog()
     dialog.setWindowTitle("延长软件授权")
     layout = QFormLayout(dialog)
-    layout.addRow(QLabel("请输入新的到期日期，保存后软件才能继续使用。"))
-    expiry_edit = QDateEdit(QDate.currentDate(), dialog)
+    layout.addRow(QLabel("请输入新的到期时间（精确到分钟），保存后软件才能继续使用。"))
+    expiry_edit = QDateTimeEdit(next_license_expiry_minute(), dialog)
     expiry_edit.setCalendarPopup(True)
-    expiry_edit.setDisplayFormat("yyyy-MM-dd")
-    expiry_edit.setMinimumDate(QDate.currentDate())
-    layout.addRow("新的到期日期：", expiry_edit)
+    expiry_edit.setDisplayFormat(LICENSE_EXPIRY_DATETIME_FORMAT)
+    expiry_edit.setMinimumDateTime(next_license_expiry_minute())
+    layout.addRow("新的到期时间：", expiry_edit)
 
     buttons = QDialogButtonBox(
         QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -86,7 +137,7 @@ def recover_expired_license(config_manager):
 
     config_manager.set(
         "license_expiry_date",
-        expiry_edit.date().toString("yyyy-MM-dd")
+        expiry_edit.dateTime().toString(LICENSE_EXPIRY_DATETIME_FORMAT)
     )
     return True
 
@@ -106,6 +157,11 @@ class ConfigManager:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                # 兼容曾共用图片/文字右边缘吸附开关的旧版配置。
+                config.setdefault(
+                    'text_right_edge_snap_enabled',
+                    config.get('image_right_edge_snap_enabled', False)
+                )
                 print(f"配置已加载: {self.config_file}")
                 return config
             except Exception as e:
@@ -142,6 +198,7 @@ class ConfigManager:
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
             'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
+            'text_right_edge_snap_enabled': False,  # 水平移动文字时吸附右边缘X
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
             'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
@@ -160,6 +217,7 @@ class ConfigManager:
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
             'license_expiry_date': '',
+            'last_login_time': '',
         }
     
     def save_config(self):
@@ -3280,7 +3338,7 @@ class BaseElement(QGraphicsItem):
             if self in horizontal_lock:
                 parent = self.parentItem()
                 new_scene_pos = parent.mapToScene(value) if parent else value
-                snap_dx = self._horizontal_image_snap_offset(new_scene_pos, horizontal_lock)
+                snap_dx = self._horizontal_right_edge_snap_offset(new_scene_pos, horizontal_lock)
                 locked_scene_pos = QPointF(
                     new_scene_pos.x() + snap_dx,
                     horizontal_lock[self]
@@ -3307,8 +3365,8 @@ class BaseElement(QGraphicsItem):
 
         return super().itemChange(change, value)
 
-    def _horizontal_image_snap_offset(self, new_scene_pos, horizontal_lock):
-        """Align the moving image's right edge X with the nearest image."""
+    def _horizontal_right_edge_snap_offset(self, new_scene_pos, horizontal_lock):
+        """吸附移动对象的右边缘到最近同类对象的右边缘。"""
         scene = self.scene()
         def set_indicator(indicator):
             if scene and getattr(scene, '_image_right_edge_snap_indicator', None) != indicator:
@@ -3318,9 +3376,18 @@ class BaseElement(QGraphicsItem):
         owner = getattr(scene, '_horizontal_move_lock_owner', None) if scene else None
         lock_x = getattr(scene, '_horizontal_move_lock_x', {}) if scene else {}
         owner_right_x = getattr(scene, '_horizontal_move_owner_right_x', None) if scene else None
+        if isinstance(owner, VTextItem):
+            snap_enabled = scene.config_manager.get(
+                'text_right_edge_snap_enabled',
+                scene.config_manager.get('image_right_edge_snap_enabled', False)
+            ) if scene else False
+        else:
+            snap_enabled = scene.config_manager.get(
+                'image_right_edge_snap_enabled', False
+            ) if scene else False
         if (not scene
-                or not scene.config_manager.get('image_right_edge_snap_enabled', False)
-                or not isinstance(owner, VImageItem)
+                or not snap_enabled
+                or not isinstance(owner, (VImageItem, VTextItem))
                 or owner not in horizontal_lock
                 or self not in lock_x
                 or owner_right_x is None):
@@ -3353,8 +3420,9 @@ class BaseElement(QGraphicsItem):
         threshold = scene.snap_threshold
         best_offset = None
         best_candidate = None
+        item_type = VTextItem if isinstance(owner, VTextItem) else VImageItem
         for candidate in scene.items():
-            if (not isinstance(candidate, VImageItem)
+            if (not isinstance(candidate, item_type)
                     or not candidate.isVisible()
                     or getattr(candidate, '_was_hidden', False)
                     or belongs_to_moving_group(candidate)):
@@ -3372,7 +3440,7 @@ class BaseElement(QGraphicsItem):
 
         owner_rect = owner.sceneBoundingRect()
         candidate_rect = best_candidate.sceneBoundingRect()
-        # X 边缘吸附提示线的端点使用两张图片的右上角。
+        # X 边缘吸附提示线的端点使用两个对象的右上角。
         aligned_x = candidate_rect.right()
         owner_top_right = QPointF(aligned_x, owner_rect.top())
         candidate_top_right = candidate_rect.topRight()
@@ -6979,8 +7047,8 @@ class LayoutScene(QGraphicsScene):
         if items is None:
             items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
         
-        if len(items) < 2:
-            print("请选择至少两个元素来保存组合素材")
+        if len(items) < 1:
+            print("请选择至少一个元素来保存组合素材")
             return
         
         asset = self.asset_manager.add_group_asset(items, self)
@@ -9013,6 +9081,164 @@ class ExcelPreviewDialog(QDialog):
             self.accept()
 
 
+class ExcelColumnMapDialog(QDialog):
+    """Excel 列映射设置对话框（独立于导入窗口，在编辑设置菜单中打开）"""
+
+    _COL_ALIASES = {
+        'generation': ['辈分', '代数', '分类', 'generation'],
+        't1':         ['t1', 't1(a组)', 't1（a组）', '主文字', '正文'],
+        't2':         ['t2', 't2(c组)', 't2（c组）', '副文字1'],
+        't3':         ['t3', 't3(b组)', 't3（b组）', '副文字2'],
+        'd':          ['d', 'd(d组)', 'd（d组）', 'd组'],
+    }
+
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.setWindowTitle("Excel 列映射设置")
+        self.setMinimumWidth(420)
+        self._build_ui()
+        self._load()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(10)
+
+        file_row = QHBoxLayout()
+        self.txt_excel_path = QLineEdit()
+        self.txt_excel_path.setPlaceholderText("选择 Excel 文件以读取列名（可选）...")
+        file_row.addWidget(self.txt_excel_path)
+        btn_browse = QPushButton("浏览...")
+        btn_browse.setFixedWidth(60)
+        btn_browse.clicked.connect(self._browse)
+        file_row.addWidget(btn_browse)
+        btn_read = QPushButton("读取列")
+        btn_read.setFixedWidth(60)
+        btn_read.clicked.connect(self._read_columns)
+        file_row.addWidget(btn_read)
+        root.addLayout(file_row)
+
+        hint = QLabel("选择 Excel 文件后点击「读取列」，下拉框会自动填充表头并尝试匹配。\n"
+                      "未映射的字段导入时仍会用内置别名兜底识别。")
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        direct_group = QGroupBox("列映射（一行 Excel 数据对应一条记录）")
+        df = QFormLayout(direct_group)
+        df.setHorizontalSpacing(10)
+
+        def _cb():
+            c = QComboBox()
+            c.addItem("— 不指定（用内置别名兜底）—", "")
+            c.setMinimumWidth(160)
+            return c
+
+        self.col_generation = _cb()
+        self.col_t1 = _cb()
+        self.col_t2 = _cb()
+        self.col_t3 = _cb()
+        self.col_d = _cb()
+        df.addRow("辈分/代数列:", self.col_generation)
+        df.addRow("主文字 t1 (A组):", self.col_t1)
+        df.addRow("副文字 t2 (C组):", self.col_t2)
+        df.addRow("副文字 t3 (B组):", self.col_t3)
+        df.addRow("D组文字 d:", self.col_d)
+        root.addWidget(direct_group)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("保存")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择 Excel 文件", "", "Excel 文件 (*.xlsx *.xls)")
+        if path:
+            self.txt_excel_path.setText(path)
+            self._read_columns()
+
+    def _read_columns(self):
+        path = self.txt_excel_path.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "提示", "请先选择有效的 Excel 文件")
+            return
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            ws = wb.active
+            header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), ())
+            wb.close()
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", f"无法读取 Excel 文件：\n{e}")
+            return
+        col_names = [str(v).strip() for v in header_row if v is not None and str(v).strip()]
+        self._populate_combos(col_names)
+        self._auto_match(col_names)
+
+    def _populate_combos(self, col_names):
+        combos = [self.col_generation, self.col_t1, self.col_t2, self.col_t3, self.col_d]
+        for cb in combos:
+            current = cb.currentData()
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItem("— 不指定（用内置别名兜底）—", "")
+            for name in col_names:
+                cb.addItem(name, name)
+            idx = cb.findData(current)
+            if idx >= 0:
+                cb.setCurrentIndex(idx)
+            cb.blockSignals(False)
+
+    def _auto_match(self, col_names):
+        name_lower = [n.lower() for n in col_names]
+        field_combo = {
+            'generation': self.col_generation, 't1': self.col_t1,
+            't2': self.col_t2, 't3': self.col_t3, 'd': self.col_d,
+        }
+        for field, aliases in self._COL_ALIASES.items():
+            cb = field_combo[field]
+            if cb.currentData():
+                continue
+            for alias in aliases:
+                try:
+                    pos = name_lower.index(alias.lower())
+                    idx = cb.findData(col_names[pos])
+                    if idx >= 0:
+                        cb.setCurrentIndex(idx)
+                        break
+                except ValueError:
+                    continue
+
+    def _load(self):
+        saved = self.config_manager.get('ftimport_col_map', {})
+        field_combo = {
+            'generation': self.col_generation, 't1': self.col_t1,
+            't2': self.col_t2, 't3': self.col_t3, 'd': self.col_d,
+        }
+        if isinstance(saved, dict):
+            for field, col_name in saved.items():
+                cb = field_combo.get(field)
+                if not cb or not col_name:
+                    continue
+                if cb.findData(col_name) < 0:
+                    cb.addItem(col_name, col_name)
+                cb.setCurrentIndex(cb.findData(col_name))
+    def _save_and_accept(self):
+        col_map = {
+            'generation': self.col_generation.currentData() or '',
+            't1': self.col_t1.currentData() or '',
+            't2': self.col_t2.currentData() or '',
+            't3': self.col_t3.currentData() or '',
+            'd':  self.col_d.currentData() or '',
+        }
+        # 清理旧版“按组合并”遗留配置；该导入方式已不再支持。
+        self.config_manager.config.pop('ftimport_group_match', None)
+        self.config_manager.set('ftimport_col_map', col_map)
+        self.accept()
+
+
 class FamilyTreeImportDialog(QDialog):
     """从 Excel 批量导入族谱成员对话框"""
 
@@ -9045,26 +9271,9 @@ class FamilyTreeImportDialog(QDialog):
         fl.addWidget(btn_preview)
         root.addWidget(file_group)
 
-        # Excel 列映射说明
-        hint = QLabel(
-            "Excel 格式：从上到下连续的acb单元格放置到一行 | A组→t1列  C组→t2列  B组→t3列  D组→d列\n"
-            "支持中文表头：辈分/代数/分类  名称/内容  组/组值\n"
-            "使用组合模板时，通过下方'模板文字对象指定'设置Excel列与模板中文字对象的对应关系"
-        )
+        hint = QLabel("列映射设置请通过「编辑设置 → Excel列映射设置」配置。")
         hint.setStyleSheet("color: #666; font-size: 11px;")
-        hint.setWordWrap(True)
         root.addWidget(hint)
-        
-        # 导入模式选择
-        mode_group = QGroupBox("导入模式")
-        mode_layout = QVBoxLayout(mode_group)
-        self.radio_mode_group = QRadioButton("按组合并模式（连续acbd组合并到一行）")
-        self.radio_mode_direct = QRadioButton("按列直接导入模式（Excel列直接对应t1/t2/t3/d）")
-        # 默认使用按列直接导入模式，避免未主动选择时按旧的组合并规则处理。
-        self.radio_mode_direct.setChecked(True)
-        mode_layout.addWidget(self.radio_mode_group)
-        mode_layout.addWidget(self.radio_mode_direct)
-        root.addWidget(mode_group)
 
         # 模板素材选择
         tmpl_group = QGroupBox("组合素材模板（可选）")
@@ -9306,11 +9515,8 @@ class FamilyTreeImportDialog(QDialog):
             QMessageBox.critical(self, "预览失败", f"读取Excel失败：\n{e}")
             return
         
-        # 判断使用哪种模式处理数据
-        use_direct_mode = self.radio_mode_direct.isChecked()
-        
-        # 处理数据
-        processed_records = self._process_excel_rows(rows, use_direct_mode)
+        # 每一行 Excel 数据对应一条记录。
+        processed_records = self._process_excel_rows_direct(rows)
         
         if not processed_records:
             QMessageBox.information(self, "预览结果", "没有找到有效的数据记录")
@@ -9330,53 +9536,64 @@ class FamilyTreeImportDialog(QDialog):
             if preview_dialog.direct_import:
                 self.accept()  # 关闭导入对话框，触发导入流程
     
-    def _process_excel_rows(self, rows, use_direct_mode=False):
-        """处理Excel行数据
-        
-        Args:
-            rows: Excel行数据
-            use_direct_mode: True=按列直接导入模式，False=按组合并模式
-        """
-        if use_direct_mode:
-            return self._process_excel_rows_direct(rows)
-        else:
-            return self._process_excel_rows_group(rows)
-    
-    def _process_excel_rows_direct(self, rows):
+    def _process_excel_rows_direct(self, rows, col_map=None):
         """按列直接导入模式：辈分列 + t1/t2/t3/d列直接对应"""
+        if col_map is None:
+            saved = self.scene.config_manager.get('ftimport_col_map', {})
+            col_map = saved if isinstance(saved, dict) else {}
+
         def cell_text(value):
             if value is None:
                 return ''
             return str(value).strip()
-        
+
         # 构建表头映射
         header_map = {}
+        normalized_header_map = {}
         if rows:
             header_map.update({
                 cell_text(value).lower(): idx
                 for idx, value in enumerate(rows[0])
                 if cell_text(value)
             })
-        
-        def get_column_index(possible_names):
-            """根据可能的列名获取列索引"""
-            for name in possible_names:
-                idx = header_map.get(name.lower())
+            for name, idx in header_map.items():
+                closing = name.rfind(')')
+                suffix = name[closing + 1:] if closing >= 0 else ''
+                normalized_header_map.setdefault(name[:closing + 1] if suffix.isdigit() else name, idx)
+
+        def find_header_index(name):
+            name = cell_text(name).lower()
+            idx = header_map.get(name)
+            if idx is not None:
+                return idx
+            closing = name.rfind(')')
+            suffix = name[closing + 1:] if closing >= 0 else ''
+            normalized = name[:closing + 1] if suffix.isdigit() else name
+            return normalized_header_map.get(normalized)
+
+        def get_column_index(user_col, fallback_aliases):
+            """用户指定列优先，否则按别名表匹配。"""
+            if user_col:
+                idx = find_header_index(user_col)
+                if idx is not None:
+                    return idx
+            for name in fallback_aliases:
+                idx = find_header_index(name)
                 if idx is not None:
                     return idx
             return None
-        
+
         def row_value(row, col_idx):
             if col_idx is None or col_idx >= len(row):
                 return ''
             return cell_text(row[col_idx])
-        
-        # 识别列索引
-        gen_idx = get_column_index(['辈分', '代数', '分类'])
-        t1_idx = get_column_index(['t1', 't1(a组)', 't1（a组）'])
-        t2_idx = get_column_index(['t2', 't2(c组)', 't2（c组）'])
-        t3_idx = get_column_index(['t3', 't3(b组)', 't3（b组）'])
-        d_idx = get_column_index(['d', 'd(d组)', 'd（d组）'])
+
+        # 识别列索引（用户映射优先，否则用内置别名兜底）
+        gen_idx = get_column_index(col_map.get('generation'), ['辈分', '代数', '分类'])
+        t1_idx  = get_column_index(col_map.get('t1'),         ['t1', 't1(a组)', 't1（a组）'])
+        t2_idx  = get_column_index(col_map.get('t2'),         ['t2', 't2(c组)', 't2（c组）'])
+        t3_idx  = get_column_index(col_map.get('t3'),         ['t3', 't3(b组)', 't3（b组）'])
+        d_idx   = get_column_index(col_map.get('d'),          ['d', 'd(d组)', 'd（d组）'])
         
         processed_records = []
         
@@ -9407,119 +9624,6 @@ class FamilyTreeImportDialog(QDialog):
             processed_records.append(record)
         
         return processed_records
-    
-    def _process_excel_rows_group(self, rows):
-        """按组合并模式：将连续的acb组合到一行"""
-        def cell_text(value):
-            if value is None:
-                return ''
-            return str(value).strip()
-        
-        def normalize_key(value):
-            return cell_text(value).lower()
-        
-        # 构建表头映射
-        header_map = {}
-        if rows:
-            header_map.update({
-                cell_text(value).lower(): idx
-                for idx, value in enumerate(rows[0])
-                if cell_text(value)
-            })
-        
-        def row_value(row, column_name):
-            column_name = str(column_name).strip()
-            if not column_name:
-                return ''
-            # 先查表头
-            header_index = header_map.get(column_name.lower())
-            if header_index is not None:
-                return cell_text(row[header_index]) if header_index < len(row) else ''
-            # 列字母转索引
-            if column_name.isdigit():
-                index = max(0, int(column_name) - 1)
-            else:
-                index = 0
-                for char in column_name.upper():
-                    if not ('A' <= char <= 'Z'):
-                        return ''
-                    index = index * 26 + ord(char) - ord('A') + 1
-                index = index - 1
-            return cell_text(row[index]) if index < len(row) else ''
-        
-        def row_first_value(row, column_names):
-            for column_name in column_names:
-                value = row_value(row, column_name)
-                if value:
-                    return value
-            return ''
-        
-        # 组到字段的映射 a->t1, c->t2, b->t3, d->d
-        group_to_field = {
-            'a': 't1',
-            'c': 't2',
-            'b': 't3',
-            'd': 'd',
-        }
-        
-        processed_records = []
-        current_record = None
-        current_fields = set()
-        
-        def flush_current_record():
-            nonlocal current_record, current_fields
-            if current_record and any((
-                    current_record['t1'],
-                    current_record['t2'],
-                    current_record['t3'],
-                    current_record.get('d'))):
-                processed_records.append(current_record)
-            current_record = None
-            current_fields = set()
-        
-        for row in rows:
-            generation = row_first_value(row, ('A', '辈分', '代数', 'generation'))
-            group_value = normalize_key(row_first_value(row, ('组', '组值')))
-            name_text = row_first_value(row, ('名称', '内容'))
-            
-            # 跳过空行和表头
-            if group_value in ('', '组', '组值'):
-                continue
-            if generation in ('', '辈分', '代数', 'generation'):
-                continue
-            
-            # 获取字段名
-            field = group_to_field.get(group_value)
-            if not field or not name_text:
-                continue
-            
-            # 判断是否需要新建记录
-            if current_record and (
-                    (field in current_fields and field != 'd') or  # 同一字段重复（d组除外）
-                    (generation and current_record['generation'] and generation != current_record['generation'])):  # 辈分变化
-                flush_current_record()
-            
-            # 初始化新记录
-            if current_record is None:
-                current_record = {
-                    'generation': generation,
-                    't1': '',
-                    't2': '',
-                    't3': '',
-                    'd': [],
-                }
-            elif generation and not current_record['generation']:
-                current_record['generation'] = generation
-            
-            # 填入数据
-            if field == 'd':
-                current_record[field].append(name_text)
-            else:
-                current_record[field] = name_text
-            current_fields.add(field)
-        
-        flush_current_record()
-        return processed_records
 
     def _load_settings(self):
         cfg = self.scene.config_manager
@@ -9545,6 +9649,17 @@ class FamilyTreeImportDialog(QDialog):
                 self.combo_template.setCurrentText(template_name)
         self._refresh_template_text_map()
         self._update_unit_suffix()
+
+        # 列映射由 ExcelColumnMapDialog 统一管理；导入时直接读取其保存的配置。
+
+    def _get_col_map(self):
+        """获取独立“Excel 列映射设置”窗口保存的列映射。"""
+        saved = self.scene.config_manager.get('ftimport_col_map', {})
+        col_map = saved.copy() if isinstance(saved, dict) else {}
+        # 空字符串表示不使用该列。
+        for field in ('generation', 't1', 't2', 't3', 'd'):
+            col_map.setdefault(field, '')
+        return col_map
 
     def _save_settings(self):
         cfg = self.scene.config_manager
@@ -9602,24 +9717,7 @@ class FamilyTreeImportDialog(QDialog):
                 't2': 't2',
                 't3': 't3',
             },
-            'columns': {
-                'generation': 'A',
-                't1': 'B',
-                't2': 'C',
-                't3': 'D',
-                'd': 'E',
-                'image': 'E',
-                'name': '内容',
-                'group': '组',
-            },
-            'group_match': {
-                'enabled': not self.radio_mode_direct.isChecked(),  # 按列直接导入时禁用组合并
-                't1': 'a',
-                't2': 'c',
-                't3': 'b',
-                'extra_text': 'd',
-            },
-            'use_direct_mode': self.radio_mode_direct.isChecked(),  # 新增：是否使用按列直接导入模式
+            'columns': self._get_col_map(),
             'template_text_map': {
                 't1': self.combo_template_t1.currentData(),
                 't2': self.combo_template_t2.currentData(),
@@ -9818,6 +9916,13 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.zoom_label = QLabel("缩放: 100%")
         self.status_bar.addPermanentWidget(self.zoom_label)
+        self.license_expiry_label = QLabel()
+        self.license_expiry_label.setStyleSheet("color: #5b6573; font-size: 11px; padding: 0 8px;")
+        self.status_bar.addPermanentWidget(self.license_expiry_label)
+        self._license_status_timer = QTimer(self)
+        self._license_status_timer.timeout.connect(self.update_license_expiry_display)
+        self._license_status_timer.start(60 * 1000)
+        self.update_license_expiry_display()
         
         # 快捷键提示
         hint = QLabel("  放大: Ctrl+=   缩小: Ctrl+-   合适屏幕: Ctrl+0   撤销: Ctrl+Z   保存: Ctrl+S   导出: Ctrl+E   素材库: F9")
@@ -9936,6 +10041,12 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('image_right_edge_snap_enabled', False)
             )
             self.image_right_edge_snap_action.blockSignals(False)
+        if hasattr(self, 'text_right_edge_snap_action'):
+            self.text_right_edge_snap_action.blockSignals(True)
+            self.text_right_edge_snap_action.setChecked(
+                self.scene.config_manager.get('text_right_edge_snap_enabled', False)
+            )
+            self.text_right_edge_snap_action.blockSignals(False)
         if hasattr(self, 'text_preset_combo'):
             self._refresh_text_preset_combo()
         if hasattr(self, 'marquee_mode_combo'):
@@ -11148,6 +11259,14 @@ class MainWindow(QMainWindow):
         self.image_right_edge_snap_action.toggled.connect(self.toggle_image_right_edge_snap)
         edit_menu.addAction(self.image_right_edge_snap_action)
 
+        self.text_right_edge_snap_action = QAction('文字右边缘X自动吸附', self)
+        self.text_right_edge_snap_action.setCheckable(True)
+        self.text_right_edge_snap_action.setChecked(
+            self.scene.config_manager.get('text_right_edge_snap_enabled', False)
+        )
+        self.text_right_edge_snap_action.toggled.connect(self.toggle_text_right_edge_snap)
+        edit_menu.addAction(self.text_right_edge_snap_action)
+
         self.image_top_edge_snap_action = QAction('图片顶部Y自动吸附', self)
         self.image_top_edge_snap_action.setCheckable(True)
         self.image_top_edge_snap_action.setChecked(
@@ -11179,6 +11298,11 @@ class MainWindow(QMainWindow):
         brush_size_action = QAction('设置笔刷默认大小...', self)
         brush_size_action.triggered.connect(self.set_default_brush_size)
         edit_menu.addAction(brush_size_action)
+
+        edit_menu.addSeparator()
+        excel_col_map_action = QAction('Excel 列映射设置...', self)
+        excel_col_map_action.triggered.connect(self.open_excel_column_map_dialog)
+        edit_menu.addAction(excel_col_map_action)
 
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
@@ -11215,6 +11339,16 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage('已开启：图片右边缘X自动吸附（阈值20px）', 3000)
             else:
                 self.status_bar.showMessage('已关闭：图片右边缘X自动吸附', 3000)
+
+    def toggle_text_right_edge_snap(self, enabled):
+        """切换水平移动文字时的右边缘X吸附。"""
+        for document in self._documents:
+            document.scene.config_manager.set('text_right_edge_snap_enabled', enabled)
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：文字右边缘X自动吸附（阈值20px）', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：文字右边缘X自动吸附', 3000)
 
     def toggle_image_top_edge_snap(self, enabled):
         """切换移动图片时的顶部Y吸附。"""
@@ -11322,28 +11456,49 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def update_license_expiry_display(self):
+        """在状态栏右下角显示授权到期时间和剩余天数。"""
+        expiry = license_expiry_datetime(
+            self.scene.config_manager.get("license_expiry_date", "")
+        )
+        if expiry is None:
+            self.license_expiry_label.setText("授权：长期有效")
+            return
+
+        remaining_seconds = QDateTime.currentDateTime().secsTo(expiry)
+        if remaining_seconds <= 0:
+            remaining_text = "已到期"
+        else:
+            # 不足一天按一天显示，避免还有可用时间时显示为 0 天。
+            remaining_days = math.ceil(remaining_seconds / (24 * 60 * 60))
+            remaining_text = f"剩余 {remaining_days} 天"
+        self.license_expiry_label.setText(
+            f"授权到期：{expiry.toString(LICENSE_EXPIRY_DATETIME_FORMAT)}（{remaining_text}）"
+        )
+
     def set_license_expiry_date(self):
-        """设置软件可使用的最后日期。"""
+        """设置软件授权到期时间，精确到分钟。"""
         if not self._verify_license_password():
             return
 
         config = self.scene.config_manager
         current_text = str(config.get("license_expiry_date", "") or "").strip()
-        current_date = QDate.fromString(current_text, "yyyy-MM-dd")
-        if not current_date.isValid():
-            current_date = QDate.currentDate()
+        current_datetime = license_expiry_datetime(current_text)
+        minimum_datetime = next_license_expiry_minute()
+        if current_datetime is None or current_datetime < minimum_datetime:
+            current_datetime = minimum_datetime
 
         dialog = QDialog(self)
         dialog.setWindowTitle("设置软件到期日期")
         layout = QFormLayout(dialog)
         layout.addRow(
-            QLabel("软件在所选日期当天仍可使用，次日启动后将无法进入软件。")
+            QLabel("软件将在设定的时间到期，时间精确到分钟。")
         )
-        expiry_edit = QDateEdit(current_date, dialog)
+        expiry_edit = QDateTimeEdit(current_datetime, dialog)
         expiry_edit.setCalendarPopup(True)
-        expiry_edit.setDisplayFormat("yyyy-MM-dd")
-        expiry_edit.setMinimumDate(QDate.currentDate())
-        layout.addRow("到期日期：", expiry_edit)
+        expiry_edit.setDisplayFormat(LICENSE_EXPIRY_DATETIME_FORMAT)
+        expiry_edit.setMinimumDateTime(minimum_datetime)
+        layout.addRow("到期时间：", expiry_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -11357,12 +11512,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        expiry_text = expiry_edit.date().toString("yyyy-MM-dd")
+        expiry_text = expiry_edit.dateTime().toString(LICENSE_EXPIRY_DATETIME_FORMAT)
         config.set("license_expiry_date", expiry_text)
+        self.update_license_expiry_display()
         QMessageBox.information(
             self,
             "授权设置",
-            f"软件到期日期已设置为：{expiry_text}\n到期日当天仍可使用。"
+            f"软件到期时间已设置为：{expiry_text}"
         )
 
     def change_license_password(self):
@@ -11746,6 +11902,11 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.scene.batch_copy(dlg.get_params())
 
+    def open_excel_column_map_dialog(self):
+        """打开 Excel 列映射设置对话框"""
+        dlg = ExcelColumnMapDialog(self.scene.config_manager, self)
+        dlg.exec()
+
     def open_family_tree_import_dialog(self):
         """从 Excel 批量导入族谱成员"""
         try:
@@ -11821,17 +11982,28 @@ class MainWindow(QMainWindow):
             '5': 4, '五': 4, '五代': 4, '第5代': 4, '第五代': 4,
         }
         header_map = {}
+        normalized_header_map = {}
 
         def cell_text(value):
             if value is None:
                 return ''
             return str(value).strip()
 
+        def find_header_index(column_name):
+            column_name = cell_text(column_name).lower()
+            header_index = header_map.get(column_name)
+            if header_index is not None:
+                return header_index
+            closing = column_name.rfind(')')
+            suffix = column_name[closing + 1:] if closing >= 0 else ''
+            normalized = column_name[:closing + 1] if suffix.isdigit() else column_name
+            return normalized_header_map.get(normalized)
+
         def column_index(column_name):
             column_name = str(column_name).strip()
             if not column_name:
                 return None
-            header_index = header_map.get(column_name.lower())
+            header_index = find_header_index(column_name)
             if header_index is not None:
                 return header_index
             if column_name.isdigit():
@@ -11848,92 +12020,6 @@ class MainWindow(QMainWindow):
             if index is None or index >= len(row):
                 return ''
             return cell_text(row[index])
-
-        def row_first_value(row, column_names):
-            for column_name in column_names:
-                value = row_value(row, column_name)
-                if value:
-                    return value
-            return ''
-
-        def normalize_key(value):
-            return cell_text(value).lower()
-        
-        def _process_excel_rows_for_import(rows, columns, group_match):
-            """处理Excel行数据，将连续的acb组合到一行 - a->t1, c->t2, b->t3, d->extra_texts"""
-            # 新的组到字段映射: a->main_text(t1), c->sub_text1(t2), b->sub_text2(t3), d->extra_texts
-            group_to_field = {
-                'a': 'main_text',
-                'c': 'sub_text1',
-                'b': 'sub_text2',
-                'd': 'extra_texts',
-            }
-            
-            processed_records = []
-            current_record = None
-            current_fields = set()
-            
-            def flush_current_record():
-                nonlocal current_record, current_fields
-                if current_record and any((
-                        current_record['main_text'],
-                        current_record['sub_text1'],
-                        current_record['sub_text2'],
-                        current_record['image_path'],
-                        current_record.get('extra_texts'))):
-                    processed_records.append(current_record)
-                current_record = None
-                current_fields = set()
-            
-            for row in rows:
-                generation = row_first_value(row, (columns['generation'], '辈分', '代数', 'generation'))
-                group_value = normalize_key(row_first_value(row, (columns['group'], '组', '组值')))
-                name_text = row_first_value(row, (columns['name'], '名称', '内容'))
-                image_path = row_value(row, columns['image'])
-                
-                # 跳过空行和表头
-                if group_value in ('', '组', '组值'):
-                    continue
-                if generation in ('', '辈分', '代数', 'generation'):
-                    continue
-                
-                # 获取字段名
-                field = group_to_field.get(group_value)
-                if not field or not name_text:
-                    continue
-                
-                # 判断是否需要新建记录
-                if current_record and (
-                        (field in current_fields and field != 'extra_texts') or  # 同一字段重复（d组除外）
-                        (generation and current_record['generation'] and generation != current_record['generation'])):  # 辈分变化
-                    flush_current_record()
-                
-                # 初始化新记录
-                if current_record is None:
-                    current_record = {
-                        'generation': generation,
-                        'main_text': '',
-                        'sub_text1': '',
-                        'sub_text2': '',
-                        'image_path': '',
-                        'extra_texts': [],
-                    }
-                elif generation and not current_record['generation']:
-                    current_record['generation'] = generation
-                
-                # 填入数据
-                if field == 'extra_texts':
-                    current_record[field].append(name_text)
-                else:
-                    current_record[field] = name_text
-                current_fields.add(field)
-                
-                # 更新图片路径
-                if image_path and not current_record['image_path']:
-                    current_record['image_path'] = image_path
-            
-            flush_current_record()
-            return processed_records
 
         def make_full_text(main_text, sub_text1, sub_text2):
             parts = [text for text in (main_text, sub_text1, sub_text2) if text]
@@ -12187,6 +12273,10 @@ class MainWindow(QMainWindow):
                 for idx, value in enumerate(rows[0])
                 if cell_text(value)
             })
+            for name, idx in header_map.items():
+                closing = name.rfind(')')
+                suffix = name[closing + 1:] if closing >= 0 else ''
+                normalized_header_map.setdefault(name[:closing + 1] if suffix.isdigit() else name, idx)
 
         generation_next_x = [params['start_x']] * len(params['y_coords'])
         generation_layout_spacing = [params['spacing']] * len(params['y_coords'])
@@ -12198,7 +12288,27 @@ class MainWindow(QMainWindow):
         template_asset = params['template_asset']
         base_dir = os.path.dirname(excel_path)
         columns = params['columns']
-        group_match = params['group_match']
+
+        def resolve_direct_column(field, aliases):
+            """优先使用已保存映射；没有映射时按标准表头自动识别。"""
+            configured = columns.get(field, '')
+            if configured and column_index(configured) is not None:
+                return configured
+            for alias in aliases:
+                # 自动识别只按表头精确匹配。不能调用 column_index：例如
+                # 别名 "d" 会被误当作 Excel 的 D 列，而当前表的 D 列正是 t3(B组)，
+                # 从而把 B 组内容又作为 D 组导入一次。
+                if find_header_index(alias) is not None:
+                    return alias
+            return ''
+
+        direct_columns = {
+            'generation': resolve_direct_column('generation', ('辈分', '代数', '分类', 'generation')),
+            't1': resolve_direct_column('t1', ('t1', 't1(a组)', 't1（a组）', '主文字', '正文')),
+            't2': resolve_direct_column('t2', ('t2', 't2(c组)', 't2（c组）', '副文字1')),
+            't3': resolve_direct_column('t3', ('t3', 't3(b组)', 't3（b组）', '副文字2')),
+            'd': resolve_direct_column('d', ('d', 'd(d组)', 'd（d组）', 'd组')),
+        }
         requested_template_name = str(params.get('template_name', '')).strip()
         if requested_template_name and requested_template_name != "— 不使用模板，纯文字 —" and template_asset is None:
             QMessageBox.warning(self, "导入失败", f"没有找到组合素材模板：\n{requested_template_name}")
@@ -12361,7 +12471,7 @@ class MainWindow(QMainWindow):
                 extra_items = add_extra_text_items(extra_texts, base_pos, row_items, ref_text_item=ref_item)
                 keep_items_inside_canvas(extra_items)
 
-        # 优先使用预览编辑后的数据（支持两种模式）
+        # 优先使用预览编辑后的数据。
         if preview_records:
             # 将预览格式转换为导入格式
             for rec in preview_records:
@@ -12374,29 +12484,24 @@ class MainWindow(QMainWindow):
                     'extra_texts': rec.get('d', []),
                 }
                 collect_import_record(record)
-        elif group_match['enabled']:
-            # 使用按组合并模式从Excel读取
-            for record in _process_excel_rows_for_import(rows, columns, group_match):
-                collect_import_record(record)
         else:
-            # 使用按列直接导入模式从Excel读取（需要重新处理获取d列数据）
+            # 未配置列映射时，direct_columns 按标准表头自动识别，
+            # 和“预览数据”保持一致。
             for row in rows:
-                generation = row_value(row, columns['generation'])
+                generation = row_value(row, direct_columns['generation'])
                 if generation in ('辈分', '代数', 'generation'):
                     continue
 
                 # D组是独立文字列，不应并入t3（B组）。每行一个文字框，|分隔多个D组。
-                d_text = row_value(row, columns.get('d', 'E'))
+                d_text = row_value(row, direct_columns['d'])
                 extra_texts = [item.strip() for item in d_text.split('|') if item.strip()]
                 
                 record = {
                     'generation': generation,
-                    'main_text': row_value(row, columns['t1']),
-                    'sub_text1': row_value(row, columns['t2']),
-                    'sub_text2': row_value(row, columns['t3']),
-                    # 直接模式下 E 列是 D 组时，不再把 D 文本误当成图片路径。
-                    'image_path': '' if columns.get('image') == columns.get('d')
-                                  else row_value(row, columns['image']),
+                    'main_text': row_value(row, direct_columns['t1']),
+                    'sub_text1': row_value(row, direct_columns['t2']),
+                    'sub_text2': row_value(row, direct_columns['t3']),
+                    'image_path': '',
                     'extra_texts': extra_texts,
                 }
                 collect_import_record(record)
@@ -14281,6 +14386,15 @@ if __name__ == "__main__":
     app.setOrganizationName("VertiLayout")
 
     license_config = ConfigManager()
+    login_time_valid, login_time_message = validate_and_record_login_time(license_config)
+    if not login_time_valid:
+        QMessageBox.critical(
+            None,
+            "系统时间异常",
+            f"{login_time_message}\n\n请将电脑时间校正到不早于最后登录时间后再启动软件。"
+        )
+        sys.exit(0)
+
     license_valid, license_message = license_is_valid(license_config.config)
     if not license_valid:
         if not recover_expired_license(license_config):
