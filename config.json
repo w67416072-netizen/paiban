@@ -96,7 +96,7 @@
       "t3": 2
     }
   },
-  "ftimport_excel_path": "F:/ocr/ocr/export_history_files/20260912_152939_775291_西游记402_分组格式.xlsx",
+  "ftimport_excel_path": "C:/Users/A/Desktop/b/西游记406_分组格式.xlsx",
   "ftimport_template_name": "组合10",
   "ftimport_unit": "mm",
   "ftimport_start_x": 280.0,
@@ -112,8 +112,8 @@
   "hide_connection_points_when_image_selected": false,
   "show_text_hover_tooltip": false,
   "insert_image_fit_canvas": false,
-  "horizontal_move_only": false,
-  "license_expiry_date": "2027-09-30",
+  "horizontal_move_only": true,
+  "license_expiry_date": "2026-11-30 09:43",
   "image_right_edge_snap_enabled": true,
   "text_format_presets": [
     {
@@ -163,5 +163,22 @@
     2834.645669291339,
     3779.527559055118
   ],
-  "startup_horizontal_guides_unit": "mm"
+  "startup_horizontal_guides_unit": "mm",
+  "ftimport_col_map": {
+    "generation": "辈分",
+    "t1": "t1(A组)",
+    "t2": "t2(C组)",
+    "t3": "t3(B组)",
+    "d": "d(D组)",
+    "name": "",
+    "group": ""
+  },
+  "ftimport_group_match": {
+    "t1": "",
+    "t2": "",
+    "t3": "",
+    "d": ""
+  },
+  "last_login_time": "2026-11-02 12:23:15",
+  "text_right_edge_snap_enabled": true
 }

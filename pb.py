@@ -5846,16 +5846,27 @@ class GuideItem(QGraphicsItem):
 
 
 class NavigatorWidget(QWidget):
-    """导航器：显示画布全景缩略图，支持点击跳转和拖动视口框"""
+    """CorelDRAW 风格导航器：紧凑尺寸、含工作台外围视野、小巧十字准星视口框、支持滚轮缩放与右键拉框放大"""
 
-    NAV_W = 220
-    NAV_H = 160
+    NAV_W = 168
+    NAV_H = 122
+    PASTEBOARD_MARGIN_RATIO = 0.55  # 画布四周扩充比例，使视口框保持小巧且可拖到画布外
 
-    def __init__(self, view, scene, parent=None):
+    def __init__(self, view, scene, parent=None, is_popup=False):
         super().__init__(parent)
         self.view = view
         self.scene = scene
-        self.setFixedSize(self.NAV_W, self.NAV_H)
+        self._is_popup = is_popup
+        if is_popup:
+            self.setWindowFlags(
+                Qt.WindowType.Popup
+                | Qt.WindowType.FramelessWindowHint
+                | Qt.WindowType.NoDropShadowWindowHint
+            )
+            self.setFixedSize(self.NAV_W, self.NAV_H)
+        else:
+            self.setMinimumSize(140, 100)
+            self.resize(self.NAV_W, self.NAV_H)
         self.setWindowTitle("导航器")
 
         self._thumb = QPixmap()
@@ -5863,30 +5874,44 @@ class NavigatorWidget(QWidget):
         self._scene_rect = QRectF()
         self._dragging = False
         self._drag_offset = QPointF()
+        self._marquee_zooming = False
+        self._marquee_start = QPointF()
+        self._marquee_current = QPointF()
+        self._hold_drag_mode = False
         self._dirty = True
 
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.setInterval(400)
+        self._refresh_timer.setInterval(350)
         self._refresh_timer.timeout.connect(self._do_refresh)
         self._refresh_timer.start()
 
-        self.view.transformChanged.connect(self.update)
-        self.view.horizontalScrollBar().valueChanged.connect(self.update)
-        self.view.verticalScrollBar().valueChanged.connect(self.update)
-        self.scene.changed.connect(self._mark_dirty)
-
+        self._connect_view_scene()
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        if self._is_popup and QApplication.instance():
+            # Qt 的 Popup 在部分 Windows 停靠/子窗口组合下不会稳定收到框外点击；
+            # 显式监听应用级鼠标事件，确保点击黑框外能退出临时导航器。
+            QApplication.instance().installEventFilter(self)
+
+    def _connect_view_scene(self):
+        if self.view:
+            self.view.transformChanged.connect(self.update)
+            self.view.horizontalScrollBar().valueChanged.connect(self.update)
+            self.view.verticalScrollBar().valueChanged.connect(self.update)
+        if self.scene:
+            self.scene.changed.connect(self._mark_dirty)
 
     def set_document(self, view, scene):
         """切换导航器所跟踪的文档。"""
         if self.view is view and self.scene is scene:
             return
         try:
-            self.view.transformChanged.disconnect(self.update)
-            self.view.horizontalScrollBar().valueChanged.disconnect(self.update)
-            self.view.verticalScrollBar().valueChanged.disconnect(self.update)
-            self.scene.changed.disconnect(self._mark_dirty)
+            if self.view:
+                self.view.transformChanged.disconnect(self.update)
+                self.view.horizontalScrollBar().valueChanged.disconnect(self.update)
+                self.view.verticalScrollBar().valueChanged.disconnect(self.update)
+            if self.scene:
+                self.scene.changed.disconnect(self._mark_dirty)
         except (RuntimeError, TypeError):
             pass
         self.view = view
@@ -5894,108 +5919,337 @@ class NavigatorWidget(QWidget):
         self._thumb = QPixmap()
         self._scene_rect = QRectF()
         self._dirty = True
-        self.view.transformChanged.connect(self.update)
-        self.view.horizontalScrollBar().valueChanged.connect(self.update)
-        self.view.verticalScrollBar().valueChanged.connect(self.update)
-        self.scene.changed.connect(self._mark_dirty)
+        self._connect_view_scene()
         self.update()
 
     def _mark_dirty(self):
         self._dirty = True
 
     def _do_refresh(self):
-        if not self._dirty:
+        if not self._dirty or not self.isVisible():
             return
         self._dirty = False
         self._render_thumb()
         self.update()
 
+    def _compute_world_rect(self):
+        """计算包含画布白纸 + 外围工作台余量 + 画布外元素的全景范围，让视口框始终小巧易拖。"""
+        canvas_rect = self.scene.sceneRect()
+        if canvas_rect.isEmpty():
+            return QRectF()
+        pad_x = canvas_rect.width() * self.PASTEBOARD_MARGIN_RATIO
+        pad_y = canvas_rect.height() * self.PASTEBOARD_MARGIN_RATIO
+        world = canvas_rect.adjusted(-pad_x, -pad_y, pad_x, pad_y)
+        items_rect = self.scene.itemsBoundingRect()
+        if not items_rect.isEmpty():
+            world = world.united(items_rect.adjusted(-120, -120, 120, 120))
+        return world
+
     def _render_thumb(self):
-        sr = self.scene.sceneRect()
+        if not self.scene:
+            return
+        sr = self._compute_world_rect()
         if sr.isEmpty():
             return
         self._scene_rect = sr
-        sx = self.NAV_W / sr.width()
-        sy = self.NAV_H / sr.height()
+        avail_w = max(40, self.width() - 8)
+        avail_h = max(40, self.height() - 8)
+        sx = avail_w / sr.width()
+        sy = avail_h / sr.height()
         self._scale = min(sx, sy)
-        tw = max(1, int(sr.width()  * self._scale))
+        tw = max(1, int(sr.width() * self._scale))
         th = max(1, int(sr.height() * self._scale))
         self._thumb = QPixmap(tw, th)
-        self._thumb.fill(Qt.GlobalColor.white)
+        # CDR 风格：外围工作台为浅灰底，中间画布为白纸
+        self._thumb.fill(QColor(218, 220, 224))
         painter = QPainter(self._thumb)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         # 用标志位通知 drawBackground 跳过网格/辅助线，避免修改场景状态
         self.scene._rendering_thumb = True
         self.scene.render(painter, QRectF(0, 0, tw, th), sr)
         self.scene._rendering_thumb = False
+
+        # 绘制清晰的白纸页面外框与投影感，方便区分页面与画布外区域
+        canvas_rect = self.scene.sceneRect()
+        page_x = (canvas_rect.left() - sr.left()) * self._scale
+        page_y = (canvas_rect.top() - sr.top()) * self._scale
+        page_w = canvas_rect.width() * self._scale
+        page_h = canvas_rect.height() * self._scale
+        painter.setPen(QPen(QColor(110, 115, 122), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRectF(page_x, page_y, page_w, page_h))
         painter.end()
 
     def _thumb_offset(self):
-        return QPoint((self.NAV_W - self._thumb.width())  // 2,
-                      (self.NAV_H - self._thumb.height()) // 2)
+        return QPoint((self.width() - self._thumb.width()) // 2,
+                      (self.height() - self._thumb.height()) // 2)
 
     def _viewport_rect_in_nav(self, ox, oy):
-        if self._scale <= 0 or self._scene_rect.isEmpty():
+        if self._scale <= 0 or self._scene_rect.isEmpty() or not self.view:
             return QRectF()
         vp = self.view.viewport().rect()
         tl = self.view.mapToScene(vp.topLeft())
         br = self.view.mapToScene(vp.bottomRight())
         sr = self._scene_rect
         x = ox + (tl.x() - sr.left()) * self._scale
-        y = oy + (tl.y() - sr.top())  * self._scale
+        y = oy + (tl.y() - sr.top()) * self._scale
         w = (br.x() - tl.x()) * self._scale
         h = (br.y() - tl.y()) * self._scale
-        return QRectF(x, y, w, h).normalized()
+        rect = QRectF(x, y, w, h).normalized()
+        # 最小尺寸保护：放大倍数极高时依然保留 10x10 的精致小方框，方便看清和拖拽
+        min_box = 10.0
+        cx, cy = rect.center().x(), rect.center().y()
+        if rect.width() < min_box:
+            rect.setLeft(cx - min_box / 2)
+            rect.setWidth(min_box)
+        if rect.height() < min_box:
+            rect.setTop(cy - min_box / 2)
+            rect.setHeight(min_box)
+        return rect
 
     def _nav_to_scene(self, nav_pos):
         if self._scale <= 0 or self._scene_rect.isEmpty():
             return QPointF()
         off = self._thumb_offset()
         sx = self._scene_rect.left() + (nav_pos.x() - off.x()) / self._scale
-        sy = self._scene_rect.top()  + (nav_pos.y() - off.y()) / self._scale
+        sy = self._scene_rect.top() + (nav_pos.y() - off.y()) / self._scale
         return QPointF(sx, sy)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._dirty = True
+        self._render_thumb()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.force_refresh()
+
+    def eventFilter(self, watched, event):
+        """临时导航器显示时，点击其黑色框外部即关闭。"""
+        if (self._is_popup
+                and self.isVisible()
+                and event.type() == QEvent.Type.MouseButtonPress
+                and isinstance(event, QMouseEvent)):
+            global_pos = event.globalPosition().toPoint()
+            if not self.frameGeometry().contains(global_pos):
+                self.hide()
+        return super().eventFilter(watched, event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(40, 40, 44))
-        if self._thumb.isNull():
+        painter.fillRect(self.rect(), QColor(52, 54, 58))
+        if self._thumb.isNull() or self._dirty:
+            self._dirty = False
             self._render_thumb()
         if not self._thumb.isNull():
             off = self._thumb_offset()
             painter.drawPixmap(off.x(), off.y(), self._thumb)
             vp_rect = self._viewport_rect_in_nav(off.x(), off.y())
             if vp_rect.isValid():
-                painter.setPen(QPen(QColor(0, 180, 255), 2))
-                painter.setBrush(QBrush(QColor(0, 180, 255, 40)))
+                painter.save()
+                painter.setClipRect(self.rect().adjusted(2, 2, -2, -2))
+                # CDR 风格精致细线小方框 + 中心十字准星
+                frame_color = QColor(235, 45, 45) if self._dragging else QColor(0, 120, 215)
+                painter.setPen(QPen(QColor(255, 255, 255, 190), 2.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(vp_rect)
-        painter.setPen(QPen(QColor(80, 80, 85), 1))
+                painter.setPen(QPen(frame_color, 1.5))
+                painter.setBrush(QBrush(QColor(frame_color.red(), frame_color.green(), frame_color.blue(), 22)))
+                painter.drawRect(vp_rect)
+
+                # 中心十字准星 (+)
+                c = vp_rect.center()
+                arm = min(4.0, max(2.5, min(vp_rect.width(), vp_rect.height()) * 0.25))
+                painter.drawLine(QPointF(c.x() - arm, c.y()), QPointF(c.x() + arm, c.y()))
+                painter.drawLine(QPointF(c.x(), c.y() - arm), QPointF(c.x(), c.y() + arm))
+                painter.restore()
+
+            # 右键拉框放大预览框
+            if self._marquee_zooming:
+                zoom_rect = QRectF(self._marquee_start, self._marquee_current).normalized()
+                painter.setPen(QPen(QColor(0, 190, 90), 1.5, Qt.PenStyle.DashLine))
+                painter.setBrush(QBrush(QColor(0, 190, 90, 35)))
+                painter.drawRect(zoom_rect)
+
+        painter.setPen(QPen(QColor(95, 98, 105), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+    def begin_hold_drag(self, global_pos):
+        """从右下角小图标按住呼出时，直接进入实时拖拽漫游模式。"""
+        self.force_refresh()
+        self._hold_drag_mode = True
+        self._dragging = True
+        self._drag_offset = QPointF(0, 0)
+        local_pos = self.mapFromGlobal(global_pos)
+        if self.rect().contains(local_pos):
+            self.view.centerOn(self._nav_to_scene(QPointF(local_pos)))
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             off = self._thumb_offset()
             vp_rect = self._viewport_rect_in_nav(off.x(), off.y())
-            if vp_rect.contains(QPointF(event.pos())):
+            pos_f = QPointF(event.pos())
+            if vp_rect.adjusted(-4, -4, 4, 4).contains(pos_f):
                 self._dragging = True
-                self._drag_offset = QPointF(event.pos()) - vp_rect.center()
+                self._drag_offset = pos_f - vp_rect.center()
             else:
-                self.view.centerOn(self._nav_to_scene(event.pos()))
+                self._dragging = True
+                self._drag_offset = QPointF(0, 0)
+                self.view.centerOn(self._nav_to_scene(pos_f))
             self.update()
+            event.accept()
+        elif event.button() == Qt.MouseButton.RightButton:
+            self._marquee_zooming = True
+            self._marquee_start = QPointF(event.pos())
+            self._marquee_current = QPointF(event.pos())
+            self.update()
+            event.accept()
 
     def mouseMoveEvent(self, event):
         if self._dragging:
             target = QPointF(event.pos()) - self._drag_offset
             self.view.centerOn(self._nav_to_scene(target))
             self.update()
+            event.accept()
+        elif self._marquee_zooming:
+            self._marquee_current = QPointF(event.pos())
+            self.update()
+            event.accept()
 
     def mouseReleaseEvent(self, event):
-        self._dragging = False
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_hold = self._hold_drag_mode
+            self._dragging = False
+            self._hold_drag_mode = False
+            self.update()
+            if self._is_popup and was_hold:
+                self.hide()
+            event.accept()
+        elif event.button() == Qt.MouseButton.RightButton and self._marquee_zooming:
+            self._marquee_zooming = False
+            zoom_rect = QRectF(self._marquee_start, self._marquee_current).normalized()
+            if zoom_rect.width() > 6 and zoom_rect.height() > 6:
+                tl_scene = self._nav_to_scene(zoom_rect.topLeft())
+                br_scene = self._nav_to_scene(zoom_rect.bottomRight())
+                target_scene_rect = QRectF(tl_scene, br_scene).normalized()
+                if not target_scene_rect.isEmpty():
+                    self.view.fitInView(target_scene_rect, Qt.AspectRatioMode.KeepAspectRatio)
+                    self.view.transformChanged.emit()
+            else:
+                # 右键单击快速恢复合适屏幕
+                self.view.fit_in_view()
+            self.update()
+            event.accept()
+
+    def wheelEvent(self, event):
+        """在导航器小方框上滚动滚轮直接缩放主画布"""
+        if not self.view:
+            return
+        scale = 1.15 if event.angleDelta().y() > 0 else (1.0 / 1.15)
+        self.view.scale(scale, scale)
+        self.view.transformChanged.emit()
+        self.update()
+        event.accept()
+
+    def keyPressEvent(self, event):
+        if self._is_popup and event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_N):
+            self.hide()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def force_refresh(self):
         self._dirty = True
-        self._do_refresh()
+        self._render_thumb()
+        self.update()
+
+
+class CdrNavigatorButton(QToolButton):
+    """CorelDRAW 风格右下角小方框导航触发器：支持按住直接漫游或点击弹出小导航框"""
+
+    def __init__(self, layout_view):
+        super().__init__(layout_view)
+        self.layout_view = layout_view
+        self.setFixedSize(20, 20)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("导航器 (快捷键 N)\n• 按住左键拖拽：即时漫游全景\n• 单击：弹出导航小方框（滚轮缩放 / 右键拉框放大）")
+        self.setStyleSheet("""
+            QToolButton {
+                background: #f3f4f6;
+                border: 1px solid #9ca3af;
+                border-radius: 2px;
+                padding: 0px;
+                margin: 0px;
+                min-width: 0px;
+                min-height: 0px;
+            }
+            QToolButton:hover {
+                background: #dbeafe;
+                border-color: #0969da;
+            }
+            QToolButton:pressed {
+                background: #bfdbfe;
+            }
+        """)
+        self._press_global_pos = QPoint()
+        self._dragged = False
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        c = QPointF(self.width() / 2.0, self.height() / 2.0)
+        # 绘制 CDR 风格的小方框 + 四向十字箭头图标
+        painter.setPen(QPen(QColor(36, 41, 47), 1.2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRectF(c.x() - 4.5, c.y() - 4.5, 9.0, 9.0))
+        painter.setPen(QPen(QColor(9, 105, 218), 1.3))
+        painter.drawLine(QPointF(c.x() - 7, c.y()), QPointF(c.x() + 7, c.y()))
+        painter.drawLine(QPointF(c.x(), c.y() - 7), QPointF(c.x(), c.y() + 7))
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_global_pos = event.globalPosition().toPoint()
+            self._dragged = False
+            self.layout_view.show_cdr_navigator_popup(
+                anchor_global_pos=self._press_global_pos,
+                hold_mode=False
+            )
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            gpos = event.globalPosition().toPoint()
+            popup = self.layout_view._cdr_nav_popup
+            if popup and popup.isVisible():
+                if not self._dragged and (gpos - self._press_global_pos).manhattanLength() > 3:
+                    self._dragged = True
+                    popup.begin_hold_drag(gpos)
+                if self._dragged:
+                    local_pt = popup.mapFromGlobal(gpos)
+                    popup.view.centerOn(popup._nav_to_scene(QPointF(local_pt)))
+                    popup.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            popup = self.layout_view._cdr_nav_popup
+            if self._dragged and popup and popup.isVisible():
+                popup._dragging = False
+                popup._hold_drag_mode = False
+                popup.hide()
+            self._dragged = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class LayoutScene(QGraphicsScene):
@@ -7976,6 +8230,10 @@ class LayoutView(QGraphicsView):
         # 为标尺留出边距
         self._hovered_connection_point = None
         self.setViewportMargins(self.RULER_SIZE, self.RULER_SIZE, 0, 0)
+        # CorelDRAW 风格右下角小方框导航按钮与悬浮小导航器
+        self._cdr_nav_popup = None
+        self._cdr_nav_btn = CdrNavigatorButton(self)
+        self._position_cdr_nav_btn()
 
     def set_main_window(self, mw):
         self._main_window = mw
@@ -8596,8 +8854,74 @@ class LayoutView(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_cdr_nav_btn()
+
+    def _position_cdr_nav_btn(self):
+        """将 CDR 导航小方框按钮固定在画布右下角（滚动条交界处或视口右下角）。"""
+        if not hasattr(self, '_cdr_nav_btn') or self._cdr_nav_btn is None:
+            return
+        btn_w, btn_h = self._cdr_nav_btn.width(), self._cdr_nav_btn.height()
+        x = max(self.RULER_SIZE, self.width() - btn_w - 2)
+        y = max(self.RULER_SIZE, self.height() - btn_h - 2)
+        self._cdr_nav_btn.move(x, y)
+        self._cdr_nav_btn.raise_()
+
+    def show_cdr_navigator_popup(self, anchor_global_pos=None, hold_mode=False):
+        """弹出 CorelDRAW 风格的紧凑导航小方框。"""
+        if not self.scene():
+            return
+        if self._cdr_nav_popup is None:
+            self._cdr_nav_popup = NavigatorWidget(self, self.scene(), None, is_popup=True)
+        else:
+            self._cdr_nav_popup.set_document(self, self.scene())
+
+        self._cdr_nav_popup.force_refresh()
+        pop_w, pop_h = self._cdr_nav_popup.width(), self._cdr_nav_popup.height()
+
+        if anchor_global_pos is None:
+            anchor_global_pos = QCursor.pos()
+
+        # 使弹出框中心尽量对齐当前视口框中心，方便鼠标直接按住小方框拖动
+        off = self._cdr_nav_popup._thumb_offset()
+        vp_rect = self._cdr_nav_popup._viewport_rect_in_nav(off.x(), off.y())
+        if vp_rect.isValid():
+            target_x = int(anchor_global_pos.x() - vp_rect.center().x())
+            target_y = int(anchor_global_pos.y() - vp_rect.center().y())
+        else:
+            target_x = anchor_global_pos.x() - pop_w + 10
+            target_y = anchor_global_pos.y() - pop_h + 10
+
+        screen = QApplication.screenAt(anchor_global_pos) or QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            target_x = max(avail.left() + 4, min(target_x, avail.right() - pop_w - 4))
+            target_y = max(avail.top() + 4, min(target_y, avail.bottom() - pop_h - 4))
+
+        self._cdr_nav_popup.move(target_x, target_y)
+        self._cdr_nav_popup.show()
+        self._cdr_nav_popup.raise_()
+        if hold_mode:
+            self._cdr_nav_popup.begin_hold_drag(anchor_global_pos)
+
     def keyPressEvent(self, event):
-        """按住 F5 时，独立连接点临时进入移动模式。"""
+        """按 N 键弹出 CorelDRAW 风格小方框导航器；按住 F5 时独立连接点临时进入移动模式。"""
+        if (event.key() == Qt.Key.Key_N
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and self.scene()):
+            # 若正在编辑文字则不拦截 N 键
+            editing_text = any(
+                isinstance(it, VTextItem) and getattr(it, 'is_editing', False)
+                for it in self.scene().items()
+            )
+            if not editing_text:
+                if self._cdr_nav_popup and self._cdr_nav_popup.isVisible():
+                    self._cdr_nav_popup.hide()
+                else:
+                    self.show_cdr_navigator_popup(QCursor.pos(), hold_mode=False)
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_F5 and self.scene():
             scene = self.scene()
             if (getattr(scene, 'free_connection_point_mode', 'connect') == 'connect'
@@ -9857,9 +10181,9 @@ class MainWindow(QMainWindow):
         
         # 创建停靠面板
         # 右侧：层级 & 属性面板
-        sidebar = QDockWidget("层级 & 属性", self)
-        sidebar.setObjectName("dock_hierarchy")
-        sidebar.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.sidebar_dock = QDockWidget("层级 & 属性", self)
+        self.sidebar_dock.setObjectName("dock_hierarchy")
+        self.sidebar_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self._eye_visible_icon = self._make_eye_icon(True)
         self._eye_hidden_icon = self._make_eye_icon(False)
         self.tree_widget = QTreeWidget()
@@ -9874,8 +10198,8 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs.addTab(self.tree_widget, "层级")
         self.property_panel = self.create_property_panel()
         self.sidebar_tabs.addTab(self.property_panel, "属性")
-        sidebar.setWidget(self.sidebar_tabs)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, sidebar)
+        self.sidebar_dock.setWidget(self.sidebar_tabs)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar_dock)
         self._tree_item_counter = 0  # 全局编号计数器
         self._tree_updating = False   # 防止 itemChanged 递归触发
         self._tree_nodes_by_item = {}
@@ -9931,18 +10255,29 @@ class MainWindow(QMainWindow):
         self.status_bar.addWidget(hint)
         
         # 导航器停靠面板
-        nav_dock = QDockWidget("导航器", self)
-        nav_dock.setObjectName("dock_navigator")
-        nav_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
-                                  Qt.DockWidgetArea.RightDockWidgetArea |
-                                  Qt.DockWidgetArea.BottomDockWidgetArea)
-        nav_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
-                              QDockWidget.DockWidgetFeature.DockWidgetClosable |
-                              QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.navigator_dock = QDockWidget("导航器", self)
+        self.navigator_dock.setObjectName("dock_navigator")
+        self.navigator_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
+                                            Qt.DockWidgetArea.RightDockWidgetArea |
+                                            Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.navigator_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                                        QDockWidget.DockWidgetFeature.DockWidgetClosable |
+                                        QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.navigator = NavigatorWidget(self.view, self.scene)
-        nav_dock.setWidget(self.navigator)
-        nav_dock.setMaximumHeight(self.navigator.NAV_H + 30)  # 改为最大高度，不固定
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, nav_dock)
+        self.navigator_dock.setWidget(self.navigator)
+        self.navigator_dock.setMinimumHeight(self.navigator.NAV_H + 26)
+        self.navigator_dock.setMaximumHeight(self.navigator.NAV_H + 60)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
+        # 右侧面板在上、导航器在下，形成类似 CDR 的右下角导航区域。
+        self.splitDockWidget(
+            self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
+        )
+        self.resizeDocks(
+            [self.sidebar_dock, self.navigator_dock],
+            [600, self.navigator.NAV_H + 30],
+            Qt.Orientation.Vertical
+        )
+        self.navigator_dock.visibilityChanged.connect(self._sync_navigator_action)
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_ui)
@@ -9951,6 +10286,7 @@ class MainWindow(QMainWindow):
         print("Vertical Layout Engine Started...")
         # 恢复上次窗口大小和停靠面板布局
         self._has_restored_window_geometry = self._restore_window_state()
+        self._migrate_navigator_to_bottom_right()
         self._update_document_tab_title(self._documents[0])
         
         # 延迟触发加号按钮显示
@@ -10256,6 +10592,34 @@ class MainWindow(QMainWindow):
         if s.contains("tree_col2_width"):
             self.tree_widget.setColumnWidth(2, int(s.value("tree_col2_width")))
         return restored_geometry
+
+    def _migrate_navigator_to_bottom_right(self):
+        """将已有用户的导航器布局迁移到右侧底部一次。"""
+        settings = QSettings("VertiLayout", "VertiLayoutPro")
+        try:
+            layout_version = int(settings.value("navigator_dock_layout_version", 0))
+        except (TypeError, ValueError):
+            layout_version = 0
+        if layout_version >= 2:
+            return
+
+        def place_navigator():
+            was_visible = self.navigator_dock.isVisible()
+            self.navigator_dock.setFloating(False)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
+            self.splitDockWidget(
+                self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
+            )
+            self.resizeDocks(
+                [self.sidebar_dock, self.navigator_dock],
+                [600, self.navigator.NAV_H + 30],
+                Qt.Orientation.Vertical
+            )
+            self.navigator_dock.setVisible(was_visible)
+            settings.setValue("navigator_dock_layout_version", 2)
+
+        # 等窗口状态恢复完成后再调整，避免旧的停靠布局覆盖新位置。
+        QTimer.singleShot(0, place_navigator)
 
     def closeEvent(self, event):
         """窗口关闭时提示保存，停止定时器，保存窗口状态"""
@@ -11065,6 +11429,13 @@ class MainWindow(QMainWindow):
         canvas_size_action = QAction('设置画布大小...', self)
         canvas_size_action.triggered.connect(self.set_canvas_size)
         view_menu.addAction(canvas_size_action)
+
+        # 导航器稍后创建；此菜单动作与其显示状态保持同步。
+        self.toggle_navigator_action = QAction('显示导航器', self)
+        self.toggle_navigator_action.setCheckable(True)
+        self.toggle_navigator_action.setChecked(True)
+        self.toggle_navigator_action.toggled.connect(self.set_navigator_visible)
+        view_menu.addAction(self.toggle_navigator_action)
 
         view_menu.addSeparator()
 
@@ -11883,6 +12254,18 @@ class MainWindow(QMainWindow):
             self.asset_library_dock.show()
             # 刷新素材库内容
             self.asset_library_dock.refresh_assets()
+
+    def set_navigator_visible(self, visible):
+        """响应“视图 → 显示导航器”菜单。"""
+        if hasattr(self, 'navigator_dock'):
+            self.navigator_dock.setVisible(visible)
+
+    def _sync_navigator_action(self, visible):
+        """将导航器标题栏关闭/显示操作同步到菜单勾选状态。"""
+        if hasattr(self, 'toggle_navigator_action'):
+            self.toggle_navigator_action.blockSignals(True)
+            self.toggle_navigator_action.setChecked(visible)
+            self.toggle_navigator_action.blockSignals(False)
     
     def save_selected_as_group(self):
         self.scene.save_group_as_asset()
