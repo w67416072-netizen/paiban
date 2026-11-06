@@ -3725,7 +3725,13 @@ class BaseElement(QGraphicsItem):
         menu.addSeparator()
         
         # 对齐功能
-        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
+        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)] if self.scene() else []
+        selected_images_in_sel = [item for item in selected_items if isinstance(item, VImageItem)]
+        batch_img_opacity_action = None
+        if selected_images_in_sel:
+            cur_op = int(selected_images_in_sel[0].image_opacity * 100)
+            batch_img_opacity_action = menu.addAction(f"设置选中图片透明度 ({len(selected_images_in_sel)} 张, 当前 {cur_op}%)")
+            menu.addSeparator()
         if len(selected_items) >= 2:
             align_menu = menu.addMenu("对齐 (Align)")
             align_top_action = align_menu.addAction("顶部对齐")
@@ -4442,6 +4448,9 @@ class VTextItem(BaseElement):
         
         action = menu.exec(global_pos)
         
+        if batch_img_opacity_action and action == batch_img_opacity_action:
+            selected_images_in_sel[0]._change_opacity()
+            return
         if update_group_asset_action and action == update_group_asset_action:
             main_window.finish_edit_group_asset()
             return
@@ -5399,8 +5408,13 @@ class VImageItem(BaseElement):
             menu.addAction("删除连接点（永久）").triggered.connect(self.delete_connection_point)
             menu.addSeparator()
 
-        # 图片透明度
-        menu.addAction(f"设置透明度 (当前 {int(self.image_opacity*100)}%)").triggered.connect(self._change_opacity)
+        # 图片透明度（若选中了多张图片，支持一键批量设置所有选中图片的透明度）
+        sel_imgs = [i for i in self.scene().selectedItems() if isinstance(i, VImageItem)] if self.scene() else []
+        if self in sel_imgs and len(sel_imgs) > 1:
+            opacity_lbl = f"设置选中图片透明度 ({len(sel_imgs)} 张, 当前 {int(self.image_opacity*100)}%)"
+        else:
+            opacity_lbl = f"设置透明度 (当前 {int(self.image_opacity*100)}%)"
+        menu.addAction(opacity_lbl).triggered.connect(self._change_opacity)
         menu.addSeparator()
 
         menu.addAction("复制").triggered.connect(lambda: self.scene().copy_item(self) if self.scene() else None)
@@ -5443,13 +5457,21 @@ class VImageItem(BaseElement):
         menu.exec(global_pos)
 
     def _change_opacity(self):
-        """弹出对话框设置透明度"""
+        """弹出对话框设置透明度（当选中多张图片时，批量应用到所有选中图片）"""
+        sc = self.scene()
+        sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
+        target_imgs = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
+        title = f"批量设置图片透明度 (共 {len(target_imgs)} 张)" if len(target_imgs) > 1 else "设置透明度"
         val, ok = QInputDialog.getInt(
-            None, "设置透明度", "透明度 (0-100)%:",
+            None, title, "透明度 (0-100)%:",
             int(self.image_opacity * 100), 0, 100
         )
         if ok:
-            self.set_opacity(val / 100.0)
+            new_op = val / 100.0
+            for img in target_imgs:
+                img.set_opacity(new_op)
+            if sc:
+                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度设为 {val}%", 3000)
 
     def _show_context_menu(self, global_pos):
         self._build_image_context_menu(global_pos)
