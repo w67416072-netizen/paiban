@@ -404,7 +404,7 @@ class AssetManager:
                         'type': 'VImageItem',
                         'path': asset_path,
                         'original_path': original_path,
-                        'width': item.target_width,
+                        'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
                         'connection_point_visible': connection_point_visible,
                         'connection_point_deleted': connection_point_deleted,
                         'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -1433,7 +1433,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 if image_path and not os.path.isabs(image_path):
                     image_path = os.path.join(APP_DIR, image_path)
                 if image_path and os.path.exists(image_path):
-                    new_item = VImageItem(image_path, item_data['width'])
+                    new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
             if new_item:
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
@@ -1803,7 +1803,7 @@ class AssetLibraryWidget(QWidget):
                         
                 elif item_data['type'] == 'VImageItem':
                     if os.path.exists(item_data['path']):
-                        new_item = VImageItem(item_data['path'], item_data['width'])
+                        new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
                 
                 if new_item:
                     # 计算相对于原始组合的偏移量，然后应用到新的基准位置
@@ -1942,6 +1942,7 @@ class ProjectData:
             elif isinstance(item, VImageItem):
                 data['path'] = item.file_path
                 data['width'] = item.target_width
+                data['height'] = getattr(item, 'target_height', item.boundingRect().height())
                 data['opacity'] = item.image_opacity
                 data['locked'] = item.locked
                 data['visible'] = item.isVisible()
@@ -2132,7 +2133,10 @@ class ProjectData:
                 item.layer_eye_color = d.get('layer_eye_color')
                 item.rebuild()
             elif d['type'] == 'VImageItem':
-                item = VImageItem(d['path'], d['width'])
+                saved_h = d.get('height', 0)
+                if not saved_h and d.get('locked', False) and abs(float(d.get('width', 0)) - scene.sceneRect().width()) < 2:
+                    saved_h = scene.sceneRect().height()
+                item = VImageItem(d['path'], d['width'], saved_h)
                 if 'opacity' in d:
                     item.set_opacity(d['opacity'])
                 if d.get('locked', False):
@@ -2332,7 +2336,8 @@ class DeleteItemCommand(UndoCommand):
         elif self.item_data['type'] == 'VImageItem':
             new_item = VImageItem(
                 self.item_data['path'],
-                self.item_data['width']
+                self.item_data['width'],
+                self.item_data.get('height', 0)
             )
         
         # 设置位置
@@ -2406,7 +2411,7 @@ class DeleteItemCommand(UndoCommand):
             self.item_data = {
                 'type': 'VImageItem',
                 'path': self.item.file_path,
-                'width': self.item.target_width,
+                'width': self.item.target_width, 'height': getattr(self.item, 'target_height', self.item.boundingRect().height()),
                 'pos': (self.item.x(), self.item.y()),
                 'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
@@ -5178,7 +5183,8 @@ class VImageItem(BaseElement):
             self.p_item.setParentItem(self)
             self._rect = QRectF(0, 0, target_width, target_h)
         else:
-            self._rect = QRectF(0, 0, target_width, target_width)
+            self._rect = QRectF(0, 0, target_width, target_height if (target_height and target_height > 0) else target_width)
+        self.target_height = self._rect.height()
 
         self.create_connection_point()
         self._create_handles()
@@ -5300,6 +5306,7 @@ class VImageItem(BaseElement):
         self.prepareGeometryChange()
         self._rect = QRectF(0, 0, w, h)
         self.target_width = w
+        self.target_height = h
         self._update_handles()
 
         if self.connection_point:
@@ -6540,7 +6547,7 @@ class LayoutScene(QGraphicsScene):
                     self._resize_snapshot[item] = {
                         'rect': QRectF(item._rect),
                         'pos': item.scenePos(),
-                        'width': item.target_width,
+                        'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
                     }
                     item._show_handles(True)
         else:
@@ -7096,7 +7103,7 @@ class LayoutScene(QGraphicsScene):
                 elif clone.connection_point:
                     clone.connection_point.setVisible(item.connection_point.isVisible())
             elif isinstance(item, VImageItem):
-                clone = VImageItem(item.file_path, item.target_width)
+                clone = VImageItem(item.file_path, item.target_width, getattr(item, 'target_height', 0))
                 clone.set_opacity(item.image_opacity)
                 if item.locked:
                     clone.set_locked(True)
@@ -8335,7 +8342,7 @@ class LayoutScene(QGraphicsScene):
                 item_data = {
                     'type': 'VImageItem',
                     'path': item.file_path,
-                    'width': item.target_width,
+                    'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
                     'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -8392,7 +8399,7 @@ class LayoutScene(QGraphicsScene):
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
             elif item_data['type'] == 'VImageItem':
-                new_item = VImageItem(item_data['path'], item_data['width'])
+                new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
 
             if new_item:
                 offset_x = item_data['scene_pos'][0] - min_x
@@ -13391,13 +13398,13 @@ class MainWindow(QMainWindow):
                             setattr(new_item, key, item_data[key])
                     new_item.rebuild()
                 elif item_data['type'] == 'VImageItem' and os.path.exists(item_data['path']):
-                    new_item = VImageItem(item_data['path'], item_data['width'])
+                    new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
                 elif item_data['type'] == 'VImageItem':
                     image_path = item_data.get('path', '')
                     if image_path and not os.path.isabs(image_path):
                         image_path = os.path.join(APP_DIR, image_path)
                     if image_path and os.path.exists(image_path):
-                        new_item = VImageItem(image_path, item_data['width'])
+                        new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
 
                 if new_item:
                     off_x = item_data['scene_pos'][0] - min_x
