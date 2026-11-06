@@ -213,7 +213,6 @@ class ConfigManager:
             'insert_image_fit_canvas': False,  # 插入图片时自动适应画布大小
             'hide_connection_points_when_image_selected': False,
             'show_text_hover_tooltip': False,
-            'show_connection_points_default': True,
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
@@ -355,7 +354,7 @@ class AssetManager:
         for idx, item in enumerate(items):
             if isinstance(item, VTextItem):
                 # 保存连接点状态
-                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                connection_point_visible = getattr(item, '_cp_user_visible', True) if item.connection_point else True
                 connection_point_deleted = item.connection_point is None
 
                 item_data = {
@@ -398,7 +397,7 @@ class AssetManager:
                     shutil.copy2(original_path, asset_path)
 
                     # 保存连接点状态
-                    connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                    connection_point_visible = getattr(item, '_cp_user_visible', True) if item.connection_point else True
                     connection_point_deleted = item.connection_point is None
 
                     item_data = {
@@ -1446,7 +1445,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 if item_data.get('connection_point_deleted', False):
                     new_item.delete_connection_point()
                 elif 'connection_point_visible' in item_data and new_item.connection_point:
-                    new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                    new_item._cp_user_visible = bool(item_data['connection_point_visible']); new_item.set_connection_points_visible(new_item.scene().show_connection_points if new_item.scene() else False)
                 new_items.append(new_item)
                 new_items_by_asset_index[idx] = new_item
         for idx, item_data in enumerate(asset['items']):
@@ -1477,7 +1476,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 if item_data.get('connection_point_deleted', False):
                     cloned.delete_connection_point()
                 elif 'connection_point_visible' in item_data and cloned.connection_point:
-                    cloned.connection_point.setVisible(item_data['connection_point_visible'])
+                    cloned._cp_user_visible = bool(item_data['connection_point_visible']); cloned.set_connection_points_visible(cloned.scene().show_connection_points if cloned.scene() else False)
         if sub_commands:
             scene.undo_stack.push(MacroCommand(scene, sub_commands))
         scene.clearSelection()
@@ -1821,7 +1820,7 @@ class AssetLibraryWidget(QWidget):
                     if item_data.get('connection_point_deleted', False):
                         new_item.delete_connection_point()
                     elif 'connection_point_visible' in item_data and new_item.connection_point:
-                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                        new_item._cp_user_visible = bool(item_data['connection_point_visible']); new_item.set_connection_points_visible(new_item.scene().show_connection_points if new_item.scene() else False)
                     
                     new_items.append(new_item)
             
@@ -1937,7 +1936,7 @@ class ProjectData:
                 data['manual_line_break'] = item.manual_line_break
                 data['layer_eye_color'] = getattr(item, 'layer_eye_color', None)
                 if item.connection_point:
-                    data['connection_point_visible'] = item.connection_point.isVisible()
+                    data['connection_point_visible'] = getattr(item, '_cp_user_visible', True)
                 else:
                     data['connection_point_deleted'] = True
             elif isinstance(item, VImageItem):
@@ -1947,7 +1946,7 @@ class ProjectData:
                 data['locked'] = item.locked
                 data['visible'] = item.isVisible()
                 if item.connection_point:
-                    data['connection_point_visible'] = item.connection_point.isVisible()
+                    data['connection_point_visible'] = getattr(item, '_cp_user_visible', True)
                 else:
                     data['connection_point_deleted'] = True
             data['custom_connection_points'] = [
@@ -2156,7 +2155,7 @@ class ProjectData:
                     item.delete_connection_point()
                 elif 'connection_point_visible' in d and item.connection_point:
                     item._cp_user_visible = bool(d['connection_point_visible'])
-                    item.connection_point.setVisible(bool(d['connection_point_visible']) and not getattr(item, 'locked', False))
+                    item.set_connection_points_visible(scene.show_connection_points)
                 for point_pos in d.get('custom_connection_points', []):
                     if isinstance(point_pos, (list, tuple)) and len(point_pos) == 2:
                         point = item.create_custom_connection_point(item.mapToScene(
@@ -4346,18 +4345,17 @@ class VTextItem(BaseElement):
             self.setToolTip('')
     
     def create_connection_point(self):
-        """创建文字的连接点(底部中点)"""
+        """创建文字的连接点(底部中点，默认不显示)"""
         if not self.connection_point:
             self.connection_point = ConnectionPoint(self, "text_bottom")
             if self.scene():
-                visible = self.scene().show_connection_points
-                self.connection_point.setVisible(visible)
+                self.set_connection_points_visible(self.scene().show_connection_points)
             else:
-                self.connection_point.setVisible(True)
+                self.connection_point.setVisible(False)
     
     def set_connection_points_visible(self, visible):
         """设置连接点可见性（保留单个文字自身的隐藏设置）"""
-        effective_visible = bool(visible) and getattr(self, '_cp_user_visible', True)
+        effective_visible = bool(visible)
         if self.connection_point:
             self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
@@ -5319,18 +5317,17 @@ class VImageItem(BaseElement):
         return super().itemChange(change, value)
     
     def create_connection_point(self):
-        """创建图片的连接点(顶部中点)"""
+        """创建图片的连接点(顶部中点，默认不显示)"""
         if not self.connection_point:
             self.connection_point = ConnectionPoint(self, "image_top")
             if self.scene():
-                visible = self.scene().show_connection_points
-                self.connection_point.setVisible(visible)
+                self.set_connection_points_visible(self.scene().show_connection_points)
             else:
-                self.connection_point.setVisible(True)
+                self.connection_point.setVisible(False)
     
     def set_connection_points_visible(self, visible):
         """设置连接点可见性（被锁定的图片始终隐藏连接点；保留单个图片的隐藏状态）"""
-        effective_visible = False if getattr(self, 'locked', False) else (bool(visible) and getattr(self, '_cp_user_visible', True))
+        effective_visible = False if getattr(self, 'locked', False) else bool(visible)
         if self.connection_point:
             self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
@@ -6304,12 +6301,11 @@ class LayoutScene(QGraphicsScene):
         self._image_top_edge_snap_indicator = None  # 顶部吸附指示器
         self.clipboard_items = []  
         self.clipboard_image_text_connections = []  
-        self.show_connection_points = True
+        self.show_connection_points = False  # 默认不显示连接点  
         self.connection_mode = False  
         self.connection_source_point = None  
         self.asset_manager = AssetManager()
         self.config_manager = ConfigManager()  # 配置管理器
-        self.show_connection_points = self.config_manager.get('show_connection_points_default', True)
         self.image_text_binding_mode = False  
         self.image_text_source = None
         self.avatar_connect_mode = False  # 点图片智能连线模式（自动判断横向a↔a / 纵向b→a）
@@ -8309,7 +8305,7 @@ class LayoutScene(QGraphicsScene):
             if isinstance(item, VTextItem):
                 # 保存连接点状态（删除/可见性）
                 connection_point_deleted = item.connection_point is None
-                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                connection_point_visible = getattr(item, '_cp_user_visible', True) if item.connection_point else True
                 
                 item_data = {
                     'type': 'VTextItem',
@@ -8334,7 +8330,7 @@ class LayoutScene(QGraphicsScene):
             elif isinstance(item, VImageItem):
                 # 保存连接点状态（删除/可见性）
                 connection_point_deleted = item.connection_point is None
-                connection_point_visible = item.connection_point.isVisible() if item.connection_point else True
+                connection_point_visible = getattr(item, '_cp_user_visible', True) if item.connection_point else True
                 
                 item_data = {
                     'type': 'VImageItem',
@@ -8414,7 +8410,7 @@ class LayoutScene(QGraphicsScene):
 
                 # 设置连接点可见性（如果连接点还存在）
                 if not item_data.get('connection_point_deleted', False) and 'connection_point_visible' in item_data and new_item.connection_point:
-                    new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                    new_item._cp_user_visible = bool(item_data['connection_point_visible']); new_item.set_connection_points_visible(new_item.scene().show_connection_points if new_item.scene() else False)
 
                 new_items.append(new_item)
 
@@ -8444,7 +8440,7 @@ class LayoutScene(QGraphicsScene):
                     if item_data.get('connection_point_deleted', False):
                         item.delete_connection_point()
                     elif 'connection_point_visible' in item_data and item.connection_point:
-                        item.connection_point.setVisible(item_data['connection_point_visible'])
+                        item._cp_user_visible = bool(item_data['connection_point_visible']); item.set_connection_points_visible(item.scene().show_connection_points if item.scene() else False)
 
         # 整体打包为一次撤销
         if sub_commands:
@@ -12008,12 +12004,7 @@ class MainWindow(QMainWindow):
         )
         main_toolbar.addWidget(self.marquee_mode_combo)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        main_toolbar.addWidget(spacer)
-        hint = QLabel("文字与排版参数在右侧「属性」页")
-        hint.setObjectName("toolbarHint")
-        main_toolbar.addWidget(hint)
+
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -13029,10 +13020,17 @@ class MainWindow(QMainWindow):
         if not self.scene:
             return
         self.scene.show_connection_points = bool(visible)
-        self.scene.config_manager.set('show_connection_points_default', bool(visible))
-        selected = self.scene.selectedItems()
-        has_images = any(isinstance(item, VImageItem) for item in selected)
-        self._apply_connection_point_selection_visibility(has_images)
+        if visible and self.scene.config_manager.get('hide_connection_points_when_image_selected', False):
+            # 用户主动点击「👁连接点」开启显示时，自动关闭“选中图片时隐藏连接点”，确保选中组合或图片时连接点立即显示
+            self.scene.config_manager.set('hide_connection_points_when_image_selected', False)
+            if hasattr(self, 'hide_points_on_image_select_action'):
+                self.hide_points_on_image_select_action.blockSignals(True)
+                self.hide_points_on_image_select_action.setChecked(False)
+                self.hide_points_on_image_select_action.blockSignals(False)
+        for item in self.scene.items():
+            if isinstance(item, (VTextItem, VImageItem)):
+                item._cp_user_visible = True
+                item.set_connection_points_visible(bool(visible))
         for point in getattr(self.scene, 'free_connection_points', []):
             if point.scene() is self.scene:
                 point.setVisible(bool(visible))
@@ -13411,7 +13409,7 @@ class MainWindow(QMainWindow):
                     if item_data.get('connection_point_deleted', False):
                         new_item.delete_connection_point()
                     elif 'connection_point_visible' in item_data and new_item.connection_point:
-                        new_item.connection_point.setVisible(item_data['connection_point_visible'])
+                        new_item._cp_user_visible = bool(item_data['connection_point_visible']); new_item.set_connection_points_visible(new_item.scene().show_connection_points if new_item.scene() else False)
                     new_items.append(new_item)
                     cloned_by_asset_index[item_index] = new_item
 
@@ -13444,7 +13442,7 @@ class MainWindow(QMainWindow):
                     if item_data.get('connection_point_deleted', False):
                         cloned.delete_connection_point()
                     elif 'connection_point_visible' in item_data and cloned.connection_point:
-                        cloned.connection_point.setVisible(item_data['connection_point_visible'])
+                        cloned._cp_user_visible = bool(item_data['connection_point_visible']); cloned.set_connection_points_visible(cloned.scene().show_connection_points if cloned.scene() else False)
 
             return new_items, cloned_by_asset_index, commands
 
