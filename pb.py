@@ -2154,7 +2154,8 @@ class ProjectData:
                 if d.get('connection_point_deleted', False):
                     item.delete_connection_point()
                 elif 'connection_point_visible' in d and item.connection_point:
-                    item.connection_point.setVisible(d['connection_point_visible'])
+                    item._cp_user_visible = bool(d['connection_point_visible'])
+                    item.connection_point.setVisible(bool(d['connection_point_visible']) and not getattr(item, 'locked', False))
                 for point_pos in d.get('custom_connection_points', []):
                     if isinstance(point_pos, (list, tuple)) and len(point_pos) == 2:
                         point = item.create_custom_connection_point(item.mapToScene(
@@ -3840,13 +3841,17 @@ class BaseElement(QGraphicsItem):
                 painter.drawRect(QRectF(cx - hs, cy - hs, ns, ns))
     
     def toggle_connection_point(self):
-        """切换连接点的可见性"""
+        """切换单个元素连接点的可见性（隐藏后不影响头像智能连线）"""
         if hasattr(self, 'connection_point') and self.connection_point:
+            if isinstance(self, VImageItem) and getattr(self, 'locked', False):
+                return
             current_visible = self.connection_point.isVisible()
-            self.connection_point.setVisible(not current_visible)
+            new_visible = not current_visible
+            self._cp_user_visible = new_visible
+            self.connection_point.setVisible(new_visible)
             element_type = "图片" if isinstance(self, VImageItem) else "文字"
             if current_visible:
-                print(f"{element_type}连接点已隐藏")
+                print(f"{element_type}连接点已隐藏（不影响点图片连线）")
             else:
                 print(f"{element_type}连接点已显示")
 
@@ -4350,8 +4355,8 @@ class VTextItem(BaseElement):
                 self.connection_point.setVisible(True)
     
     def set_connection_points_visible(self, visible):
-        """设置连接点可见性（被锁定的图片始终隐藏连接点，不参与连线）"""
-        effective_visible = False if getattr(self, 'locked', False) else visible
+        """设置连接点可见性（保留单个文字自身的隐藏设置）"""
+        effective_visible = bool(visible) and getattr(self, '_cp_user_visible', True)
         if self.connection_point:
             self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
@@ -4558,12 +4563,14 @@ class VTextItem(BaseElement):
                 self.scene().update_image_text_connectors(self)
     
     def toggle_connection_point(self):
-        """切换连接点的可见性"""
+        """切换连接点的可见性（隐藏后不影响头像连线）"""
         if self.connection_point:
             current_visible = self.connection_point.isVisible()
-            self.connection_point.setVisible(not current_visible)
+            new_visible = not current_visible
+            self._cp_user_visible = new_visible
+            self.connection_point.setVisible(new_visible)
             if current_visible:
-                print("文字连接点已隐藏")
+                print("文字连接点已隐藏（不影响点图片连线）")
             else:
                 print("文字连接点已显示")
 
@@ -5321,19 +5328,24 @@ class VImageItem(BaseElement):
                 self.connection_point.setVisible(True)
     
     def set_connection_points_visible(self, visible):
-        """设置连接点可见性"""
+        """设置连接点可见性（被锁定的图片始终隐藏连接点；保留单个图片的隐藏状态）"""
+        effective_visible = False if getattr(self, 'locked', False) else (bool(visible) and getattr(self, '_cp_user_visible', True))
         if self.connection_point:
-            self.connection_point.setVisible(visible)
+            self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
-            point.setVisible(visible)
+            point.setVisible(effective_visible)
     
     def toggle_connection_point(self):
-        """切换连接点的可见性"""
+        """切换连接点的可见性（隐藏后不影响头像连线）"""
+        if getattr(self, 'locked', False):
+            return
         if self.connection_point:
             current_visible = self.connection_point.isVisible()
-            self.connection_point.setVisible(not current_visible)
+            new_visible = not current_visible
+            self._cp_user_visible = new_visible
+            self.connection_point.setVisible(new_visible)
             if current_visible:
-                print("图片连接点已隐藏")
+                print("图片连接点已隐藏（不影响点图片连线）")
             else:
                 print("图片连接点已显示")
 
@@ -6298,7 +6310,7 @@ class LayoutScene(QGraphicsScene):
         self.config_manager = ConfigManager()  # 配置管理器
         self.image_text_binding_mode = False  
         self.image_text_source = None
-        self.avatar_connect_mode = False  # 点头像智能连线模式（自动判断横向a↔a / 纵向b→a）
+        self.avatar_connect_mode = False  # 点图片智能连线模式（自动判断横向a↔a / 纵向b→a）
         self.avatar_connect_source = None  # 当前智能连线起点人物元素
         self._avatar_hover_target = None  # 鼠标当前悬停的目标人物元素
         self._connect_preview_scene_pos = None  # 动态预览线当前鼠标场景位置
@@ -7210,7 +7222,7 @@ class LayoutScene(QGraphicsScene):
             print(message)
     
     def _get_item_anchor_scene_pos(self, item, fallback_role="top"):
-        """获取元素或连接点在场景中的锚点坐标"""
+        """获取元素或连接点在场景中的锚点坐标（即使连接点隐藏也依然精确计算坐标）"""
         if item is None:
             return QPointF()
         if isinstance(item, ConnectionPoint):
@@ -7226,7 +7238,8 @@ class LayoutScene(QGraphicsScene):
 
     def get_person_group_info(self, item):
         """将点击的图片、子文字或独立连接点解析为人物节点结构（含顶部 a 点与子文字底部 b 点）。
-        被锁定的图片（locked=True）不参与连线，直接返回 None。
+        - 被锁定的图片（locked=True）不参与连线，直接返回 None。
+        - 连接点隐藏后（无论是全局隐藏还是单个隐藏）完全不影响 a 点与 b 点的识别与连线！
         """
         if item is None:
             return None
@@ -7268,7 +7281,8 @@ class LayoutScene(QGraphicsScene):
                 c for c in root_img.childItems()
                 if isinstance(c, VTextItem) and c.isVisible() and not getattr(c, '_was_hidden', False)
             ]
-            # 优先选取连接点可见的子文字作为 b 点；若有多个则按从右到左（主列优先）排序
+            # 1) 优先选取当前连接点可见的子文字；
+            # 2) 若连接点被全局隐藏或单独隐藏，仍从拥有连接点（未永久删除）的子文字中按从右到左（主列优先）选取 b 点！
             visible_cp_texts = [
                 c for c in child_texts
                 if getattr(c, 'connection_point', None) is not None and c.connection_point.isVisible()
@@ -7280,18 +7294,24 @@ class LayoutScene(QGraphicsScene):
                 else:
                     point_b = visible_cp_texts[0]
             else:
-                # 若全局隐藏了连接点，退而选择未永久删除连接点的子文字
-                global_hidden = (
-                    not self.show_connection_points
-                    or self.config_manager.get('hide_connection_points_when_image_selected', False)
-                )
-                valid_cp_texts = [
+                # 即使连接点被隐藏（全局隐藏或右键隐藏），只要子文字未永久删除连接点，依然正常作为 b 点参与连线
+                user_enabled_cp_texts = [
+                    c for c in child_texts
+                    if getattr(c, 'connection_point', None) is not None and getattr(c, '_cp_user_visible', True)
+                ]
+                user_enabled_cp_texts.sort(key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
+                all_valid_cp_texts = [
                     c for c in child_texts
                     if getattr(c, 'connection_point', None) is not None
                 ]
-                valid_cp_texts.sort(key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
-                if global_hidden and valid_cp_texts:
-                    point_b = curr if (isinstance(curr, VTextItem) and curr in valid_cp_texts) else valid_cp_texts[0]
+                all_valid_cp_texts.sort(key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
+                if user_enabled_cp_texts:
+                    point_b = curr if (isinstance(curr, VTextItem) and curr in user_enabled_cp_texts) else user_enabled_cp_texts[0]
+                elif all_valid_cp_texts:
+                    point_b = curr if (isinstance(curr, VTextItem) and curr in all_valid_cp_texts) else all_valid_cp_texts[0]
+                elif child_texts:
+                    child_texts_sorted = sorted(child_texts, key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
+                    point_b = curr if (isinstance(curr, VTextItem) and curr in child_texts_sorted) else child_texts_sorted[0]
                 else:
                     point_b = root_img
 
@@ -7371,7 +7391,7 @@ class LayoutScene(QGraphicsScene):
                 return g2['point_b'], g1['point_a'], 'vertical'
 
     def connect_avatars_smart(self, item1, item2):
-        """智能连接两个人物节点（自动按横向a↔a、纵向b→a创建连线并推入撤销栈）。"""
+        """智能连接两个人物节点（自动按横向a↔a、纵向b→a创建连线并推入撤销栈；连接点隐藏时同样正常工作）。"""
         src_ep, dst_ep, mode = self.resolve_smart_avatar_endpoints(item1, item2)
         if src_ep is None or dst_ep is None:
             return False, None
@@ -7392,7 +7412,7 @@ class LayoutScene(QGraphicsScene):
         return True, mode
 
     def find_connectable_element_at(self, scene_pos, view_transform=None, exclude_root=None):
-        """在指定场景坐标查找可连线的人物头像、文字或独立连接点（自动穿透被锁定的图片）"""
+        """在指定场景坐标查找可连线的人物头像、文字或独立连接点（自动穿透被锁定的图片；连接点隐藏时仍可识别人物）"""
         t = view_transform if view_transform is not None else QTransform()
         raw_items = self.items(
             scene_pos,
@@ -7419,7 +7439,7 @@ class LayoutScene(QGraphicsScene):
         return None
 
     def set_avatar_connect_mode(self, enabled):
-        """开启/关闭「⚡ 点头像连线」工具模式"""
+        """开启/关闭「点图片连线」工具模式"""
         self.avatar_connect_mode = bool(enabled)
         self.avatar_connect_source = None
         self._avatar_hover_target = None
@@ -7437,13 +7457,13 @@ class LayoutScene(QGraphicsScene):
                     view.set_smart_brush_enabled(False)
                 view.setCursor(Qt.CursorShape.CrossCursor)
             self._show_status_message(
-                "⚡ 点头像连线：直接点击人物头像即可连线（同排自动连a↔a，上下代自动连b→a；按住Shift连续接龙，按住Ctrl固定起点一对多，右键/Esc取消）",
+                "点图片连线：直接点击人物头像即可连线（同排自动连a↔a，上下代自动连b→a；按住Shift连续接龙，按住Ctrl固定起点一对多，右键/Esc取消）",
                 0
             )
         else:
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
-            self._show_status_message("已退出点头像连线模式", 2500)
+            self._show_status_message("已退出点图片连线模式", 2500)
         if self.views():
             mw = self.views()[0].window()
             if hasattr(mw, 'btn_avatar_connect') and mw.btn_avatar_connect.isChecked() != self.avatar_connect_mode:
@@ -7457,7 +7477,7 @@ class LayoutScene(QGraphicsScene):
         self.update()
 
     def clear_avatar_connect_source(self):
-        """清除当前点头像连线的起点（保持模式开启）"""
+        """清除当前点图片连线的起点（保持模式开启）"""
         self.avatar_connect_source = None
         self._avatar_hover_target = None
         if self.image_text_binding_mode:
@@ -7473,7 +7493,7 @@ class LayoutScene(QGraphicsScene):
             )
 
     def handle_avatar_connect_click(self, clicked_item, modifiers=Qt.KeyboardModifier.NoModifier):
-        """处理在点头像连线模式（或Shift快速连线）下点击人物头像/文字"""
+        """处理在点图片连线模式（或Shift快速连线）下点击人物头像/文字"""
         info = self.get_person_group_info(clicked_item)
         if not info:
             return False
@@ -7577,7 +7597,7 @@ class LayoutScene(QGraphicsScene):
             painter.restore()
             return
 
-        # 2. 确定智能头像连线的当前起点（点头像连线模式 或 普通模式下按住Shift且已选中人物）
+        # 2. 确定智能头像连线的当前起点（点图片连线模式 或 普通模式下按住Shift且已选中人物）
         active_source = None
         if (self.avatar_connect_mode or self.image_text_binding_mode) and self.avatar_connect_source is not None:
             if self.avatar_connect_source.scene() == self and not getattr(self.avatar_connect_source, 'locked', False):
@@ -8027,10 +8047,10 @@ class LayoutScene(QGraphicsScene):
             return
 
         if self.last_selection_by_marquee:
-            # 框选：按连接点位置从上到下、同行从右到左排序
+            # 框选：按连接点位置从上到下、同行从右到左排序（即使连接点隐藏也使用其精确中心坐标）
             def sort_key(it):
                 cp = getattr(it, 'connection_point', None)
-                if cp and cp.isVisible():
+                if cp is not None:
                     p = cp.get_scene_center()
                 else:
                     p = it.scenePos()
@@ -8060,7 +8080,7 @@ class LayoutScene(QGraphicsScene):
             if self.last_selection_by_marquee:
                 def group_sort_key(root_it):
                     cp = getattr(root_it, 'connection_point', None)
-                    p = cp.get_scene_center() if (cp and cp.isVisible()) else root_it.scenePos()
+                    p = cp.get_scene_center() if cp is not None else root_it.scenePos()
                     return (p.y(), -p.x())
                 person_roots.sort(key=group_sort_key)
 
@@ -8107,45 +8127,32 @@ class LayoutScene(QGraphicsScene):
     
     def group_chain_connect(self):
         """组合连接：将选中的图片+子文字视为组合，按位置顺序依次连接 b点→a点。
-        
-        每个组合：
-          a点 = 图片连接点（顶部）
-          b点 = 子文字连接点（底部），若无子文字则用图片连接点
-        连接规则：第N组b点 → 第N+1组a点
-        排序：按图片连接点位置，从上到下、同行从右到左
+        即使隐藏了连接点，也依然自动识别子文字 b 点与图片 a 点进行连接。
         """
-        selected = [item for item in self.selectedItems()
-                    if isinstance(item, VImageItem) and item.scene() == self]
+        selected = [
+            item for item in self.selectedItems()
+            if isinstance(item, VImageItem) and item.scene() == self and not getattr(item, 'locked', False)
+        ]
 
         if len(selected) < 2:
-            self._show_status_message("请至少选中两张图片进行组合连接", 3000)
+            self._show_status_message("请至少选中两张未锁定的图片进行垂直连接", 3000)
             return
 
-        # 识别每个组合的 a、b 点
+        # 识别每个组合的 a、b 点（复用 get_person_group_info，连接点隐藏时同样有效）
         groups = []
         for img in selected:
-            # a 点：图片连接点（需可见）
-            point_a = img
-
-            # b 点：找连接点可见的子文字，没有则用图片本身
-            child_texts = [c for c in img.childItems() if isinstance(c, VTextItem)]
-            point_b = img  # 默认用图片
-            for ct in child_texts:
-                cp = getattr(ct, 'connection_point', None)
-                if cp and cp.isVisible():
-                    point_b = ct
-                    break
-
-            groups.append({
-                'image': img,
-                'point_a': point_a,
-                'point_b': point_b,
-            })
+            info = self.get_person_group_info(img)
+            if info:
+                groups.append({
+                    'image': img,
+                    'point_a': info['point_a'],
+                    'point_b': info['point_b'],
+                })
 
         # 按图片连接点位置排序：从上到下（Y升序），同行从右到左（X降序）
         def sort_key(g):
             cp = getattr(g['image'], 'connection_point', None)
-            if cp and cp.isVisible():
+            if cp is not None:
                 p = cp.get_scene_center()
             else:
                 p = g['image'].scenePos()
@@ -8183,18 +8190,20 @@ class LayoutScene(QGraphicsScene):
         self._show_status_message(msg, 4000)
 
     def connect_image_points_right_to_left(self):
-        """连接图片a点：按从右到左顺序，依次连接选中图片的连接点"""
-        images = [item for item in self.selectedItems()
-                  if isinstance(item, VImageItem) and item.scene() == self]
+        """连接图片a点：按从右到左顺序，依次连接选中图片的连接点（连接点隐藏时同样有效）"""
+        images = [
+            item for item in self.selectedItems()
+            if isinstance(item, VImageItem) and item.scene() == self and not getattr(item, 'locked', False)
+        ]
 
         if len(images) < 2:
-            self._show_status_message("请至少选中两张图片", 3000)
+            self._show_status_message("请至少选中两张未锁定的图片", 3000)
             return
 
         # 按连接点X降序（从右到左），同X按Y升序（从上到下）
         def sort_key(img):
             cp = getattr(img, 'connection_point', None)
-            if cp and cp.isVisible():
+            if cp is not None:
                 p = cp.get_scene_center()
             else:
                 p = img.scenePos()
@@ -8442,7 +8451,7 @@ class LayoutScene(QGraphicsScene):
         return new_items
 
     def _make_connector_command(self, item1, item2):
-        """创建两个元素之间的连线命令（不立即执行），若已存在或包含被锁定图片则返回 None"""
+        """创建连接线命令但不 push 到栈（若已存在或包含被锁定图片则返回 None）"""
         if (isinstance(item1, VImageItem) and getattr(item1, 'locked', False)) or (
                 isinstance(item2, VImageItem) and getattr(item2, 'locked', False)):
             return None
@@ -9255,8 +9264,8 @@ class LayoutView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
             sc = self.scene()
-            # 1) 若开启了「⚡ 点头像连线」模式 或 右键「图文连接」模式：直接点人物头像/文字/独立拐点即可自动判断 a/b 点连线
-            #    （被锁定的底图/图片会自动被 find_connectable_element_at 穿透忽略）
+            # 1) 若开启了「点图片连线」模式 或 右键「图文连接」模式：直接点人物头像/文字/独立拐点即可自动判断 a/b 点连线
+            #    （被锁定的底图/图片会自动被 find_connectable_element_at 穿透忽略；连接点隐藏时同样正常工作）
             if sc.avatar_connect_mode or sc.image_text_binding_mode:
                 if not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
                     scene_pos = self.mapToScene(pos)
@@ -11110,6 +11119,14 @@ class MainWindow(QMainWindow):
             self.avatar_connect_action.blockSignals(True)
             self.avatar_connect_action.setChecked(getattr(self.scene, 'avatar_connect_mode', False))
             self.avatar_connect_action.blockSignals(False)
+        if hasattr(self, 'btn_show_cp'):
+            self.btn_show_cp.blockSignals(True)
+            self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
+            self.btn_show_cp.blockSignals(False)
+        if hasattr(self, 'show_connection_points_action'):
+            self.show_connection_points_action.blockSignals(True)
+            self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
+            self.show_connection_points_action.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
@@ -11950,11 +11967,21 @@ class MainWindow(QMainWindow):
         self._add_toolbar_action(main_toolbar, "顶部对齐", self.align_top, "按顶部边缘对齐选中对象")
         self.btn_avatar_connect = self._add_toolbar_action(
             main_toolbar,
-            "⚡点头像连线",
+            "点图片连线",
             self.toggle_avatar_connect_mode,
-            "开启后只管点击人物头像，自动按横向(a↔a)/纵向(b→a)选点连线（被锁定图片自动忽略；按住Shift连续接龙，按住Ctrl一对多）",
+            "开启后只管点击人物头像，自动按横向(a↔a)/纵向(b→a)选点连线（连接点隐藏时照常可用；按住Shift连续接龙，按住Ctrl一对多）",
             checkable=True
         )
+        self.btn_show_cp = self._add_toolbar_action(
+            main_toolbar,
+            "👁连接点",
+            self.set_all_connection_points_visible,
+            "一键显示/隐藏画布上所有连接点 (Alt+P) — 隐藏连接点后不影响点图片连线、Shift接龙与智能连接",
+            checkable=True
+        )
+        self.btn_show_cp.blockSignals(True)
+        self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
+        self.btn_show_cp.blockSignals(False)
         self._add_toolbar_action(main_toolbar, "智能连接", self.auto_connect_selected, "框选或多选人物后一键连接（自动判断同排横向a↔a / 跨代纵向b→a）")
 
         main_toolbar.addSeparator()
@@ -12259,6 +12286,13 @@ class MainWindow(QMainWindow):
         startup_horizontal_guides_settings_action.triggered.connect(self.set_startup_horizontal_guides)
         view_menu.addAction(startup_horizontal_guides_settings_action)
 
+        self.show_connection_points_action = QAction('显示连接点（隐藏后不影响头像连线）', self)
+        self.show_connection_points_action.setCheckable(True)
+        self.show_connection_points_action.setShortcut('Alt+P')
+        self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
+        self.show_connection_points_action.toggled.connect(self.set_all_connection_points_visible)
+        view_menu.addAction(self.show_connection_points_action)
+
         self.hide_points_on_image_select_action = QAction('选中图片时隐藏连接点', self)
         self.hide_points_on_image_select_action.setCheckable(True)
         self.hide_points_on_image_select_action.setChecked(
@@ -12283,7 +12317,7 @@ class MainWindow(QMainWindow):
         edit_menu = menubar.addMenu('编辑设置')
 
         # 连线设置
-        self.avatar_connect_action = QAction('⚡ 点头像智能连线模式（自动判断a/b点）', self)
+        self.avatar_connect_action = QAction('点图片智能连线模式（自动判断a/b点）', self)
         self.avatar_connect_action.setCheckable(True)
         self.avatar_connect_action.setShortcut('Alt+C')
         self.avatar_connect_action.toggled.connect(self.toggle_avatar_connect_mode)
@@ -12700,6 +12734,8 @@ class MainWindow(QMainWindow):
         point_mode_menu.addSeparator()
         add_free_point_here_action = menu.addAction("在此处新建连接点")
         add_free_point_action = menu.addAction("在最近辅助线交叉点新建连接点")
+        toggle_cp_lbl = "🙈 隐藏所有连接点 (Alt+P)" if getattr(self.scene, 'show_connection_points', True) else "👁 显示所有连接点 (Alt+P)"
+        toggle_all_cp_action = menu.addAction(toggle_cp_lbl)
         menu.addSeparator()
         menu.addAction("添加文本", self.add_text)
         menu.addAction("插入图片", self.add_image)
@@ -12725,6 +12761,8 @@ class MainWindow(QMainWindow):
             self.scene.set_free_connection_point_mode('move')
         elif action == connect_mode_action:
             self.scene.set_free_connection_point_mode('connect')
+        elif action == toggle_all_cp_action:
+            self.toggle_connection_points()
         elif action == add_free_point_here_action:
             self.scene.add_free_connection_point(self.view.mapToScene(pos))
         elif action == add_free_point_action:
@@ -12895,7 +12933,7 @@ class MainWindow(QMainWindow):
             self.smart_brush_action.setChecked(enabled)
 
     def toggle_avatar_connect_mode(self, enabled):
-        """切换⚡点头像智能连线模式"""
+        """切换⚡点图片智能连线模式"""
         self.scene.set_avatar_connect_mode(enabled)
 
     def toggle_resize_mode(self, enabled):
@@ -12984,11 +13022,35 @@ class MainWindow(QMainWindow):
     def clear_all_connections(self):
         self.scene.remove_all_image_text_connections()
     
-    def toggle_connection_points(self):
-        self.scene.toggle_connection_points()
-        selected = self.scene.selectedItems() if self.scene else []
+    def set_all_connection_points_visible(self, visible):
+        """设置全局连接点显示/隐藏（隐藏后不影响点图片连线、Shift接龙与智能连接）"""
+        if not self.scene:
+            return
+        self.scene.show_connection_points = bool(visible)
+        selected = self.scene.selectedItems()
         has_images = any(isinstance(item, VImageItem) for item in selected)
         self._apply_connection_point_selection_visibility(has_images)
+        for point in getattr(self.scene, 'free_connection_points', []):
+            if point.scene() is self.scene:
+                point.setVisible(bool(visible))
+        if hasattr(self, 'btn_show_cp') and self.btn_show_cp.isChecked() != bool(visible):
+            self.btn_show_cp.blockSignals(True)
+            self.btn_show_cp.setChecked(bool(visible))
+            self.btn_show_cp.blockSignals(False)
+        if hasattr(self, 'show_connection_points_action') and self.show_connection_points_action.isChecked() != bool(visible):
+            self.show_connection_points_action.blockSignals(True)
+            self.show_connection_points_action.setChecked(bool(visible))
+            self.show_connection_points_action.blockSignals(False)
+        if hasattr(self, 'status_bar') and self.status_bar:
+            if visible:
+                self.status_bar.showMessage("已显示连接点（被锁定的底图连接点保持隐藏）", 3500)
+            else:
+                self.status_bar.showMessage("已隐藏所有连接点（不影响点图片连线、Shift接龙及批量连接，按 Alt+P 可重新显示）", 4500)
+
+    def toggle_connection_points(self):
+        if not self.scene:
+            return
+        self.set_all_connection_points_visible(not self.scene.show_connection_points)
     
     def open_asset_library(self):
         """切换素材库面板的显示/隐藏"""
