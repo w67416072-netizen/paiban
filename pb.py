@@ -2550,6 +2550,9 @@ class AddConnectorCommand(UndoCommand):
             if self.connector not in self.scene.image_text_connectors:
                 self.scene.addItem(self.connector)
                 self.scene.image_text_connectors.append(self.connector)
+            for pt in (getattr(self.connector, 'point1', None), getattr(self.connector, 'point2', None)):
+                if pt is not None and self.connector not in pt.connected_lines:
+                    pt.connected_lines.append(self.connector)
             self.connector.update_path()
             self.scene.sync_connectors_visibility()
 
@@ -2559,6 +2562,9 @@ class AddConnectorCommand(UndoCommand):
                 self.scene.removeItem(self.connector)
                 self.scene.connectors.remove(self.connector)
         else:
+            for pt in (getattr(self.connector, 'point1', None), getattr(self.connector, 'point2', None)):
+                if pt is not None and self.connector in pt.connected_lines:
+                    pt.connected_lines.remove(self.connector)
             if self.connector in self.scene.image_text_connectors:
                 self.scene.removeItem(self.connector)
                 self.scene.image_text_connectors.remove(self.connector)
@@ -4344,11 +4350,12 @@ class VTextItem(BaseElement):
                 self.connection_point.setVisible(True)
     
     def set_connection_points_visible(self, visible):
-        """设置连接点可见性"""
+        """设置连接点可见性（被锁定的图片始终隐藏连接点，不参与连线）"""
+        effective_visible = False if getattr(self, 'locked', False) else visible
         if self.connection_point:
-            self.connection_point.setVisible(visible)
+            self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
-            point.setVisible(visible)
+            point.setVisible(effective_visible)
         
     def _show_context_menu(self, global_pos, item_pos=None):
         self._build_text_context_menu(global_pos, item_pos)
@@ -5180,11 +5187,23 @@ class VImageItem(BaseElement):
         self.update()
 
     def set_locked(self, locked):
-        """锁定/解锁图片"""
+        """锁定/解锁图片（被锁定的图片不参与连线，自动隐藏并禁用其连接点）"""
         self.locked = locked
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not locked)
         self._show_handles(False)
+        # 被锁定的图片不参与连线：锁定时隐藏连接点，解锁时按场景设置恢复
+        sc = self.scene()
+        if locked:
+            if self.connection_point:
+                self.connection_point.setVisible(False)
+            for point in getattr(self, 'custom_connection_points', []):
+                point.setVisible(False)
+            if sc and getattr(sc, 'avatar_connect_source', None) == self:
+                sc.clear_avatar_connect_source()
+        else:
+            show_cp = sc.show_connection_points if sc else True
+            self.set_connection_points_visible(show_cp)
         # 锁定时显示半透明遮罩提示
         if hasattr(self, 'p_item'):
             self.p_item.setOpacity(self.image_opacity * (0.6 if locked else 1.0))
@@ -6279,6 +6298,10 @@ class LayoutScene(QGraphicsScene):
         self.config_manager = ConfigManager()  # 配置管理器
         self.image_text_binding_mode = False  
         self.image_text_source = None
+        self.avatar_connect_mode = False  # 点头像智能连线模式（自动判断横向a↔a / 纵向b→a）
+        self.avatar_connect_source = None  # 当前智能连线起点人物元素
+        self._avatar_hover_target = None  # 鼠标当前悬停的目标人物元素
+        self._connect_preview_scene_pos = None  # 动态预览线当前鼠标场景位置
         self.selection_order = []  # 记录选中顺序
         self.last_selection_by_marquee = False  # 最后一次选中是否为框选
         self.background_pixmap = None  # 背景图片缓存
@@ -6638,6 +6661,10 @@ class LayoutScene(QGraphicsScene):
             painter.setPen(pen)
             # 只绘制两端连接点之间的水平提示线，不再绘制圆点。
             painter.drawLine(owner_anchor, target_anchor)
+
+        # 绘制智能连线/连接点连线的实时动态预览与a/b点高亮
+        if not getattr(self, '_rendering_pdf', False) and not getattr(self, '_rendering_thumb', False):
+            self._draw_smart_connection_preview(painter)
 
     def drawBackground(self, painter, rect):
         # PDF导出时：直接填白色，跳过灰色外框和网格
@@ -7182,66 +7209,602 @@ class LayoutScene(QGraphicsScene):
         else:
             print(message)
     
-    def start_connection_from_point(self, point):
-        """从连接点开始连接"""
-        if self.connection_mode and self.connection_source_point:
-            source_point = self.connection_source_point
-            if self.complete_connection(self.connection_source_point, point):
-                self.connection_mode = False
-                self.connection_source_point = None
+    def _get_item_anchor_scene_pos(self, item, fallback_role="top"):
+        """获取元素或连接点在场景中的锚点坐标"""
+        if item is None:
+            return QPointF()
+        if isinstance(item, ConnectionPoint):
+            return item.get_scene_center()
+        cp = getattr(item, 'connection_point', None)
+        if cp is not None:
+            return cp.get_scene_center()
+        rect = item.boundingRect()
+        pos = item.scenePos()
+        if isinstance(item, VImageItem) or fallback_role == "top":
+            return pos + QPointF(rect.width() / 2.0, 0.0)
+        return pos + QPointF(rect.width() / 2.0, rect.height())
+
+    def get_person_group_info(self, item):
+        """将点击的图片、子文字或独立连接点解析为人物节点结构（含顶部 a 点与子文字底部 b 点）。
+        被锁定的图片（locked=True）不参与连线，直接返回 None。
+        """
+        if item is None:
+            return None
+        if isinstance(item, ConnectionPoint):
+            if item.parent_element is None:
+                return {
+                    'root': item,
+                    'point_a': item,
+                    'point_b': item,
+                    'is_person': False,
+                    'is_free_point': True,
+                }
+            item = item.parent_element
+
+        curr = item
+        while curr is not None and not isinstance(curr, BaseElement):
+            curr = curr.parentItem()
+        if not isinstance(curr, (VImageItem, VTextItem)):
+            return None
+
+        # 被锁定的图片直接忽略，不参与连线
+        if isinstance(curr, VImageItem) and getattr(curr, 'locked', False):
+            return None
+
+        root_img = None
+        if isinstance(curr, VImageItem):
+            root_img = curr
+        elif isinstance(curr, VTextItem) and isinstance(curr.parentItem(), VImageItem):
+            parent_img = curr.parentItem()
+            # 若父图片被锁定（例如作为底图），则该锁定图片不作为人物头像节点参与连线
+            if not getattr(parent_img, 'locked', False):
+                root_img = parent_img
+
+        if root_img is not None:
+            if getattr(root_img, 'locked', False):
+                return None
+            point_a = root_img
+            child_texts = [
+                c for c in root_img.childItems()
+                if isinstance(c, VTextItem) and c.isVisible() and not getattr(c, '_was_hidden', False)
+            ]
+            # 优先选取连接点可见的子文字作为 b 点；若有多个则按从右到左（主列优先）排序
+            visible_cp_texts = [
+                c for c in child_texts
+                if getattr(c, 'connection_point', None) is not None and c.connection_point.isVisible()
+            ]
+            visible_cp_texts.sort(key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
+            if visible_cp_texts:
+                if isinstance(curr, VTextItem) and curr in visible_cp_texts:
+                    point_b = curr
+                else:
+                    point_b = visible_cp_texts[0]
+            else:
+                # 若全局隐藏了连接点，退而选择未永久删除连接点的子文字
+                global_hidden = (
+                    not self.show_connection_points
+                    or self.config_manager.get('hide_connection_points_when_image_selected', False)
+                )
+                valid_cp_texts = [
+                    c for c in child_texts
+                    if getattr(c, 'connection_point', None) is not None
+                ]
+                valid_cp_texts.sort(key=lambda c: (-c.scenePos().x(), -c.boundingRect().height()))
+                if global_hidden and valid_cp_texts:
+                    point_b = curr if (isinstance(curr, VTextItem) and curr in valid_cp_texts) else valid_cp_texts[0]
+                else:
+                    point_b = root_img
+
+            return {
+                'root': root_img,
+                'point_a': point_a,
+                'point_b': point_b,
+                'is_person': True,
+                'is_free_point': False,
+            }
+
+        # 独立文字节点（无父图片，或父图片已锁定）
+        if getattr(curr, 'locked', False):
+            return None
+        return {
+            'root': curr,
+            'point_a': curr,
+            'point_b': curr,
+            'is_person': False,
+            'is_free_point': False,
+        }
+
+    def resolve_smart_avatar_endpoints(self, item1, item2):
+        """根据两个节点的相对位置，自动判断横向连线（a点↔a点）还是纵向连线（上代b点→下代a点）。"""
+        g1 = self.get_person_group_info(item1)
+        g2 = self.get_person_group_info(item2)
+        if not g1 or not g2:
+            return None, None, None
+        if g1['root'] == g2['root']:
+            return None, None, None
+
+        def _node_rect(g):
+            r = g['root']
+            if isinstance(r, ConnectionPoint):
+                c = r.get_scene_center()
+                return QRectF(c.x() - 6, c.y() - 6, 12, 12)
+            return r.sceneBoundingRect()
+
+        r1 = _node_rect(g1)
+        r2 = _node_rect(g2)
+        dy = r2.center().y() - r1.center().y()
+
+        # 处理含画布独立连接点（拐点）的情况
+        if g1['is_free_point'] or g2['is_free_point']:
+            if g1['is_free_point'] and g2['is_free_point']:
+                mode = 'horizontal' if abs(r2.center().x() - r1.center().x()) >= abs(dy) else 'vertical'
+                return g1['root'], g2['root'], mode
+            if g1['is_free_point']:
+                free_pt = g1['root']
+                person_g, person_r = g2, r2
+                pt_y = free_pt.get_scene_center().y()
+                if pt_y > person_r.bottom() + person_r.height() * 0.1:
+                    return free_pt, person_g['point_b'], 'vertical'
+                return free_pt, person_g['point_a'], ('horizontal' if abs(dy) <= person_r.height() * 0.6 else 'vertical')
+            else:
+                free_pt = g2['root']
+                person_g, person_r = g1, r1
+                pt_y = free_pt.get_scene_center().y()
+                if pt_y > person_r.bottom() + person_r.height() * 0.1:
+                    return person_g['point_b'], free_pt, 'vertical'
+                return person_g['point_a'], free_pt, ('horizontal' if abs(dy) <= person_r.height() * 0.6 else 'vertical')
+
+        # 两个人物/文字节点：判断同排横向还是上下跨代纵向
+        overlap_y = min(r1.bottom(), r2.bottom()) - max(r1.top(), r2.top())
+        min_h = max(1.0, min(r1.height(), r2.height()))
+        max_h = max(1.0, max(r1.height(), r2.height()))
+        is_horizontal = (overlap_y > min_h * 0.2) or (abs(dy) <= max_h * 0.75)
+
+        if is_horizontal:
+            # 同排横向：连接两个节点的顶部 a 点 ↔ a 点
+            return g1['point_a'], g2['point_a'], 'horizontal'
+        else:
+            # 跨代纵向：上方节点走子文字底部 b 点，下方节点走图片顶部 a 点
+            if dy > 0:
+                return g1['point_b'], g2['point_a'], 'vertical'
+            else:
+                return g2['point_b'], g1['point_a'], 'vertical'
+
+    def connect_avatars_smart(self, item1, item2):
+        """智能连接两个人物节点（自动按横向a↔a、纵向b→a创建连线并推入撤销栈）。"""
+        src_ep, dst_ep, mode = self.resolve_smart_avatar_endpoints(item1, item2)
+        if src_ep is None or dst_ep is None:
+            return False, None
+
+        if isinstance(src_ep, ConnectionPoint) or isinstance(dst_ep, ConnectionPoint):
+            pt1 = src_ep if isinstance(src_ep, ConnectionPoint) else getattr(src_ep, 'connection_point', None)
+            pt2 = dst_ep if isinstance(dst_ep, ConnectionPoint) else getattr(dst_ep, 'connection_point', None)
+            if pt1 is None or pt2 is None:
+                return False, mode
+            ok = self.complete_connection(pt1, pt2)
+            return ok, mode
+
+        cmd = self._make_connector_command(src_ep, dst_ep)
+        if cmd is None:
+            self._show_status_message("这两个节点之间已经存在连线", 2500)
+            return False, mode
+        self.undo_stack.push_and_execute(cmd)
+        return True, mode
+
+    def find_connectable_element_at(self, scene_pos, view_transform=None, exclude_root=None):
+        """在指定场景坐标查找可连线的人物头像、文字或独立连接点（自动穿透被锁定的图片）"""
+        t = view_transform if view_transform is not None else QTransform()
+        raw_items = self.items(
+            scene_pos,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            t
+        )
+        # 优先检查是否有可见的独立连接点
+        for it in raw_items:
+            if isinstance(it, ConnectionPoint) and it.parent_element is None and it.isVisible():
+                if it != exclude_root:
+                    return it
+        # 查找未锁定的人物图片或文字（被锁定的底图/图片自动穿透跳过）
+        for it in raw_items:
+            curr = it
+            while curr is not None and not isinstance(curr, BaseElement):
+                curr = curr.parentItem()
+            if isinstance(curr, (VImageItem, VTextItem)) and curr.isVisible() and not getattr(curr, '_was_hidden', False):
+                if isinstance(curr, VImageItem) and getattr(curr, 'locked', False):
+                    continue
+                info = self.get_person_group_info(curr)
+                if info and info['root'] != exclude_root:
+                    return curr
+        return None
+
+    def set_avatar_connect_mode(self, enabled):
+        """开启/关闭「⚡ 点头像连线」工具模式"""
+        self.avatar_connect_mode = bool(enabled)
+        self.avatar_connect_source = None
+        self._avatar_hover_target = None
+        self._connect_preview_scene_pos = None
+        if enabled:
+            if self.resize_mode:
+                self.set_resize_mode(False)
+            if self.connection_mode:
+                self.cancel_connection_mode()
+            self.image_text_binding_mode = False
+            self.image_text_source = None
+            if self.views():
+                view = self.views()[0]
+                if view.is_smart_brush_enabled():
+                    view.set_smart_brush_enabled(False)
+                view.setCursor(Qt.CursorShape.CrossCursor)
+            self._show_status_message(
+                "⚡ 点头像连线：直接点击人物头像即可连线（同排自动连a↔a，上下代自动连b→a；按住Shift连续接龙，按住Ctrl固定起点一对多，右键/Esc取消）",
+                0
+            )
+        else:
+            if self.views():
+                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+            self._show_status_message("已退出点头像连线模式", 2500)
+        if self.views():
+            mw = self.views()[0].window()
+            if hasattr(mw, 'btn_avatar_connect') and mw.btn_avatar_connect.isChecked() != self.avatar_connect_mode:
+                mw.btn_avatar_connect.blockSignals(True)
+                mw.btn_avatar_connect.setChecked(self.avatar_connect_mode)
+                mw.btn_avatar_connect.blockSignals(False)
+            if hasattr(mw, 'avatar_connect_action') and mw.avatar_connect_action.isChecked() != self.avatar_connect_mode:
+                mw.avatar_connect_action.blockSignals(True)
+                mw.avatar_connect_action.setChecked(self.avatar_connect_mode)
+                mw.avatar_connect_action.blockSignals(False)
+        self.update()
+
+    def clear_avatar_connect_source(self):
+        """清除当前点头像连线的起点（保持模式开启）"""
+        self.avatar_connect_source = None
+        self._avatar_hover_target = None
+        if self.image_text_binding_mode:
+            self.image_text_binding_mode = False
+            self.image_text_source = None
+            if not self.avatar_connect_mode and self.views():
+                self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+        if self.avatar_connect_mode:
+            self._show_status_message(
+                "已取消当前起点。请点击任意人物头像开始新的连线（再次右键或按 Esc 退出连线模式）",
+                4000
+            )
+
+    def handle_avatar_connect_click(self, clicked_item, modifiers=Qt.KeyboardModifier.NoModifier):
+        """处理在点头像连线模式（或Shift快速连线）下点击人物头像/文字"""
+        info = self.get_person_group_info(clicked_item)
+        if not info:
+            return False
+        target_root = info['root']
+        if isinstance(target_root, VImageItem) and getattr(target_root, 'locked', False):
+            return False
+
+        # 若兼容旧版右键“图文连接”触发的起点
+        if self.image_text_binding_mode and self.image_text_source is not None and self.avatar_connect_source is None:
+            src_info = self.get_person_group_info(self.image_text_source)
+            if src_info:
+                self.avatar_connect_source = src_info['root']
+
+        if self.avatar_connect_source is not None and getattr(self.avatar_connect_source, 'locked', False):
+            self.avatar_connect_source = None
+
+        if self.avatar_connect_source is None or self.avatar_connect_source.scene() != self:
+            self.avatar_connect_source = target_root
+            self.clearSelection()
+            if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
+                target_root.setSelected(True)
+            self._show_status_message(
+                "已选起点：请点击目标人物头像（自动识别横向a↔a / 纵向b→a；按住Shift连续接龙，按住Ctrl一对多分叉，右键取消起点）",
+                0
+            )
+            self.update()
+            return True
+
+        if self.avatar_connect_source == target_root:
+            # 再次点击同一个起点：取消当前起点
+            self.clear_avatar_connect_source()
+            return True
+
+        ok, mode = self.connect_avatars_smart(self.avatar_connect_source, target_root)
+        mode_label = "横向 (a点 ↔ a点)" if mode == 'horizontal' else "纵向 (b点 → a点)"
+
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            # 按住 Ctrl：固定当前父辈起点不变，方便一对多连多个子女
+            self._show_status_message(
+                f"已创建{mode_label}连线（已固定当前起点，可继续点击其他目标进行一对多连线）",
+                4000
+            )
+        elif modifiers & Qt.KeyboardModifier.ShiftModifier:
+            # 按住 Shift：把目标设为新起点，连续向下或横向接龙
+            self.avatar_connect_source = target_root
+            self.clearSelection()
+            if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
+                target_root.setSelected(True)
+            self._show_status_message(
+                f"已接龙{mode_label}连线，起点已切至当前人物，可继续点击下一人物",
+                4000
+            )
+        else:
+            # 普通点击：完成当前一对连线，清空起点以便直接点下一对（若来自一次性右键图文连接则退出）
+            if self.image_text_binding_mode and not self.avatar_connect_mode:
+                self.image_text_binding_mode = False
+                self.image_text_source = None
+                self.avatar_connect_source = None
                 if self.views():
                     self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
-                source_point.update()
-                point.update()
-                self._show_status_message("连线已创建。点击任意连接点开始下一条连线。", 4000)
+                self._show_status_message(f"已完成{mode_label}连线", 3000)
+            else:
+                self.avatar_connect_source = None
+                self.clearSelection()
+                if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
+                    target_root.setSelected(True)
+                self._show_status_message(
+                    f"已完成{mode_label}连线！点击任意人物开始下一条（提示：按住Shift点击可连续接龙，按住Ctrl可一对多）",
+                    4000
+                )
+        self.update()
+        return True
+
+    def _draw_smart_connection_preview(self, painter):
+        """在画布前景层绘制智能连线动态预览曲线、a/b端点高亮圈与方向提示标签"""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 1. 传统连接点点击模式下的动态预览线
+        if self.connection_mode and self.connection_source_point is not None and self._connect_preview_scene_pos is not None:
+            if self.connection_source_point.scene() == self:
+                p1 = self.connection_source_point.get_scene_center()
+                p2 = self._connect_preview_scene_pos
+                path = QPainterPath()
+                path.moveTo(p1)
+                dist = (p2 - p1).manhattanLength()
+                offset = min(dist * 0.3, 80.0)
+                dx, dy = p2.x() - p1.x(), p2.y() - p1.y()
+                if abs(dx) > abs(dy):
+                    c1 = p1 + QPointF(offset if dx > 0 else -offset, 0)
+                    c2 = p2 - QPointF(offset if dx > 0 else -offset, 0)
+                else:
+                    c1 = p1 + QPointF(0, offset if dy > 0 else -offset)
+                    c2 = p2 - QPointF(0, offset if dy > 0 else -offset)
+                path.cubicTo(c1, c2, p2)
+                pen = QPen(QColor(255, 80, 0, 210), 2.5, Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+            painter.restore()
+            return
+
+        # 2. 确定智能头像连线的当前起点（点头像连线模式 或 普通模式下按住Shift且已选中人物）
+        active_source = None
+        if (self.avatar_connect_mode or self.image_text_binding_mode) and self.avatar_connect_source is not None:
+            if self.avatar_connect_source.scene() == self and not getattr(self.avatar_connect_source, 'locked', False):
+                active_source = self.avatar_connect_source
+        elif not self.avatar_connect_mode and (QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier):
+            sel = [
+                i for i in self.selectedItems()
+                if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
+            ]
+            if len(sel) == 1:
+                info = self.get_person_group_info(sel[0])
+                if info:
+                    active_source = info['root']
+
+        # 绘制悬停目标人物的高亮外框
+        hover_info = self.get_person_group_info(self._avatar_hover_target) if self._avatar_hover_target else None
+        if hover_info and (self.avatar_connect_mode or self.image_text_binding_mode or active_source is not None):
+            h_root = hover_info['root']
+            if not isinstance(h_root, ConnectionPoint) and h_root.scene() == self and not getattr(h_root, 'locked', False):
+                h_rect = h_root.sceneBoundingRect().adjusted(-4, -4, 4, 4)
+                h_pen = QPen(QColor(0, 185, 90, 220), 2, Qt.PenStyle.DashLine)
+                h_pen.setCosmetic(True)
+                painter.setPen(h_pen)
+                painter.setBrush(QBrush(QColor(0, 200, 100, 22)))
+                painter.drawRoundedRect(h_rect, 6, 6)
+
+        if active_source is None:
+            painter.restore()
+            return
+
+        src_info = self.get_person_group_info(active_source)
+        if not src_info:
+            painter.restore()
+            return
+
+        # 绘制起点人物的高亮外框
+        s_root = src_info['root']
+        if not isinstance(s_root, ConnectionPoint) and s_root.scene() == self and not getattr(s_root, 'locked', False):
+            s_rect = s_root.sceneBoundingRect().adjusted(-4, -4, 4, 4)
+            s_pen = QPen(QColor(255, 140, 0, 230), 2, Qt.PenStyle.SolidLine)
+            s_pen.setCosmetic(True)
+            painter.setPen(s_pen)
+            painter.setBrush(QBrush(QColor(255, 165, 0, 20)))
+            painter.drawRoundedRect(s_rect, 6, 6)
+
+        if self._connect_preview_scene_pos is None:
+            painter.restore()
+            return
+
+        # 计算预览线的起点、终点及模式（横向 a↔a 或 纵向 b→a）
+        mode = 'horizontal'
+        if hover_info and hover_info['root'] != src_info['root']:
+            src_ep, dst_ep, mode = self.resolve_smart_avatar_endpoints(active_source, hover_info['root'])
+            if src_ep is None or dst_ep is None:
+                painter.restore()
+                return
+            p1 = self._get_item_anchor_scene_pos(src_ep, "top" if src_ep == src_info['point_a'] else "bottom")
+            p2 = self._get_item_anchor_scene_pos(dst_ep, "top" if dst_ep == hover_info['point_a'] else "bottom")
+        else:
+            p2 = self._connect_preview_scene_pos
+            if isinstance(s_root, ConnectionPoint):
+                src_ep = s_root
+                p1 = s_root.get_scene_center()
+            else:
+                s_rect = s_root.sceneBoundingRect()
+                dy = p2.y() - s_rect.center().y()
+                if dy > s_rect.height() * 0.65:
+                    src_ep = src_info['point_b']
+                    mode = 'vertical'
+                    p1 = self._get_item_anchor_scene_pos(src_ep, "bottom")
+                elif dy < -s_rect.height() * 0.65:
+                    src_ep = src_info['point_a']
+                    mode = 'vertical'
+                    p1 = self._get_item_anchor_scene_pos(src_ep, "top")
+                else:
+                    src_ep = src_info['point_a']
+                    mode = 'horizontal'
+                    p1 = self._get_item_anchor_scene_pos(src_ep, "top")
+
+        # 绘制预览贝塞尔曲线
+        path = QPainterPath()
+        path.moveTo(p1)
+        dist = (p2 - p1).manhattanLength()
+        offset = min(dist * 0.3, 90.0)
+        if mode == 'vertical':
+            if p2.y() >= p1.y():
+                c1 = p1 + QPointF(0, offset)
+                c2 = p2 - QPointF(0, offset)
+            else:
+                c1 = p1 - QPointF(0, offset)
+                c2 = p2 + QPointF(0, offset)
+        else:
+            dx = p2.x() - p1.x()
+            c1 = p1 + QPointF(offset if dx >= 0 else -offset, 0)
+            c2 = p2 - QPointF(offset if dx >= 0 else -offset, 0)
+        path.cubicTo(c1, c2, p2)
+
+        line_color = QColor(0, 175, 85, 235) if (hover_info and hover_info['root'] != src_info['root']) else QColor(255, 75, 50, 215)
+        preview_pen = QPen(line_color, 3, Qt.PenStyle.DashLine)
+        preview_pen.setCosmetic(True)
+        painter.setPen(preview_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        # 绘制端点高亮圆环（固定屏幕像素大小）
+        scale = 1.0
+        if self.views():
+            scale = max(0.001, self.views()[0].transform().m11())
+        r_scene = 6.0 / scale
+        pt_pen = QPen(QColor(255, 255, 255), 2)
+        pt_pen.setCosmetic(True)
+        painter.setPen(pt_pen)
+        painter.setBrush(QBrush(line_color))
+        painter.drawEllipse(p1, r_scene, r_scene)
+        if hover_info and hover_info['root'] != src_info['root']:
+            painter.drawEllipse(p2, r_scene, r_scene)
+
+        # 绘制跟随鼠标的模式提示标签（横向 a↔a / 纵向 b→a）
+        badge_text = "横向: a点 ↔ a点" if mode == 'horizontal' else "纵向: b点 → a点"
+        painter.save()
+        painter.resetTransform()
+        if self.views():
+            view = self.views()[0]
+            vp_pt = view.mapFromScene(p2)
+            font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
+            painter.setFont(font)
+            fm = QFontMetrics(font)
+            tw = fm.horizontalAdvance(badge_text) + 14
+            th = fm.height() + 6
+            bx = vp_pt.x() + 14
+            by = vp_pt.y() - th - 8
+            badge_rect = QRectF(bx, by, tw, th)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(QColor(36, 41, 47, 215)))
+            painter.drawRoundedRect(badge_rect, 4, 4)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+        painter.restore()
+        painter.restore()
+
+    def start_connection_from_point(self, point):
+        """从连接点开始连接（支持 Shift 连续接龙与 Ctrl 固定起点分叉；被锁定图片不参与连线）"""
+        if point and isinstance(getattr(point, 'parent_element', None), VImageItem) and getattr(point.parent_element, 'locked', False):
+            return
+        if self.connection_mode and self.connection_source_point:
+            source_point = self.connection_source_point
+            modifiers = QApplication.keyboardModifiers()
+            if self.complete_connection(self.connection_source_point, point):
+                if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                    # 按住 Shift：以当前目标点为新起点继续向下接龙
+                    self.connection_source_point = point
+                    source_point.update()
+                    point.update()
+                    self._show_status_message("已接龙连线：当前点已设为新起点，可继续点击下一个连接点（Esc取消）", 4000)
+                elif modifiers & Qt.KeyboardModifier.ControlModifier:
+                    # 按住 Ctrl：保持原起点不变，继续一对多分叉连线
+                    source_point.update()
+                    point.update()
+                    self._show_status_message("已创建分支连线：原起点保持不变，可继续点击其他目标连接点（Esc取消）", 4000)
+                else:
+                    self.connection_mode = False
+                    self.connection_source_point = None
+                    if self.views():
+                        self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                    source_point.update()
+                    point.update()
+                    self._show_status_message("连线已创建。点击任意连接点开始下一条连线（按住Shift可连续接龙）。", 4000)
+                self.update()
         else:
             self.connection_mode = True
             self.connection_source_point = point
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.CrossCursor)
             point.update()
-            self._show_status_message("连线模式：请选择第二个连接点，按 Esc 取消。")
+            self._show_status_message("连线模式：请选择第二个连接点（按住Shift点击可连续接龙，按住Ctrl可一对多，Esc取消）。")
             print("连接模式：点击另一个连接点完成连接，或按ESC键取消")
     
     def cancel_connection_mode(self):
         """取消连接模式"""
         if self.connection_mode:
+            old_pt = self.connection_source_point
             self.connection_mode = False
             self.connection_source_point = None
+            if old_pt:
+                old_pt.update()
             if self.views():
                 self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+            self.update()
             self._show_status_message("已取消连线模式。", 3000)
             print("已取消连接模式")
     
     def complete_connection(self, source_point, target_point):
-        """完成两个连接点之间的连接"""
+        """完成两个连接点之间的连接（被锁定的图片不参与连线）"""
         if source_point == target_point:
             print("不能连接到自身")
             return False
         
         source_item = source_point.parent_element
         target_item = target_point.parent_element
+        if (isinstance(source_item, VImageItem) and getattr(source_item, 'locked', False)) or (
+                isinstance(target_item, VImageItem) and getattr(target_item, 'locked', False)):
+            self._show_status_message("被锁定的图片不参与连线", 2500)
+            return False
         if (getattr(source_point, 'point_type', '') == 'custom'
                 or getattr(target_point, 'point_type', '') == 'custom') and (
                     source_item is None or target_item is None):
             if source_point.scene() is None or target_point.scene() is None:
                 return False
+            for existing in self.image_text_connectors:
+                p1, p2 = getattr(existing, 'point1', None), getattr(existing, 'point2', None)
+                if (p1 == source_point and p2 == target_point) or (p1 == target_point and p2 == source_point):
+                    return False
             conn = VGenericConnector(
                 source_item, target_item, 'generic',
                 self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
                 source_point, target_point
             )
-            self.addItem(conn)
-            self.image_text_connectors.append(conn)
-            source_point.connected_lines.append(conn)
-            target_point.connected_lines.append(conn)
-            conn.update_path()
-            self.sync_connectors_visibility()
+            self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
             return True
         if (isinstance(source_item, BaseElement)
                 and isinstance(target_item, BaseElement)
                 and (getattr(source_point, 'point_type', '') == 'custom'
                      or getattr(target_point, 'point_type', '') == 'custom')):
+            for existing in self.image_text_connectors:
+                p1, p2 = getattr(existing, 'point1', None), getattr(existing, 'point2', None)
+                if (p1 == source_point and p2 == target_point) or (p1 == target_point and p2 == source_point):
+                    return False
             connection_type = (
                 "image-image" if isinstance(source_item, VImageItem) and isinstance(target_item, VImageItem)
                 else "text-text" if isinstance(source_item, VTextItem) and isinstance(target_item, VTextItem)
@@ -7252,12 +7815,7 @@ class LayoutScene(QGraphicsScene):
                 self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
                 source_point, target_point
             )
-            self.addItem(conn)
-            self.image_text_connectors.append(conn)
-            source_point.connected_lines.append(conn)
-            target_point.connected_lines.append(conn)
-            conn.update_path()
-            self.sync_connectors_visibility()
+            self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
             return True
 
         if isinstance(source_item, VImageItem) and isinstance(target_item, VTextItem):
@@ -7330,14 +7888,23 @@ class LayoutScene(QGraphicsScene):
                 widget = widget.parent()
     
     def start_image_text_binding(self, item):
-        """开始图文连接模式"""
+        """开始图文/人物智能连接模式（被锁定的图片不参与连线）"""
+        if isinstance(item, VImageItem) and getattr(item, 'locked', False):
+            self._show_status_message("被锁定的图片不参与连线", 2500)
+            return
         if isinstance(item, (VImageItem, VTextItem)):
             self.image_text_binding_mode = True
             self.image_text_source = item
+            info = self.get_person_group_info(item)
+            self.avatar_connect_source = info['root'] if info else item
             views = self.views()
             if views:
                 views[0].setCursor(Qt.CursorShape.CrossCursor)
-            print(f"图文连接模式：请选择要连接的{'文字' if isinstance(item, VImageItem) else '图片'}")
+            self._show_status_message(
+                "图文/人物连线：请直接点击目标人物头像或文字（自动判断横向a↔a / 纵向b→a，按Esc取消）",
+                0
+            )
+            self.update()
     
     def add_image_text_connector(self, image_item, text_item):
         """添加图文连接线"""
@@ -7453,8 +8020,14 @@ class LayoutScene(QGraphicsScene):
                 p = p.parentItem()
             return False
 
+        # 过滤掉被锁定的图片（被锁定的图片不参与连线）
+        selected = [it for it in selected if not (isinstance(it, VImageItem) and getattr(it, 'locked', False))]
+        if len(selected) < 2:
+            self._show_status_message("请至少选中两个未锁定的元素进行连接", 3000)
+            return
+
         if self.last_selection_by_marquee:
-            # 框选：按连接点位置从右到左、从上到下排序
+            # 框选：按连接点位置从上到下、同行从右到左排序
             def sort_key(it):
                 cp = getattr(it, 'connection_point', None)
                 if cp and cp.isVisible():
@@ -7471,24 +8044,52 @@ class LayoutScene(QGraphicsScene):
                     ordered.append(item)
             items = [item for item in ordered if item in selected]
 
+        # 将人物组合（图片+子文字）归一化为人物根节点；若跨越多个不同人物节点，自动按横向a↔a/纵向b→a智能选点
+        person_roots = []
+        for it in items:
+            info = self.get_person_group_info(it)
+            if info and info['root'] not in person_roots:
+                person_roots.append(info['root'])
+
         commands = []
         skipped_parent_child = 0
         skipped_existing = 0
 
-        for item1, item2 in zip(items, items[1:]):
-            if item1 == item2:
-                continue
-            if has_ancestor_relation(item1, item2):
-                skipped_parent_child += 1
-                continue
+        if len(person_roots) >= 2:
+            # 跨多个人物节点：自动判断每对节点是同排横向(a↔a)还是上下跨代纵向(b→a)
+            if self.last_selection_by_marquee:
+                def group_sort_key(root_it):
+                    cp = getattr(root_it, 'connection_point', None)
+                    p = cp.get_scene_center() if (cp and cp.isVisible()) else root_it.scenePos()
+                    return (p.y(), -p.x())
+                person_roots.sort(key=group_sort_key)
 
-            cmd = self._make_connector_command(item1, item2)
-            if cmd is None:
-                skipped_existing += 1
-                continue
+            for root1, root2 in zip(person_roots, person_roots[1:]):
+                src_ep, dst_ep, _mode = self.resolve_smart_avatar_endpoints(root1, root2)
+                if src_ep is None or dst_ep is None:
+                    continue
+                cmd = self._make_connector_command(src_ep, dst_ep)
+                if cmd is None:
+                    skipped_existing += 1
+                    continue
+                cmd.execute()
+                commands.append(cmd)
+        else:
+            # 单个人物内部的图片与子文字直接连接
+            for item1, item2 in zip(items, items[1:]):
+                if item1 == item2:
+                    continue
+                if has_ancestor_relation(item1, item2):
+                    skipped_parent_child += 1
+                    continue
 
-            cmd.execute()
-            commands.append(cmd)
+                cmd = self._make_connector_command(item1, item2)
+                if cmd is None:
+                    skipped_existing += 1
+                    continue
+
+                cmd.execute()
+                commands.append(cmd)
 
         if commands:
             self.undo_stack.push(MacroCommand(self, commands))
@@ -7841,7 +8442,10 @@ class LayoutScene(QGraphicsScene):
         return new_items
 
     def _make_connector_command(self, item1, item2):
-        """创建连接线命令但不 push 到栈"""
+        """创建两个元素之间的连线命令（不立即执行），若已存在或包含被锁定图片则返回 None"""
+        if (isinstance(item1, VImageItem) and getattr(item1, 'locked', False)) or (
+                isinstance(item2, VImageItem) and getattr(item2, 'locked', False)):
+            return None
         # 检查是否已连接
         for conn in self.image_text_connectors:
             if hasattr(conn, 'image_item'):
@@ -7963,6 +8567,13 @@ class LayoutScene(QGraphicsScene):
                 self.cancel_resize()
                 event.accept()
                 return
+            if self.avatar_connect_mode:
+                if self.avatar_connect_source is not None:
+                    self.clear_avatar_connect_source()
+                else:
+                    self.set_avatar_connect_mode(False)
+                event.accept()
+                return
             if self.connection_mode:
                 self.cancel_connection_mode()
                 event.accept()
@@ -7970,8 +8581,10 @@ class LayoutScene(QGraphicsScene):
             elif self.image_text_binding_mode:
                 self.image_text_binding_mode = False
                 self.image_text_source = None
+                self.avatar_connect_source = None
                 if self.views():
                     self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                self.update()
                 print("已取消图文连接模式")
                 event.accept()
                 return
@@ -8367,6 +8980,9 @@ class LayoutView(QGraphicsView):
         for item in self.scene().items():
             if not isinstance(item, ConnectionPoint) or not item.isVisible() or item == exclude_point:
                 continue
+            # 被锁定的图片不参与连线，跳过其连接点
+            if isinstance(getattr(item, 'parent_element', None), VImageItem) and getattr(item.parent_element, 'locked', False):
+                continue
             view_pos = self.mapFromScene(item.get_scene_center())
             dist = math.hypot(view_pos.x() - pos.x(), view_pos.y() + hit_offset_y - pos.y())
             if dist <= nearest_dist:
@@ -8562,6 +9178,10 @@ class LayoutView(QGraphicsView):
 
     def contextMenuEvent(self, event):
         """右键：点到元素交给元素处理，空白处弹画布菜单"""
+        if getattr(self, '_suppress_next_context_menu', False):
+            self._suppress_next_context_menu = False
+            event.accept()
+            return
         scene_pos = self.mapToScene(event.pos())
 
         # 遍历该点所有 items（包括锁定的不可选元素）
@@ -8619,7 +9239,85 @@ class LayoutView(QGraphicsView):
             event.accept()
             return
 
+        # 右键：若正处于连线起点等待状态，单击右键立即取消当前起点（不弹菜单）
+        if event.button() == Qt.MouseButton.RightButton and self.scene():
+            sc = self.scene()
+            if sc.connection_mode:
+                sc.cancel_connection_mode()
+                self._suppress_next_context_menu = True
+                event.accept()
+                return
+            if sc.avatar_connect_source is not None or sc.image_text_binding_mode:
+                sc.clear_avatar_connect_source()
+                self._suppress_next_context_menu = True
+                event.accept()
+                return
+
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
+            sc = self.scene()
+            # 1) 若开启了「⚡ 点头像连线」模式 或 右键「图文连接」模式：直接点人物头像/文字/独立拐点即可自动判断 a/b 点连线
+            #    （被锁定的底图/图片会自动被 find_connectable_element_at 穿透忽略）
+            if sc.avatar_connect_mode or sc.image_text_binding_mode:
+                if not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
+                    scene_pos = self.mapToScene(pos)
+                    target_elem = sc.find_connectable_element_at(scene_pos, self.transform())
+                    if target_elem is not None:
+                        sc.handle_avatar_connect_click(target_elem, event.modifiers())
+                        event.accept()
+                        return
+                    elif sc.avatar_connect_source is not None:
+                        sc.clear_avatar_connect_source()
+                        event.accept()
+                        return
+
+            # 2) 普通编辑模式下：按住 Shift（或 Ctrl+Shift）直接左键点击人物头像，立即与当前已选人物智能连线并连续接龙
+            if (not sc.avatar_connect_mode
+                    and not sc.connection_mode
+                    and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                    and not (self._in_h_ruler(pos) or self._in_v_ruler(pos))):
+                scene_pos = self.mapToScene(pos)
+                target_elem = sc.find_connectable_element_at(scene_pos, self.transform())
+                if target_elem is not None:
+                    # 查找当前已选中的起点人物（过滤被锁定的图片）
+                    selected_elems = [
+                        i for i in sc.selectedItems()
+                        if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
+                    ]
+                    source_elem = None
+                    if sc.selection_order:
+                        for cand in reversed(sc.selection_order):
+                            if cand in selected_elems:
+                                source_elem = cand
+                                break
+                    if source_elem is None and selected_elems:
+                        source_elem = selected_elems[-1]
+
+                    target_info = sc.get_person_group_info(target_elem)
+                    source_info = sc.get_person_group_info(source_elem) if source_elem else None
+                    if source_info and target_info and source_info['root'] != target_info['root']:
+                        ok, mode = sc.connect_avatars_smart(source_info['root'], target_info['root'])
+                        mode_label = "横向 (a点 ↔ a点)" if mode == 'horizontal' else "纵向 (b点 → a点)"
+                        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                            # Ctrl+Shift：固定起点一对多
+                            sc._show_status_message(
+                                f"已创建{mode_label}连线（Ctrl+Shift固定起点，可继续点击其他子女头像）",
+                                4000
+                            )
+                        else:
+                            # Shift：自动将选中焦点推进到当前目标人物，实现一路 Shift 点击接龙
+                            sc.clearSelection()
+                            t_root = target_info['root']
+                            if isinstance(t_root, BaseElement) and not getattr(t_root, 'locked', False):
+                                t_root.setSelected(True)
+                                sc.selection_order = [t_root]
+                            sc._show_status_message(
+                                f"已接龙{mode_label}连线！继续按住 Shift 点击下一人物头像可连续接龙",
+                                4000
+                            )
+                        sc.update()
+                        event.accept()
+                        return
+
             exclude_point = self.scene().connection_source_point if self.scene().connection_mode else None
             point = self._connection_point_at(pos, exclude_point=exclude_point)
             if point:
@@ -8792,6 +9490,25 @@ class LayoutView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             event.accept()
         else:
+            sc = self.scene()
+            if sc:
+                scene_pos = self.mapToScene(event.pos())
+                sc._connect_preview_scene_pos = scene_pos
+                need_preview = (
+                    sc.avatar_connect_mode
+                    or sc.image_text_binding_mode
+                    or sc.connection_mode
+                    or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                )
+                if need_preview:
+                    exclude_root = sc.avatar_connect_source
+                    sc._avatar_hover_target = sc.find_connectable_element_at(
+                        scene_pos, self.transform(), exclude_root=exclude_root
+                    )
+                    self.viewport().update()
+                elif sc._avatar_hover_target is not None:
+                    sc._avatar_hover_target = None
+                    self.viewport().update()
             # 更新标尺的光标跟随线
             self.update()
             super().mouseMoveEvent(event)
@@ -10385,6 +11102,14 @@ class MainWindow(QMainWindow):
             self.text_right_edge_snap_action.blockSignals(False)
         if hasattr(self, 'text_preset_combo'):
             self._refresh_text_preset_combo()
+        if hasattr(self, 'btn_avatar_connect'):
+            self.btn_avatar_connect.blockSignals(True)
+            self.btn_avatar_connect.setChecked(getattr(self.scene, 'avatar_connect_mode', False))
+            self.btn_avatar_connect.blockSignals(False)
+        if hasattr(self, 'avatar_connect_action'):
+            self.avatar_connect_action.blockSignals(True)
+            self.avatar_connect_action.setChecked(getattr(self.scene, 'avatar_connect_mode', False))
+            self.avatar_connect_action.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
@@ -11223,7 +11948,14 @@ class MainWindow(QMainWindow):
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
         self._add_toolbar_action(main_toolbar, "顶部对齐", self.align_top, "按顶部边缘对齐选中对象")
-        self._add_toolbar_action(main_toolbar, "智能连接", self.auto_connect_selected, "按选中顺序连接元素")
+        self.btn_avatar_connect = self._add_toolbar_action(
+            main_toolbar,
+            "⚡点头像连线",
+            self.toggle_avatar_connect_mode,
+            "开启后只管点击人物头像，自动按横向(a↔a)/纵向(b→a)选点连线（被锁定图片自动忽略；按住Shift连续接龙，按住Ctrl一对多）",
+            checkable=True
+        )
+        self._add_toolbar_action(main_toolbar, "智能连接", self.auto_connect_selected, "框选或多选人物后一键连接（自动判断同排横向a↔a / 跨代纵向b→a）")
 
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
@@ -11551,6 +12283,12 @@ class MainWindow(QMainWindow):
         edit_menu = menubar.addMenu('编辑设置')
 
         # 连线设置
+        self.avatar_connect_action = QAction('⚡ 点头像智能连线模式（自动判断a/b点）', self)
+        self.avatar_connect_action.setCheckable(True)
+        self.avatar_connect_action.setShortcut('Alt+C')
+        self.avatar_connect_action.toggled.connect(self.toggle_avatar_connect_mode)
+        edit_menu.addAction(self.avatar_connect_action)
+
         set_line_width_action = QAction('设置连线粗细...', self)
         set_line_width_action.triggered.connect(lambda: self.set_line_width())
         edit_menu.addAction(set_line_width_action)
@@ -12156,8 +12894,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'smart_brush_action') and self.smart_brush_action.isChecked() != enabled:
             self.smart_brush_action.setChecked(enabled)
 
+    def toggle_avatar_connect_mode(self, enabled):
+        """切换⚡点头像智能连线模式"""
+        self.scene.set_avatar_connect_mode(enabled)
+
     def toggle_resize_mode(self, enabled):
         """切换图片调整大小模式"""
+        if enabled and getattr(self.scene, 'avatar_connect_mode', False):
+            self.scene.set_avatar_connect_mode(False)
         self.scene.set_resize_mode(enabled)
         if enabled:
             self.status_bar.showMessage("调整大小模式：拖拽控制点缩放  回车/双击空白=确认  Esc=取消还原")
