@@ -213,6 +213,7 @@ class ConfigManager:
             'insert_image_fit_canvas': False,  # 插入图片时自动适应画布大小
             'hide_connection_points_when_image_selected': False,
             'show_text_hover_tooltip': False,
+            'show_connection_points_default': True,
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
@@ -6303,11 +6304,12 @@ class LayoutScene(QGraphicsScene):
         self._image_top_edge_snap_indicator = None  # 顶部吸附指示器
         self.clipboard_items = []  
         self.clipboard_image_text_connections = []  
-        self.show_connection_points = True  
+        self.show_connection_points = True
         self.connection_mode = False  
         self.connection_source_point = None  
         self.asset_manager = AssetManager()
         self.config_manager = ConfigManager()  # 配置管理器
+        self.show_connection_points = self.config_manager.get('show_connection_points_default', True)
         self.image_text_binding_mode = False  
         self.image_text_source = None
         self.avatar_connect_mode = False  # 点图片智能连线模式（自动判断横向a↔a / 纵向b→a）
@@ -13027,6 +13029,7 @@ class MainWindow(QMainWindow):
         if not self.scene:
             return
         self.scene.show_connection_points = bool(visible)
+        self.scene.config_manager.set('show_connection_points_default', bool(visible))
         selected = self.scene.selectedItems()
         has_images = any(isinstance(item, VImageItem) for item in selected)
         self._apply_connection_point_selection_visibility(has_images)
