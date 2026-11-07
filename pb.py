@@ -2577,6 +2577,44 @@ class AddConnectorCommand(UndoCommand):
                 self.scene.image_text_connectors.remove(self.connector)
 
 
+class AddPerpendicularToGuideCommand(UndoCommand):
+    """从连接点向辅助线画垂线的撤销命令（同步管理垂足独立连接点与连接线）"""
+    def __init__(self, scene, connector, foot_point, created_new_point=True):
+        super().__init__(scene)
+        self.connector = connector
+        self.foot_point = foot_point
+        self.created_new_point = created_new_point
+
+    def execute(self):
+        if self.created_new_point and self.foot_point is not None:
+            if self.foot_point.scene() is not self.scene:
+                self.scene.addItem(self.foot_point)
+            if self.foot_point not in self.scene.free_connection_points:
+                self.scene.free_connection_points.append(self.foot_point)
+            self.foot_point.setVisible(self.scene.show_connection_points)
+        if self.connector not in self.scene.image_text_connectors:
+            self.scene.addItem(self.connector)
+            self.scene.image_text_connectors.append(self.connector)
+        for pt in (getattr(self.connector, 'point1', None), getattr(self.connector, 'point2', None)):
+            if pt is not None and self.connector not in pt.connected_lines:
+                pt.connected_lines.append(self.connector)
+        self.connector.update_path()
+        self.scene.sync_connectors_visibility()
+
+    def undo(self):
+        for pt in (getattr(self.connector, 'point1', None), getattr(self.connector, 'point2', None)):
+            if pt is not None and self.connector in pt.connected_lines:
+                pt.connected_lines.remove(self.connector)
+        if self.connector in self.scene.image_text_connectors:
+            self.scene.removeItem(self.connector)
+            self.scene.image_text_connectors.remove(self.connector)
+        if self.created_new_point and self.foot_point is not None and not self.foot_point.connected_lines:
+            if self.foot_point in self.scene.free_connection_points:
+                self.scene.free_connection_points.remove(self.foot_point)
+            if self.foot_point.scene() is self.scene:
+                self.scene.removeItem(self.foot_point)
+
+
 class MacroCommand(UndoCommand):
     """批量命令：将多个命令打包为一次撤销/重做"""
     def __init__(self, scene, commands):
@@ -2855,8 +2893,14 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def _show_context_menu(self, global_pos):
         """显示独立连接点菜单；视图拦截右键时也通过此入口调用。"""
         menu = QMenu()
+        perp_action = menu.addAction("⊥ 向辅助线画垂线 (Alt+V)")
+        menu.addSeparator()
         delete_action = menu.addAction("删除此连接点")
-        if menu.exec(global_pos) != delete_action or self.scene() is None:
+        chosen = menu.exec(global_pos)
+        if chosen == perp_action and self.scene() is not None:
+            self.scene().draw_perpendicular_to_guide(items=[self])
+            return
+        if chosen != delete_action or self.scene() is None:
             return
         scene = self.scene()
         # 先移除依赖此点的连线，避免删除后留下无法更新的端点引用。
@@ -3060,6 +3104,22 @@ class VGenericConnector(QGraphicsPathItem):
             if (self.point1 is None or self.point2 is None
                     or self.point1.scene() is None or self.point2.scene() is None):
                 return
+            # 若端点是向辅助线所作垂线的垂足点，当源元素或辅助线移动时自动保持严格垂直对齐
+            for pt in (self.point1, self.point2):
+                guide = getattr(pt, '_guide_ref', None)
+                src_pt = getattr(pt, '_perp_source_point', None)
+                if (guide is not None and guide.scene() is not None
+                        and src_pt is not None and src_pt.scene() is not None
+                        and not getattr(pt, '_updating_perp_pos', False)):
+                    src_c = src_pt.get_scene_center()
+                    if guide.orientation == Qt.Orientation.Horizontal:
+                        new_foot = QPointF(src_c.x(), guide.pos_value)
+                    else:
+                        new_foot = QPointF(guide.pos_value, src_c.y())
+                    if (pt.pos() - new_foot).manhattanLength() > 0.05:
+                        pt._updating_perp_pos = True
+                        pt.setPos(new_foot)
+                        pt._updating_perp_pos = False
             anchor1 = self.point1.get_scene_center()
             anchor2 = self.point2.get_scene_center()
         else:
@@ -3840,6 +3900,7 @@ class BaseElement(QGraphicsItem):
         # 图文连接选项
         menu.addSeparator()
         connect_image_text_action = menu.addAction("图文连接 (Connect to Image/Text)")
+        perp_to_guide_action = menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)")
         disconnect_image_text_action = menu.addAction("断开图文连接 (Disconnect Image/Text)")
         
         # 批量图文连接选项
@@ -3893,6 +3954,11 @@ class BaseElement(QGraphicsItem):
         elif action == connect_image_text_action:
             if self.scene():
                 self.scene().start_image_text_binding(self)
+        elif action == perp_to_guide_action:
+            if self.scene():
+                sel = [i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
+                targets = sel if (len(sel) > 1 and (self in sel or self.get_root_parent_element() in sel)) else [self]
+                self.scene().draw_perpendicular_to_guide(items=targets)
         elif action == disconnect_image_text_action:
             if self.scene():
                 self.scene().remove_image_text_connectors(self)
@@ -5552,6 +5618,12 @@ class VImageItem(BaseElement):
         menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
         menu.addSeparator()
         menu.addAction("图文连接").triggered.connect(lambda: self.scene().start_image_text_binding(self) if self.scene() else None)
+        menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)").triggered.connect(
+            lambda: self.scene().draw_perpendicular_to_guide(
+                items=([i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
+                       if (self.isSelected() and len(self.scene().selectedItems()) > 1) else [self])
+            ) if self.scene() else None
+        )
         menu.addAction("断开图文连接").triggered.connect(lambda: self.scene().remove_image_text_connectors(self) if self.scene() else None)
 
         menu.exec(global_pos)
@@ -5976,6 +6048,18 @@ class GuideItem(QGraphicsItem):
             else:
                 self.pos_value = self._start_value + delta.x()
             self._update_pos()
+            if self.scene():
+                for pt in getattr(self.scene(), 'free_connection_points', []):
+                    if getattr(pt, '_guide_ref', None) is self and pt.scene() is self.scene():
+                        src_pt = getattr(pt, '_perp_source_point', None)
+                        src_c = src_pt.get_scene_center() if (src_pt and src_pt.scene()) else pt.get_scene_center()
+                        new_pos = QPointF(src_c.x(), self.pos_value) if self.orientation == Qt.Orientation.Horizontal else QPointF(self.pos_value, src_c.y())
+                        pt._updating_perp_pos = True
+                        pt.setPos(new_pos)
+                        pt._updating_perp_pos = False
+                        for conn in list(getattr(pt, 'connected_lines', [])):
+                            if conn.scene():
+                                conn.update_path()
             self.update()
             event.accept()
         else:
@@ -6441,6 +6525,7 @@ class LayoutScene(QGraphicsScene):
         self.avatar_connect_source = None  # 当前智能连线起点人物元素
         self._avatar_hover_target = None  # 鼠标当前悬停的目标人物元素
         self._connect_preview_scene_pos = None  # 动态预览线当前鼠标场景位置
+        self._hover_perp_guide = None  # 选中对象后鼠标靠近的目标辅助线（用于自动显示垂线虚线预览）
         self.selection_order = []  # 记录选中顺序
         self.last_selection_by_marquee = False  # 最后一次选中是否为框选
         self.background_pixmap = None  # 背景图片缓存
@@ -7517,6 +7602,180 @@ class LayoutScene(QGraphicsScene):
             else:
                 return g2['point_b'], g1['point_a'], 'vertical'
 
+    def _resolve_source_point_and_guide(self, item, target_guide=None):
+        """解析单个元素（ConnectionPoint / VImageItem / VTextItem）用于画垂线的源连接点与目标辅助线"""
+        visible_guides = [g for g in self.guides if g.isVisible()]
+        if not visible_guides:
+            return None, None
+
+        chosen_guide = target_guide if (target_guide in visible_guides) else (
+            self._selected_guide if (self._selected_guide in visible_guides) else None
+        )
+
+        def _nearest_guide_for_pos(pt_pos, prefer_guide=None):
+            if prefer_guide is not None:
+                return prefer_guide
+            return min(
+                visible_guides,
+                key=lambda g: abs(g.pos_value - (pt_pos.y() if g.orientation == Qt.Orientation.Horizontal else pt_pos.x()))
+            )
+
+        # 1) 直接传入了 ConnectionPoint
+        if isinstance(item, ConnectionPoint):
+            if isinstance(item.parent_element, VImageItem) and getattr(item.parent_element, 'locked', False):
+                return None, None
+            c = item.get_scene_center()
+            g = _nearest_guide_for_pos(c, chosen_guide)
+            return item, g
+
+        # 2) 传入了单独的 VTextItem（且未开启选子即选父，或该文字无父级图片）
+        if isinstance(item, VTextItem) and (
+                not self.config_manager.get('select_child_selects_parent', True)
+                or not isinstance(item.parentItem(), VImageItem)):
+            cp = getattr(item, 'connection_point', None)
+            if cp is not None:
+                c = cp.get_scene_center()
+                g = _nearest_guide_for_pos(c, chosen_guide)
+                return cp, g
+
+        # 3) 人物组合或图片节点：根据目标辅助线在人物上方还是下方，自动选择 a点（图片顶部）或 b点（子文字底部）
+        info = self.get_person_group_info(item)
+        if not info:
+            return None, None
+        if info['is_free_point']:
+            pt = info['root']
+            return pt, _nearest_guide_for_pos(pt.get_scene_center(), chosen_guide)
+
+        pt_a_elem = info['point_a']
+        pt_b_elem = info['point_b']
+        cp_a = pt_a_elem if isinstance(pt_a_elem, ConnectionPoint) else getattr(pt_a_elem, 'connection_point', None)
+        cp_b = pt_b_elem if isinstance(pt_b_elem, ConnectionPoint) else getattr(pt_b_elem, 'connection_point', None)
+        if cp_a is None and cp_b is None:
+            return None, None
+        if cp_a is None:
+            return cp_b, _nearest_guide_for_pos(cp_b.get_scene_center(), chosen_guide)
+        if cp_b is None or cp_a == cp_b:
+            return cp_a, _nearest_guide_for_pos(cp_a.get_scene_center(), chosen_guide)
+
+        pos_a = cp_a.get_scene_center()
+        pos_b = cp_b.get_scene_center()
+        mid_y = (pos_a.y() + pos_b.y()) / 2.0
+
+        if chosen_guide is not None:
+            if chosen_guide.orientation == Qt.Orientation.Horizontal:
+                # 辅助线在人物中心上方 -> 用顶部 a 点；在下方 -> 用底部 b 点
+                return (cp_a if chosen_guide.pos_value <= mid_y else cp_b), chosen_guide
+            else:
+                return cp_a, chosen_guide
+
+        # 未指定特定辅助线：比较 a 点到最近辅助线 与 b 点到最近辅助线的距离，取更近的一对
+        g_a = _nearest_guide_for_pos(pos_a)
+        g_b = _nearest_guide_for_pos(pos_b)
+        dist_a = abs(g_a.pos_value - (pos_a.y() if g_a.orientation == Qt.Orientation.Horizontal else pos_a.x()))
+        dist_b = abs(g_b.pos_value - (pos_b.y() if g_b.orientation == Qt.Orientation.Horizontal else pos_b.x()))
+        if dist_a <= dist_b:
+            return cp_a, g_a
+        return cp_b, g_b
+
+    def _make_perpendicular_to_guide_command(self, source_point, guide):
+        """创建从指定连接点向辅助线画垂线的命令（若已存在相同垂线则返回 None）"""
+        if source_point is None or guide is None or source_point.scene() != self:
+            return None
+        if isinstance(source_point.parent_element, VImageItem) and getattr(source_point.parent_element, 'locked', False):
+            return None
+
+        src_c = source_point.get_scene_center()
+        if guide.orientation == Qt.Orientation.Horizontal:
+            foot_pos = QPointF(src_c.x(), guide.pos_value)
+        else:
+            foot_pos = QPointF(guide.pos_value, src_c.y())
+
+        # 若连接点本身就在辅助线上（距离小于 1px），无需画垂线
+        if (foot_pos - src_c).manhattanLength() < 1.0:
+            return None
+
+        # 查找辅助线上垂足位置是否已有独立连接点
+        foot_point = None
+        created_new = False
+        for pt in getattr(self, 'free_connection_points', []):
+            if pt.scene() is self and (pt.get_scene_center() - foot_pos).manhattanLength() <= 2.5:
+                foot_point = pt
+                break
+
+        if foot_point is not None:
+            for existing in self.image_text_connectors:
+                p1, p2 = getattr(existing, 'point1', None), getattr(existing, 'point2', None)
+                if (p1 == source_point and p2 == foot_point) or (p1 == foot_point and p2 == source_point):
+                    return None
+        else:
+            foot_point = ConnectionPoint(None, "custom")
+            foot_point.setPos(foot_pos)
+            created_new = True
+
+        foot_point._guide_ref = guide
+        foot_point._perp_source_point = source_point
+
+        conn = VGenericConnector(
+            source_point.parent_element,
+            None,
+            'generic',
+            self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
+            source_point,
+            foot_point
+        )
+        return AddPerpendicularToGuideCommand(self, conn, foot_point, created_new_point=created_new)
+
+    def draw_perpendicular_to_guide(self, items=None, target_guide=None):
+        """从选中元素或连接点向辅助线画垂线（支持单个或批量选中，支持 Ctrl+Z 撤销）"""
+        visible_guides = [g for g in self.guides if g.isVisible()]
+        if not visible_guides:
+            self._show_status_message("请先从顶部或左侧标尺拖出至少一条辅助线", 3500)
+            return 0
+
+        if items is None:
+            items = [
+                i for i in self.selectedItems()
+                if isinstance(i, (BaseElement, ConnectionPoint)) and not getattr(i, 'locked', False)
+            ]
+            # 若当前正处于连接点连线模式或点图片连线模式且有起点，也支持直接触发
+            if not items:
+                if self.connection_mode and self.connection_source_point is not None:
+                    items = [self.connection_source_point]
+                elif self.avatar_connect_source is not None:
+                    items = [self.avatar_connect_source]
+
+        if not items:
+            self._show_status_message("请先选中要画垂线的人物图片、文字或连接点", 3500)
+            return 0
+
+        # 去重：避免同一个人物的图片和子文字重复生成同一条垂线
+        resolved_pairs = []
+        seen_points = set()
+        for it in items:
+            src_pt, guide = self._resolve_source_point_and_guide(it, target_guide=target_guide)
+            if src_pt is not None and guide is not None and (src_pt, guide) not in seen_points:
+                seen_points.add((src_pt, guide))
+                resolved_pairs.append((src_pt, guide))
+
+        commands = []
+        for src_pt, guide in resolved_pairs:
+            cmd = self._make_perpendicular_to_guide_command(src_pt, guide)
+            if cmd is not None:
+                cmd.execute()
+                commands.append(cmd)
+
+        if len(commands) == 1:
+            self.undo_stack.push(commands[0])
+        elif len(commands) > 1:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        if commands:
+            self._show_status_message(f"已向辅助线生成 {len(commands)} 条垂线（移动人物或辅助线时垂线会自动跟随保持垂直）", 4000)
+        else:
+            self._show_status_message("所选连接点与辅助线之间已存在垂线，或无需新建", 3000)
+        self.update()
+        return len(commands)
+
     def connect_avatars_smart(self, item1, item2):
         """智能连接两个人物节点（自动按横向a↔a、纵向b→a创建连线并推入撤销栈；连接点隐藏时同样正常工作）。"""
         src_ep, dst_ep, mode = self.resolve_smart_avatar_endpoints(item1, item2)
@@ -7694,10 +7953,102 @@ class LayoutScene(QGraphicsScene):
         self.update()
         return True
 
+    def find_guide_near_pos(self, scene_pos, view_transform=None, pixel_tolerance=24.0):
+        """查找鼠标附近（默认 24 屏幕像素内）的可见辅助线"""
+        visible_guides = [g for g in self.guides if g.isVisible()]
+        if not visible_guides:
+            return None
+        scale = 1.0
+        if view_transform is not None:
+            scale = max(0.001, abs(view_transform.m11()))
+        elif self.views():
+            scale = max(0.001, abs(self.views()[0].transform().m11()))
+        scene_tol = pixel_tolerance / scale
+        best_g = None
+        best_d = scene_tol
+        for g in visible_guides:
+            d = abs(g.pos_value - (scene_pos.y() if g.orientation == Qt.Orientation.Horizontal else scene_pos.x()))
+            if d <= best_d:
+                best_d = d
+                best_g = g
+        return best_g
+
+    def _get_active_items_for_perp_preview(self):
+        """获取当前可用于向辅助线画垂线的已选对象或连线起点"""
+        if self.connection_mode and self.connection_source_point is not None:
+            if self.connection_source_point.scene() == self:
+                return [self.connection_source_point]
+        if (self.avatar_connect_mode or self.image_text_binding_mode) and self.avatar_connect_source is not None:
+            if self.avatar_connect_source.scene() == self and not getattr(self.avatar_connect_source, 'locked', False):
+                return [self.avatar_connect_source]
+        return [
+            i for i in self.selectedItems()
+            if isinstance(i, (BaseElement, ConnectionPoint)) and not getattr(i, 'locked', False)
+        ]
+
     def _draw_smart_connection_preview(self, painter):
-        """在画布前景层绘制智能连线动态预览曲线、a/b端点高亮圈与方向提示标签"""
+        """在画布前景层绘制智能连线动态预览曲线、向辅助线画垂线的虚线提示线及端点高亮"""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 0. 当已选择对象且鼠标靠近某条辅助线时，自动从所选对象的连接点向辅助线绘制虚线垂线提示线
+        perp_guide = getattr(self, '_hover_perp_guide', None)
+        if perp_guide is not None and perp_guide.scene() == self and perp_guide.isVisible():
+            perp_items = self._get_active_items_for_perp_preview()
+            if perp_items:
+                scale = 1.0
+                if self.views():
+                    scale = max(0.001, abs(self.views()[0].transform().m11()))
+                r_scene = 5.5 / scale
+                dash_pen = QPen(QColor(0, 175, 85, 235), 2.5, Qt.PenStyle.DashLine)
+                dash_pen.setCosmetic(True)
+                pt_pen = QPen(QColor(255, 255, 255), 2)
+                pt_pen.setCosmetic(True)
+
+                seen_pts = set()
+                drawn_count = 0
+                last_foot = None
+                for it in perp_items:
+                    src_pt, g = self._resolve_source_point_and_guide(it, target_guide=perp_guide)
+                    if src_pt is None or g is None or src_pt in seen_pts:
+                        continue
+                    seen_pts.add(src_pt)
+                    p1 = src_pt.get_scene_center()
+                    p2 = QPointF(p1.x(), g.pos_value) if g.orientation == Qt.Orientation.Horizontal else QPointF(g.pos_value, p1.y())
+                    if (p2 - p1).manhattanLength() < 1.0:
+                        continue
+                    # 绘制从连接点到辅助线垂足的虚线提示线
+                    painter.setPen(dash_pen)
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawLine(p1, p2)
+                    # 绘制起点连接点与辅助线垂足的高亮圆点
+                    painter.setPen(pt_pen)
+                    painter.setBrush(QBrush(QColor(0, 175, 85, 235)))
+                    painter.drawEllipse(p1, r_scene, r_scene)
+                    painter.drawEllipse(p2, r_scene, r_scene)
+                    last_foot = p2
+                    drawn_count += 1
+
+                if drawn_count > 0 and self._connect_preview_scene_pos is not None and self.views():
+                    badge_text = f"点击辅助线生成垂线 ({drawn_count}条)" if drawn_count > 1 else "点击辅助线生成垂线"
+                    painter.save()
+                    painter.resetTransform()
+                    view = self.views()[0]
+                    vp_pt = view.mapFromScene(self._connect_preview_scene_pos)
+                    font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
+                    painter.setFont(font)
+                    fm = QFontMetrics(font)
+                    tw = fm.horizontalAdvance(badge_text) + 14
+                    th = fm.height() + 6
+                    badge_rect = QRectF(vp_pt.x() + 14, vp_pt.y() - th - 8, tw, th)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(QBrush(QColor(0, 130, 65, 225)))
+                    painter.drawRoundedRect(badge_rect, 4, 4)
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+                    painter.restore()
+                    painter.restore()
+                    return
 
         # 1. 传统连接点点击模式下的动态预览线
         if self.connection_mode and self.connection_source_point is not None and self._connect_preview_scene_pos is not None:
@@ -9424,6 +9775,17 @@ class LayoutView(QGraphicsView):
                         event.accept()
                         return
                     elif sc.avatar_connect_source is not None:
+                        hit_guide = next(
+                            (it for it in sc.items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape, Qt.SortOrder.DescendingOrder, self.transform())
+                             if isinstance(it, GuideItem) and it.isVisible()),
+                            None
+                        )
+                        if hit_guide is not None:
+                            sc.draw_perpendicular_to_guide(items=[sc.avatar_connect_source], target_guide=hit_guide)
+                            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                                sc.clear_avatar_connect_source()
+                            event.accept()
+                            return
                         sc.clear_avatar_connect_source()
                         event.accept()
                         return
@@ -9510,10 +9872,47 @@ class LayoutView(QGraphicsView):
             # 2. 检查点击位置的物体状态（实现“穿透”锁定物体的关键）
             raw_hit = self.itemAt(pos)
 
-            # 如果点击的是辅助线，直接交给场景处理，不触发框选
-            if isinstance(raw_hit, GuideItem):
-                super(LayoutView, self).mousePressEvent(event)
-                return
+            # 如果点击的是辅助线（或正处于靠近辅助线的垂线虚线预览状态）：
+            sc = self.scene()
+            hover_guide = getattr(sc, '_hover_perp_guide', None) if sc else None
+            target_guide_hit = raw_hit if isinstance(raw_hit, GuideItem) else hover_guide
+            if target_guide_hit is not None:
+                if event.button() == Qt.MouseButton.LeftButton and sc:
+                    if sc.connection_mode and sc.connection_source_point is not None:
+                        src_pt = sc.connection_source_point
+                        sc._hover_perp_guide = None
+                        sc.draw_perpendicular_to_guide(items=[src_pt], target_guide=target_guide_hit)
+                        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                            sc.cancel_connection_mode()
+                        event.accept()
+                        return
+                    if (sc.avatar_connect_mode or sc.image_text_binding_mode) and sc.avatar_connect_source is not None:
+                        src_elem = sc.avatar_connect_source
+                        sc._hover_perp_guide = None
+                        sc.draw_perpendicular_to_guide(items=[src_elem], target_guide=target_guide_hit)
+                        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                            sc.clear_avatar_connect_source()
+                        event.accept()
+                        return
+                    sel = [
+                        i for i in sc.selectedItems()
+                        if isinstance(i, (BaseElement, ConnectionPoint)) and not getattr(i, 'locked', False)
+                    ]
+                    if sel:
+                        # 记录待确认的辅助线垂线点击：若松开鼠标时未拖动辅助线，则生成垂线；若拖动了则正常移动辅助线
+                        self._pending_perp_guide = target_guide_hit
+                        self._pending_perp_items = list(sel)
+                        self._pending_perp_press_pos = event.pos()
+                        sc._hover_perp_guide = None
+                        self.viewport().update()
+                        if isinstance(raw_hit, GuideItem):
+                            super(LayoutView, self).mousePressEvent(event)
+                        else:
+                            event.accept()
+                        return
+                if isinstance(raw_hit, GuideItem):
+                    super(LayoutView, self).mousePressEvent(event)
+                    return
             self.scene().clear_guide_selection()
 
             hit_element = raw_hit
@@ -9655,17 +10054,26 @@ class LayoutView(QGraphicsView):
             if sc:
                 scene_pos = self.mapToScene(event.pos())
                 sc._connect_preview_scene_pos = scene_pos
+                # 检测：当有选中对象（或处于连线模式）且未按住左键拖拽时，鼠标靠近辅助线自动显示垂线虚线预览
+                old_hover_guide = getattr(sc, '_hover_perp_guide', None)
+                if not (event.buttons() & Qt.MouseButton.LeftButton) and sc._get_active_items_for_perp_preview():
+                    sc._hover_perp_guide = sc.find_guide_near_pos(scene_pos, self.transform(), pixel_tolerance=24.0)
+                else:
+                    sc._hover_perp_guide = None
+
                 need_preview = (
                     sc.avatar_connect_mode
                     or sc.image_text_binding_mode
                     or sc.connection_mode
                     or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                    or (sc._hover_perp_guide is not None)
+                    or (old_hover_guide is not None)
                 )
                 if need_preview:
                     exclude_root = sc.avatar_connect_source
                     sc._avatar_hover_target = sc.find_connectable_element_at(
                         scene_pos, self.transform(), exclude_root=exclude_root
-                    )
+                    ) if (sc.avatar_connect_mode or sc.image_text_binding_mode or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)) else None
                     self.viewport().update()
                 elif sc._avatar_hover_target is not None:
                     sc._avatar_hover_target = None
@@ -9688,6 +10096,23 @@ class LayoutView(QGraphicsView):
         scene = self.scene()
         if scene:
             scene.clear_snap_guides()
+
+        if event.button() == Qt.MouseButton.LeftButton and getattr(self, '_pending_perp_guide', None) is not None:
+            guide = self._pending_perp_guide
+            items = getattr(self, '_pending_perp_items', [])
+            press_pos = getattr(self, '_pending_perp_press_pos', event.pos())
+            self._pending_perp_guide = None
+            self._pending_perp_items = []
+            # 若按下与松开距离不超过 5px，视为点击辅助线确认生成垂线（若超过则为拖动辅助线）
+            if (event.pos() - press_pos).manhattanLength() <= 5 and scene and items:
+                super().mouseReleaseEvent(event)
+                # 恢复因传递 mousePressEvent 可能被清空的选中状态
+                for it in items:
+                    if it.scene() == scene and not getattr(it, 'locked', False):
+                        it.setSelected(True)
+                scene.draw_perpendicular_to_guide(items=items, target_guide=guide)
+                event.accept()
+                return
 
         if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
             self._smart_brush_active = False
@@ -12417,6 +12842,11 @@ class MainWindow(QMainWindow):
         clear_guides_action.triggered.connect(self.clear_guides)
         view_menu.addAction(clear_guides_action)
 
+        perp_guide_action = QAction('⊥ 连接点向辅助线画垂线', self)
+        perp_guide_action.setShortcut('Alt+V')
+        perp_guide_action.triggered.connect(lambda: self.scene.draw_perpendicular_to_guide())
+        view_menu.addAction(perp_guide_action)
+
         unit_menu = view_menu.addMenu('界面单位')
         self.display_unit_group = QActionGroup(self)
         self.display_unit_group.setExclusive(True)
@@ -12929,17 +13359,10 @@ class MainWindow(QMainWindow):
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
         menu = QMenu(self)
-        point_mode_menu = menu.addMenu("独立连接点模式")
-        move_mode_action = point_mode_menu.addAction("移动模式（选中/拖动/框选）")
-        move_mode_action.setCheckable(True)
-        connect_mode_action = point_mode_menu.addAction("连接模式（左键依次点击连接点）")
-        connect_mode_action.setCheckable(True)
-        current_point_mode = getattr(self.scene, 'free_connection_point_mode', 'move')
-        move_mode_action.setChecked(current_point_mode == 'move')
-        connect_mode_action.setChecked(current_point_mode == 'connect')
-        point_mode_menu.addSeparator()
-        add_free_point_here_action = menu.addAction("在此处新建连接点")
-        add_free_point_action = menu.addAction("在最近辅助线交叉点新建连接点")
+        move_mode_action = None
+        connect_mode_action = None
+        add_free_point_here_action = None
+        add_free_point_action = None
         toggle_cp_lbl = "🙈 隐藏所有连接点 (Alt+P)" if getattr(self.scene, 'show_connection_points', True) else "👁 显示所有连接点 (Alt+P)"
         toggle_all_cp_action = menu.addAction(toggle_cp_lbl)
         menu.addSeparator()
@@ -12963,12 +13386,14 @@ class MainWindow(QMainWindow):
         menu.addAction("导出 PDF\tCtrl+Alt+P", self.export_pdf)
         menu.addAction("导出 CorelDRAW SVG", self.export_coreldraw_svg)
         action = menu.exec(self.view.mapToGlobal(pos))
-        if action == move_mode_action:
+        if action is None:
+            return
+        if action == toggle_all_cp_action:
+            self.toggle_connection_points()
+        elif action == move_mode_action:
             self.scene.set_free_connection_point_mode('move')
         elif action == connect_mode_action:
             self.scene.set_free_connection_point_mode('connect')
-        elif action == toggle_all_cp_action:
-            self.toggle_connection_points()
         elif action == add_free_point_here_action:
             self.scene.add_free_connection_point(self.view.mapToScene(pos))
         elif action == add_free_point_action:
