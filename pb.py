@@ -197,6 +197,7 @@ class ConfigManager:
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
+            'select_child_selects_parent': True,  # 选择子集时自动选中父级
             'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
             'text_right_edge_snap_enabled': False,  # 水平移动文字时吸附右边缘X
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
@@ -3629,8 +3630,68 @@ class BaseElement(QGraphicsItem):
                     self.scene().update_image_text_connectors(child)
                 child._update_children_connectors()
 
+    def get_root_parent_element(self):
+        """向上追溯并返回最顶层的未锁定父级 BaseElement（若无父级则返回自身）"""
+        curr = self
+        while isinstance(curr.parentItem(), BaseElement) and not getattr(curr.parentItem(), 'locked', False):
+            curr = curr.parentItem()
+        return curr
+
+    def mouseMoveEvent(self, event):
+        """当开启「选子即选父」且拖动子元素时，代理拖动其顶层父级及所有已选顶层元素"""
+        if getattr(self, '_proxy_dragging_root', None) is not None and (event.buttons() & Qt.MouseButton.LeftButton):
+            root = self._proxy_dragging_root
+            scene = self.scene()
+            drag_starts = getattr(self, '_proxy_drag_starts', {})
+            if scene and root in drag_starts:
+                delta = event.scenePos() - self._proxy_press_scene_pos
+                target_root_scene = drag_starts[root] + delta
+                rp = root.parentItem()
+                root.setPos(rp.mapFromScene(target_root_scene) if rp else target_root_scene)
+                actual_delta = root.scenePos() - drag_starts[root]
+                for other, start_pos in drag_starts.items():
+                    if other is not root and other.scene() is scene:
+                        other_target = start_pos + actual_delta
+                        op = other.parentItem()
+                        other.setPos(op.mapFromScene(other_target) if op else other_target)
+                if getattr(scene, 'stamping_session', None):
+                    scene.stamping_session['moved'] = True
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
         """记录移动命令到撤销栈"""
+        if event.button() == Qt.MouseButton.LeftButton and getattr(self, '_proxy_dragging_root', None) is not None:
+            root = self._proxy_dragging_root
+            self._proxy_dragging_root = None
+            scene = self.scene()
+            drag_starts = getattr(self, '_proxy_drag_starts', {})
+            self._proxy_drag_starts = {}
+            if scene is not None:
+                scene.hide_temp_alignment_guide()
+                scene.clear_snap_guides()
+                scene._image_right_edge_snap_indicator = None
+                scene._image_top_edge_snap_indicator = None
+                scene.update()
+                move_cmds = []
+                for it, start_pos in drag_starts.items():
+                    if it.scene() is scene:
+                        cur_pos = it.scenePos()
+                        if (cur_pos - start_pos).manhattanLength() > 2.0:
+                            move_cmds.append(MoveItemCommand(scene, it, start_pos, cur_pos))
+                if len(move_cmds) == 1:
+                    scene.undo_stack.push(move_cmds[0])
+                elif len(move_cmds) > 1:
+                    scene.undo_stack.push(MacroCommand(scene, move_cmds))
+                if getattr(scene, '_horizontal_move_lock_owner', None) is root:
+                    scene._horizontal_move_lock_y = {}
+                    scene._horizontal_move_lock_x = {}
+                    scene._horizontal_move_lock_owner = None
+                    scene._horizontal_move_owner_right_x = None
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             scene = self.scene()
             if scene is None:
@@ -3657,10 +3718,49 @@ class BaseElement(QGraphicsItem):
         super().mouseReleaseEvent(event)
 
     def mousePressEvent(self, event):
-        """记录拖动起始位置"""
+        """记录拖动起始位置；若开启「选子即选父」，点击子元素时自动选中并代理拖动其顶层父级"""
+        self._proxy_dragging_root = None
         if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos_scene = self.scenePos()
             scene = self.scene()
+            if scene and scene.config_manager.get('select_child_selects_parent', True) and not getattr(self, 'is_editing', False):
+                root = self.get_root_parent_element()
+                if root is not self and not getattr(root, 'locked', False):
+                    scene._image_right_edge_snap_indicator = None
+                    scene._image_top_edge_snap_indicator = None
+                    if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                        new_state = not root.isSelected()
+                        root.setSelected(new_state)
+                        self.setSelected(False)
+                    else:
+                        if not root.isSelected():
+                            scene.clearSelection()
+                            root.setSelected(True)
+                        for sel in list(scene.selectedItems()):
+                            if isinstance(sel, BaseElement):
+                                r = sel.get_root_parent_element()
+                                if r is not sel:
+                                    sel.setSelected(False)
+                                    if not getattr(r, 'locked', False):
+                                        r.setSelected(True)
+                    selected_roots = [
+                        it for it in scene.selectedItems()
+                        if isinstance(it, BaseElement) and it.get_root_parent_element() is it and not getattr(it, 'locked', False)
+                    ]
+                    if root.isSelected() and root not in selected_roots:
+                        selected_roots.append(root)
+                    self._proxy_dragging_root = root if root.isSelected() else None
+                    self._proxy_press_scene_pos = event.scenePos()
+                    self._proxy_drag_starts = {it: it.scenePos() for it in selected_roots}
+                    if scene.config_manager.get('horizontal_move_only', False) and selected_roots:
+                        scene._horizontal_move_lock_y = {it: it.scenePos().y() for it in selected_roots}
+                        scene._horizontal_move_lock_x = {it: it.scenePos().x() for it in selected_roots}
+                        scene._horizontal_move_lock_owner = root
+                        scene._horizontal_move_owner_right_x = root.sceneBoundingRect().right()
+                    scene.update()
+                    event.accept()
+                    return
+
+            self._drag_start_pos_scene = self.scenePos()
             if scene:
                 scene._image_right_edge_snap_indicator = None
                 scene._image_top_edge_snap_indicator = None
@@ -3725,13 +3825,7 @@ class BaseElement(QGraphicsItem):
         menu.addSeparator()
         
         # 对齐功能
-        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)] if self.scene() else []
-        selected_images_in_sel = [item for item in selected_items if isinstance(item, VImageItem)]
-        batch_img_opacity_action = None
-        if selected_images_in_sel:
-            cur_op = int(selected_images_in_sel[0].image_opacity * 100)
-            batch_img_opacity_action = menu.addAction(f"设置选中图片透明度 ({len(selected_images_in_sel)} 张, 当前 {cur_op}%)")
-            menu.addSeparator()
+        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
         if len(selected_items) >= 2:
             align_menu = menu.addMenu("对齐 (Align)")
             align_top_action = align_menu.addAction("顶部对齐")
@@ -4422,7 +4516,13 @@ class VTextItem(BaseElement):
             cancel_group_edit_action = menu.addAction("❌ 取消编辑组合")
             menu.addSeparator()
         
-        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
+        selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)] if self.scene() else []
+        selected_images_in_sel = [item for item in selected_items if isinstance(item, VImageItem)]
+        batch_img_opacity_action = None
+        if selected_images_in_sel:
+            cur_op = int(selected_images_in_sel[0].image_opacity * 100)
+            batch_img_opacity_action = menu.addAction(f"设置选中图片透明度 ({len(selected_images_in_sel)} 张, 当前 {cur_op}%)")
+            menu.addSeparator()
         if len(selected_items) >= 2:
             align_menu = menu.addMenu("对齐 (Align)")
             align_top_action = align_menu.addAction("顶部对齐")
@@ -7902,9 +8002,17 @@ class LayoutScene(QGraphicsScene):
                 print("保存图片素材失败")
     
     def save_group_as_asset(self, items=None):
-        """保存组合为素材"""
+        """保存组合为素材（自动包含已选父级下的所有子级元素）"""
         if items is None:
-            items = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            raw_selected = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+            items = []
+            def _collect_descendants(el):
+                if isinstance(el, BaseElement) and el not in items:
+                    items.append(el)
+                for ch in el.childItems():
+                    _collect_descendants(ch)
+            for s_it in raw_selected:
+                _collect_descendants(s_it)
         
         if len(items) < 1:
             print("请选择至少一个元素来保存组合素材")
@@ -8324,8 +8432,17 @@ class LayoutScene(QGraphicsScene):
             print("已删除父子连接线")
     
     def copy_items(self, items):
-        """复制多个元素到剪贴板"""
+        """复制多个元素到剪贴板（若开启选子即选父或选中了父级，自动包含其子元素）"""
         if not items: return
+        expanded_items = []
+        def _collect_copy_descendants(el):
+            if isinstance(el, BaseElement) and el not in expanded_items:
+                expanded_items.append(el)
+            for ch in el.childItems():
+                _collect_copy_descendants(ch)
+        for it in items:
+            _collect_copy_descendants(it)
+        items = expanded_items
         self.clipboard_items = []
         self.clipboard_image_text_connections = []
         item_to_index = {item: idx for idx, item in enumerate(items)}
@@ -8970,6 +9087,8 @@ class LayoutView(QGraphicsView):
             element = item
             while element and not isinstance(element, (VImageItem, VTextItem)):
                 element = element.parentItem()
+            if element and self.scene() and self.scene().config_manager.get('select_child_selects_parent', True):
+                element = element.get_root_parent_element()
             if element and element not in seen and self._smart_brush_allows_item(element):
                 found.append(element)
                 seen.add(element)
@@ -9073,8 +9192,11 @@ class LayoutView(QGraphicsView):
         scene.clearSelection()
         items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
+        select_parent_mode = scene.config_manager.get('select_child_selects_parent', True)
         has_connector_in_rect = False
         for item in items:
+            if isinstance(item, BaseElement) and select_parent_mode:
+                item = item.get_root_parent_element()
             if (isinstance(item, ConnectionPoint)
                     and getattr(item, 'point_type', '') == 'custom'
                     and item.isVisible()
@@ -9477,7 +9599,10 @@ class LayoutView(QGraphicsView):
                 items_in_rect = scene.items(path, self._marquee_mode,
                                             Qt.SortOrder.DescendingOrder, self.transform())
                 newly_entered = []
+                select_parent_mode = scene.config_manager.get('select_child_selects_parent', True)
                 for item in items_in_rect:
+                    if isinstance(item, BaseElement) and select_parent_mode:
+                        item = item.get_root_parent_element()
                     if item in self._marquee_sweep_order:
                         continue
                     if (isinstance(item, ConnectionPoint)
@@ -11963,6 +12088,18 @@ class MainWindow(QMainWindow):
             checkable=True
         )
         self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+
+        # 选子集即选父级开关
+        self.btn_select_parent = self._add_toolbar_action(
+            main_toolbar,
+            "🔗选子即选父",
+            self.toggle_select_child_selects_parent,
+            "开启后，点击或框选集合中的子集（如图片下方的子文字）会自动选中并整体移动其父级 (Alt+G)；双击文字仍可直接编辑",
+            checkable=True
+        )
+        self.btn_select_parent.blockSignals(True)
+        self.btn_select_parent.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
+        self.btn_select_parent.blockSignals(False)
         
         self.btn_resize = self._add_toolbar_action(
             main_toolbar,
@@ -12416,6 +12553,13 @@ class MainWindow(QMainWindow):
         self.horizontal_move_only_action.toggled.connect(self.toggle_horizontal_move_only)
         edit_menu.addAction(self.horizontal_move_only_action)
 
+        self.select_child_selects_parent_action = QAction('选择子集时自动选中父级（选子即选父）', self)
+        self.select_child_selects_parent_action.setCheckable(True)
+        self.select_child_selects_parent_action.setShortcut('Alt+G')
+        self.select_child_selects_parent_action.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
+        self.select_child_selects_parent_action.toggled.connect(self.toggle_select_child_selects_parent)
+        edit_menu.addAction(self.select_child_selects_parent_action)
+
         self.image_right_edge_snap_action = QAction('图片右边缘X自动吸附', self)
         self.image_right_edge_snap_action.setCheckable(True)
         self.image_right_edge_snap_action.setChecked(
@@ -12469,9 +12613,49 @@ class MainWindow(QMainWindow):
         excel_col_map_action.triggered.connect(self.open_excel_column_map_dialog)
         edit_menu.addAction(excel_col_map_action)
 
+        selected_img_opacity_action = QAction('设置选中图片透明度...', self)
+        selected_img_opacity_action.triggered.connect(self.change_selected_images_opacity)
+        edit_menu.addAction(selected_img_opacity_action)
+
+        edit_menu.addSeparator()
+        cmd_palette_action = QAction('搜索功能/命令面板...', self)
+        cmd_palette_action.setShortcut('Ctrl+K')
+        cmd_palette_action.triggered.connect(self.show_command_palette)
+        edit_menu.addAction(cmd_palette_action)
+
+        # 初始化按 Ctrl+K 弹出的居中悬浮搜索框（平时完全隐藏，保持界面简洁美观）
+        self._setup_command_palette()
+
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
+
+    def toggle_select_child_selects_parent(self, enabled):
+        """切换「选择子集时自动选中父级」功能开关"""
+        enabled = bool(enabled)
+        for document in self._documents:
+            document.scene.config_manager.set('select_child_selects_parent', enabled)
+        if hasattr(self, 'btn_select_parent') and self.btn_select_parent.isChecked() != enabled:
+            self.btn_select_parent.blockSignals(True)
+            self.btn_select_parent.setChecked(enabled)
+            self.btn_select_parent.blockSignals(False)
+        if hasattr(self, 'select_child_selects_parent_action') and self.select_child_selects_parent_action.isChecked() != enabled:
+            self.select_child_selects_parent_action.blockSignals(True)
+            self.select_child_selects_parent_action.setChecked(enabled)
+            self.select_child_selects_parent_action.blockSignals(False)
+        if enabled and self.scene:
+            # 将当前已选中的子级元素立即归一到其顶层父级
+            for sel in list(self.scene.selectedItems()):
+                if isinstance(sel, BaseElement):
+                    root = sel.get_root_parent_element()
+                    if root is not sel and not getattr(root, 'locked', False):
+                        sel.setSelected(False)
+                        root.setSelected(True)
+        if hasattr(self, 'status_bar') and self.status_bar:
+            if enabled:
+                self.status_bar.showMessage("已开启：选子即选父（点击或框选子文字即选中父级图片并整体移动；双击文字仍可编辑）", 3500)
+            else:
+                self.status_bar.showMessage("已关闭：选子即选父（可单独点击选中和移动子元素）", 3500)
 
     def toggle_horizontal_move_only(self, enabled):
         """切换水平移动模式：拖动/方向键移动时保持Y坐标不变。"""
@@ -13120,6 +13304,257 @@ class MainWindow(QMainWindow):
         dlg.dspin_v_offset.setValue(600)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.scene.batch_copy(dlg.get_params())
+
+    def change_selected_images_opacity(self):
+        """批量设置当前选中图片的透明度"""
+        if not self.scene:
+            return
+        sel_imgs = [i for i in self.scene.selectedItems() if isinstance(i, VImageItem)]
+        if not sel_imgs:
+            QMessageBox.information(self, "设置图片透明度", "请先在画布上选中至少一张图片")
+            return
+        sel_imgs[0]._change_opacity()
+
+    def _setup_command_palette(self):
+        """创建按 Ctrl+K 呼出的居中悬浮功能搜索面板（平时隐藏，不占用顶部栏空间）"""
+        self._cmd_palette = QFrame(self)
+        self._cmd_palette.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.FramelessWindowHint
+        )
+        self._cmd_palette.setFixedWidth(460)
+        self._cmd_palette.setStyleSheet("""
+            QFrame {
+                background: #ffffff;
+                border: 1px solid #0078d4;
+                border-radius: 10px;
+            }
+        """)
+
+        vbox = QVBoxLayout(self._cmd_palette)
+        vbox.setContentsMargins(10, 10, 10, 10)
+        vbox.setSpacing(6)
+
+        self.menu_search_edit = QLineEdit(self._cmd_palette)
+        self.menu_search_edit.setPlaceholderText("🔍 输入关键词搜索功能或菜单动作... (↑↓选择，Enter执行，Esc关闭)")
+        self.menu_search_edit.setClearButtonEnabled(True)
+        self.menu_search_edit.setFixedHeight(32)
+        self.menu_search_edit.setStyleSheet("""
+            QLineEdit {
+                background: #f6f8fa;
+                border: 1px solid #d0d7de;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 13px;
+                color: #1f2328;
+            }
+            QLineEdit:focus {
+                background: #ffffff;
+                border: 1px solid #0078d4;
+            }
+        """)
+        vbox.addWidget(self.menu_search_edit)
+
+        self._menu_search_popup = QListWidget(self._cmd_palette)
+        self._menu_search_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._menu_search_popup.setMouseTracking(True)
+        self._menu_search_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._menu_search_popup.setStyleSheet("""
+            QListWidget {
+                background: #ffffff;
+                border: none;
+                font-size: 12px;
+                color: #1f2328;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 7px 10px;
+                border-radius: 5px;
+            }
+            QListWidget::item:selected, QListWidget::item:hover {
+                background: #e8f2fc;
+                color: #005a9e;
+            }
+        """)
+        vbox.addWidget(self._menu_search_popup)
+        self._cmd_palette.hide()
+
+        self.menu_search_edit.textChanged.connect(self._update_menu_search_results)
+        self._menu_search_popup.itemClicked.connect(self._execute_menu_search_item)
+        self.menu_search_edit.installEventFilter(self)
+        if QApplication.instance():
+            QApplication.instance().installEventFilter(self)
+
+    def show_command_palette(self):
+        """按 Ctrl+K 弹出或关闭居中功能搜索框"""
+        if not hasattr(self, '_cmd_palette'):
+            return
+        if self._cmd_palette.isVisible():
+            self.hide_command_palette()
+            return
+        self.menu_search_edit.blockSignals(True)
+        self.menu_search_edit.clear()
+        self.menu_search_edit.blockSignals(False)
+        self._update_menu_search_results("")
+
+        # 居中定位在主窗口上方 1/5 处（类似 VS Code / Spotlight）
+        win_geo = self.frameGeometry()
+        palette_w = self._cmd_palette.width()
+        x = win_geo.x() + (win_geo.width() - palette_w) // 2
+        y = win_geo.y() + max(70, int(win_geo.height() * 0.14))
+        self._cmd_palette.move(max(10, x), max(10, y))
+        self._cmd_palette.show()
+        self._cmd_palette.raise_()
+        self._cmd_palette.activateWindow()
+        self.menu_search_edit.setFocus()
+
+    def hide_command_palette(self):
+        if hasattr(self, '_cmd_palette') and self._cmd_palette.isVisible():
+            self._cmd_palette.hide()
+            if hasattr(self, 'view') and self.view:
+                self.view.setFocus()
+
+    def _collect_searchable_actions(self):
+        """收集菜单栏及工具栏中所有可执行的动作"""
+        results = []
+        seen_actions = set()
+
+        def walk_menu(menu, path_prefix):
+            for act in menu.actions():
+                if act.isSeparator() or not act.isVisible():
+                    continue
+                sub = act.menu()
+                clean_title = act.text().replace('&', '').strip()
+                if sub is not None:
+                    next_prefix = f"{path_prefix} ▸ {clean_title}" if path_prefix else clean_title
+                    walk_menu(sub, next_prefix)
+                else:
+                    if not clean_title or act in seen_actions or clean_title.startswith('搜索功能/命令面板'):
+                        continue
+                    seen_actions.add(act)
+                    shortcut_str = act.shortcut().toString() if not act.shortcut().isEmpty() else ""
+                    tip_str = (act.toolTip() or "").strip()
+                    results.append({
+                        'action': act,
+                        'title': clean_title,
+                        'category': path_prefix or '菜单',
+                        'shortcut': shortcut_str,
+                        'tooltip': tip_str,
+                    })
+
+        menubar = self.menuBar()
+        if menubar:
+            for top_act in menubar.actions():
+                top_menu = top_act.menu()
+                top_title = top_act.text().replace('&', '').strip()
+                if top_menu:
+                    walk_menu(top_menu, top_title)
+
+        # 补充工具栏上的专属动作（包括“插入 ▼”按钮下拉菜单）
+        for tb in self.findChildren(QToolBar):
+            for act in tb.actions():
+                if act.isSeparator() or not act.isVisible() or act in seen_actions:
+                    continue
+                clean_title = act.text().replace('&', '').strip()
+                if not clean_title:
+                    continue
+                seen_actions.add(act)
+                shortcut_str = act.shortcut().toString() if not act.shortcut().isEmpty() else ""
+                tip_str = (act.toolTip() or "").strip()
+                results.append({
+                    'action': act,
+                    'title': clean_title,
+                    'category': '工具栏',
+                    'shortcut': shortcut_str,
+                    'tooltip': tip_str,
+                })
+            for btn in tb.findChildren(QToolButton):
+                btn_menu = btn.menu()
+                if btn_menu:
+                    walk_menu(btn_menu, "工具栏 ▸ 插入")
+
+        return results
+
+    def _update_menu_search_results(self, text):
+        if not hasattr(self, '_menu_search_popup'):
+            return
+        kw_raw = (text or "").strip().lower()
+        keywords = [k for k in kw_raw.split() if k]
+        all_items = self._collect_searchable_actions()
+
+        if not keywords:
+            matched = [(0, entry) for entry in all_items]
+        else:
+            matched = []
+            for entry in all_items:
+                haystack = f"{entry['title']} {entry['category']} {entry['shortcut']} {entry['tooltip']}".lower()
+                if all(k in haystack for k in keywords):
+                    score = 0 if entry['title'].lower().startswith(keywords[0]) else (1 if keywords[0] in entry['title'].lower() else 2)
+                    matched.append((score, entry))
+            matched.sort(key=lambda x: x[0])
+
+        self._menu_search_popup.clear()
+        if not matched:
+            empty_item = QListWidgetItem("未找到匹配的功能动作")
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._menu_search_popup.addItem(empty_item)
+        else:
+            for _, entry in matched[:30]:
+                act = entry['action']
+                state_badge = ""
+                if act.isCheckable():
+                    state_badge = "  [✓ 已开启]" if act.isChecked() else "  [未开启]"
+                sc_badge = f"   ({entry['shortcut']})" if entry['shortcut'] else ""
+                display_text = f"{entry['title']}{state_badge}{sc_badge}    —  {entry['category']}"
+                item = QListWidgetItem(display_text)
+                if entry['tooltip']:
+                    item.setToolTip(entry['tooltip'])
+                item.setData(Qt.ItemDataRole.UserRole, act)
+                self._menu_search_popup.addItem(item)
+            self._menu_search_popup.setCurrentRow(0)
+
+        row_count = max(1, min(10, self._menu_search_popup.count()))
+        row_h = self._menu_search_popup.sizeHintForRow(0) if self._menu_search_popup.count() > 0 else 30
+        list_h = min(320, row_count * max(30, row_h) + 8)
+        self._menu_search_popup.setFixedHeight(list_h)
+        self._cmd_palette.setFixedHeight(list_h + 58)
+
+    def _execute_menu_search_item(self, item):
+        if item is None:
+            return
+        act = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(act, QAction) or not act.isEnabled():
+            return
+        self.hide_command_palette()
+        QTimer.singleShot(0, act.trigger)
+
+    def eventFilter(self, obj, event):
+        if hasattr(self, 'menu_search_edit') and obj is self.menu_search_edit:
+            if event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                if key == Qt.Key.Key_Down:
+                    cur = self._menu_search_popup.currentRow()
+                    if cur + 1 < self._menu_search_popup.count():
+                        self._menu_search_popup.setCurrentRow(cur + 1)
+                    return True
+                elif key == Qt.Key.Key_Up:
+                    cur = self._menu_search_popup.currentRow()
+                    if cur - 1 >= 0:
+                        self._menu_search_popup.setCurrentRow(cur - 1)
+                    return True
+                elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                    if self._menu_search_popup.currentItem():
+                        self._execute_menu_search_item(self._menu_search_popup.currentItem())
+                        return True
+                elif key == Qt.Key.Key_Escape:
+                    self.hide_command_palette()
+                    return True
+        elif hasattr(self, '_cmd_palette') and self._cmd_palette.isVisible():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
+                if not self._cmd_palette.frameGeometry().contains(gp):
+                    self.hide_command_palette()
+        return super().eventFilter(obj, event)
 
     def open_excel_column_map_dialog(self):
         """打开 Excel 列映射设置对话框"""
@@ -13795,20 +14230,35 @@ class MainWindow(QMainWindow):
             self.font_combo.setCurrentText(font.family())
             self.change_selected_font(font)
 
+    def _get_target_text_items_for_property(self):
+        """获取当前选中的文字对象；若仅选中了父级图片，则自动包含其子文字对象"""
+        if not self.scene:
+            return []
+        direct_texts = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        if direct_texts:
+            return direct_texts
+        child_texts = []
+        for item in self.scene.selectedItems():
+            if isinstance(item, VImageItem):
+                for ch in item.childItems():
+                    if isinstance(ch, VTextItem) and ch not in child_texts:
+                        child_texts.append(ch)
+        return child_texts
+
     def change_selected_font(self, font):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.font_family = font.family()
             item.rebuild()
     
     def change_selected_font_size(self, size):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.font_size = size
             item.rebuild()
     
     def change_selected_color(self):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         if not selected_items: return
         color = QColorDialog.getColor(selected_items[0].text_color, self, "选择文字颜色")
         if color.isValid():
@@ -13818,27 +14268,27 @@ class MainWindow(QMainWindow):
             self._set_color_button_color(color)
     
     def toggle_manual_line_break(self, enabled):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.manual_line_break = enabled
             item.rebuild()
     
     def change_chars_per_column(self, chars_count):
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.chars_per_column = chars_count
             item.rebuild()
     
     def change_column_spacing(self, spacing):
         """改变选中文字的列间距"""
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.column_spacing = spacing
             item.rebuild()
 
     def change_character_spacing(self, spacing):
         """改变选中文字在同一竖列中的字间距。"""
-        selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+        selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.character_spacing = spacing
             item.rebuild()
@@ -13849,7 +14299,7 @@ class MainWindow(QMainWindow):
             if not self.scene:
                 return
             
-            selected_items = [item for item in self.scene.selectedItems() if isinstance(item, VTextItem)]
+            selected_items = self._get_target_text_items_for_property()
             if selected_items:
                 item = selected_items[0]
                 self.font_combo.blockSignals(True)
