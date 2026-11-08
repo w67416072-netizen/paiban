@@ -2538,6 +2538,96 @@ class EditTextCommand(UndoCommand):
             self.item.scene().update_image_text_connectors(self.item)
 
 
+class SplitTextItemCommand(UndoCommand):
+    """将文本框在指定位置拆分为两个文本框的撤销命令"""
+    def __init__(self, scene, item, part1_text, part2_text, gap=None):
+        super().__init__(scene)
+        self.item = item
+        self.old_text = item.full_text
+        self.part1_text = part1_text
+        self.part2_text = part2_text
+        self.gap = item.column_spacing if gap is None else gap
+        self.new_item = None
+        self.parent_item = item.parentItem() if isinstance(item.parentItem(), BaseElement) else None
+
+    def _set_item_scene_top_right(self, text_item, target_top_right):
+        cur_top_right = text_item.mapRectToScene(text_item.boundingRect()).topRight()
+        new_scene_pos = text_item.scenePos() + (target_top_right - cur_top_right)
+        if text_item.parentItem():
+            text_item.setPos(text_item.parentItem().mapFromScene(new_scene_pos))
+        else:
+            text_item.setPos(new_scene_pos)
+
+    def execute(self):
+        # 记录原文本框右上角场景坐标（竖排从右向左，第一段保持右边界锚点不变）
+        orig_scene_rect = self.item.mapRectToScene(self.item.boundingRect())
+        orig_top_right = orig_scene_rect.topRight()
+
+        # 1. 更新原文本框为前半段内容
+        self.item.full_text = self.part1_text
+        self.item.rebuild(preserve_position=True)
+        self._set_item_scene_top_right(self.item, orig_top_right)
+
+        # 2. 创建或恢复第二个文本框（后半段内容）
+        if self.new_item is None:
+            self.new_item = VTextItem(self.part2_text, self.item.font_size, self.item.box_height)
+            self.new_item.font_family = self.item.font_family
+            self.new_item.text_color = QColor(self.item.text_color)
+            self.new_item.chars_per_column = self.item.chars_per_column
+            self.new_item.column_spacing = self.item.column_spacing
+            self.new_item.character_spacing = self.item.character_spacing
+            self.new_item.auto_height = self.item.auto_height
+            self.new_item.manual_line_break = self.item.manual_line_break
+            self.new_item.layer_eye_color = getattr(self.item, 'layer_eye_color', None)
+            self.new_item.setZValue(self.item.zValue())
+            self.new_item.rebuild()
+            if self.item.connection_point is None:
+                self.new_item.delete_connection_point()
+            elif self.new_item.connection_point:
+                self.new_item._cp_user_visible = getattr(self.item, '_cp_user_visible', True)
+        else:
+            self.new_item.full_text = self.part2_text
+            self.new_item.rebuild()
+
+        # 3. 挂载到场景或相同父级元素下
+        if self.parent_item and self.parent_item.scene() == self.scene:
+            self.new_item.setParentItem(self.parent_item)
+            self.scene.add_connector(self.parent_item, self.new_item)
+        else:
+            self.new_item.setParentItem(None)
+            if self.new_item.scene() != self.scene:
+                self.scene.addItem(self.new_item)
+
+        if self.new_item.connection_point:
+            self.new_item.set_connection_points_visible(self.scene.show_connection_points)
+        self.new_item.update_hover_tooltip()
+
+        # 4. 将新文本框紧贴在原文本框左侧（间隔 self.gap 像素，顶部对齐）
+        part1_scene_rect = self.item.mapRectToScene(self.item.boundingRect())
+        target_new_top_right = QPointF(part1_scene_rect.left() - self.gap, part1_scene_rect.top())
+        self._set_item_scene_top_right(self.new_item, target_new_top_right)
+
+        self.scene.update_connectors(self.item)
+        self.scene.update_image_text_connectors(self.item)
+        self.scene.update_connectors(self.new_item)
+        self.scene.update_image_text_connectors(self.new_item)
+
+    def undo(self):
+        orig_scene_rect = self.item.mapRectToScene(self.item.boundingRect())
+        orig_top_right = orig_scene_rect.topRight()
+
+        if self.new_item and self.new_item.scene() == self.scene:
+            self.scene.remove_all_connectors_for_item(self.new_item)
+            self.scene.remove_image_text_connectors(self.new_item)
+            self.scene.removeItem(self.new_item)
+
+        self.item.full_text = self.old_text
+        self.item.rebuild(preserve_position=True)
+        self._set_item_scene_top_right(self.item, orig_top_right)
+        self.scene.update_connectors(self.item)
+        self.scene.update_image_text_connectors(self.item)
+
+
 class AddConnectorCommand(UndoCommand):
     """添加连接线命令（支持父子连接线和图文连接线）"""
     def __init__(self, scene, connector):
@@ -4545,6 +4635,8 @@ class VTextItem(BaseElement):
         # 编辑选项
         action_inline_edit = menu.addAction("直接编辑 (Inline Edit)")
         action_dialog_edit = menu.addAction("对话框编辑 (Dialog Edit)")
+        action_split_symbol = menu.addAction("按指定符号拆分文本框...")
+        action_split_cursor = menu.addAction("在此处拆分为两个文本框") if (clicked_cursor_position is not None and 0 < clicked_cursor_position < len(self.full_text)) else None
         action_reset_editing = menu.addAction("重置编辑状态 (Reset Editing)")
         menu.addSeparator()
         
@@ -4628,6 +4720,14 @@ class VTextItem(BaseElement):
             self.start_inline_editing(cursor_position=clicked_cursor_position, select_all=False)
         elif action == action_dialog_edit:
             self.start_dialog_editing()
+        elif action == action_split_symbol:
+            if self.scene():
+                sel_texts = [i for i in self.scene().selectedItems() if isinstance(i, VTextItem)]
+                targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
+                self.scene().split_text_items_by_symbol_dialog(targets)
+        elif action_split_cursor and action == action_split_cursor:
+            if self.scene():
+                self.scene().split_text_item_at_index(self, clicked_cursor_position)
         elif action == action_reset_editing:
             self.reset_editing_state()
         elif action == action_font:
@@ -9033,6 +9133,148 @@ class LayoutScene(QGraphicsScene):
     def delete_item(self, item):
         self.undo_stack.push_and_execute(DeleteItemCommand(self, item))
 
+    def split_text_item_at_index(self, item, split_index, remove_len=0, strip_newline=True):
+        """在指定字符索引处将单个 VTextItem 拆分为两个文本框"""
+        if not isinstance(item, VTextItem) or item.scene() != self:
+            return None
+        if item.is_editing and item.inline_editor:
+            item.inline_editor.finish_editing()
+
+        text = item.full_text
+        part1 = text[:split_index]
+        part2 = text[split_index + remove_len:]
+        if strip_newline:
+            part1 = part1.rstrip('\n')
+            part2 = part2.lstrip('\n')
+
+        if not part1 or not part2:
+            self._show_status_message("拆分位置在开头或末尾，无法拆分成两个非空文本框", 3000)
+            return None
+
+        cmd = SplitTextItemCommand(self, item, part1, part2)
+        cmd.execute()
+        self.undo_stack.push(cmd)
+        self.clearSelection()
+        item.setSelected(True)
+        if cmd.new_item:
+            cmd.new_item.setSelected(True)
+        self._show_status_message("已拆分为两个文本框（可按 Ctrl+Z 撤销）", 3000)
+        return cmd.new_item
+
+    def split_text_items_by_symbol(self, items=None, symbol="|", keep_symbol="remove"):
+        """将选中的文本框在指定符号（首次出现位置）处拆分为两个文本框
+        keep_symbol: 'remove' (删除符号) | 'left' (保留在第一段末尾) | 'right' (保留在第二段开头)
+        """
+        if items is None:
+            items = [i for i in self.selectedItems() if isinstance(i, VTextItem)]
+        if not items or not symbol:
+            return []
+
+        actual_symbol = "\n" if symbol in ("\n", "\\n") else symbol
+        commands = []
+        new_items = []
+
+        for item in items:
+            if not isinstance(item, VTextItem) or item.scene() != self:
+                continue
+            if item.is_editing and item.inline_editor:
+                item.inline_editor.finish_editing()
+
+            text = item.full_text
+            idx = text.find(actual_symbol)
+            if idx == -1:
+                continue
+
+            if keep_symbol == "left":
+                part1 = text[:idx + len(actual_symbol)]
+                part2 = text[idx + len(actual_symbol):]
+            elif keep_symbol == "right":
+                part1 = text[:idx]
+                part2 = text[idx:]
+            else:
+                part1 = text[:idx]
+                part2 = text[idx + len(actual_symbol):]
+
+            part1 = part1.rstrip('\n')
+            part2 = part2.lstrip('\n')
+            if not part1 or not part2:
+                continue
+
+            cmd = SplitTextItemCommand(self, item, part1, part2)
+            cmd.execute()
+            commands.append(cmd)
+            if cmd.new_item:
+                new_items.append(cmd.new_item)
+
+        if len(commands) == 1:
+            self.undo_stack.push(commands[0])
+        elif len(commands) > 1:
+            self.undo_stack.push(MacroCommand(self, commands))
+
+        if commands:
+            self.clearSelection()
+            for cmd in commands:
+                cmd.item.setSelected(True)
+                if cmd.new_item:
+                    cmd.new_item.setSelected(True)
+            self._show_status_message(f"已成功将 {len(commands)} 个文本框拆分为两个文本框（Ctrl+Z 可撤销）", 3500)
+        else:
+            self._show_status_message(f"选中的文本框中未找到符号「{symbol}」或拆分后有一侧为空", 3500)
+        return new_items
+
+    def split_text_items_by_symbol_dialog(self, items=None):
+        """弹出对话框，让用户输入分隔符号并选择是否保留符号，然后将选中文本框拆分为两个"""
+        if items is None:
+            items = [i for i in self.selectedItems() if isinstance(i, VTextItem)]
+        if not items:
+            # 若选中的是父级图片，也支持自动查找其子文字
+            for sel in self.selectedItems():
+                if isinstance(sel, VImageItem):
+                    items.extend([c for c in sel.childItems() if isinstance(c, VTextItem)])
+        if not items:
+            self._show_status_message("请先选中要拆分的文本框", 3000)
+            return []
+
+        dlg = QDialog()
+        dlg.setWindowTitle("按指定符号拆分文本框")
+        dlg.setMinimumWidth(340)
+        layout = QFormLayout(dlg)
+
+        last_symbol = self.config_manager.get('last_split_symbol', '｜')
+        symbol_edit = QLineEdit(last_symbol, dlg)
+        symbol_edit.setPlaceholderText("输入分隔符，如 | 、 # 、 / 或 \n（换行）")
+        layout.addRow("拆分符号：", symbol_edit)
+
+        mode_combo = QComboBox(dlg)
+        mode_combo.addItem("删除该拆分符号", "remove")
+        mode_combo.addItem("保留在右侧（第一个文本框末尾）", "left")
+        mode_combo.addItem("保留在左侧（第二个文本框开头）", "right")
+        last_mode = self.config_manager.get('last_split_keep_mode', 'remove')
+        idx = mode_combo.findData(last_mode)
+        if idx >= 0:
+            mode_combo.setCurrentIndex(idx)
+        layout.addRow("符号处理：", mode_combo)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("拆分")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return []
+
+        symbol = symbol_edit.text()
+        if not symbol:
+            self._show_status_message("拆分符号不能为空", 3000)
+            return []
+
+        keep_mode = mode_combo.currentData()
+        self.config_manager.set('last_split_symbol', symbol)
+        self.config_manager.set('last_split_keep_mode', keep_mode)
+        return self.split_text_items_by_symbol(items, symbol=symbol, keep_symbol=keep_mode)
+
     def add_item_with_undo(self, item):
         """添加元素到场景并记录撤销"""
         self.addItem(item)
@@ -12488,6 +12730,7 @@ class MainWindow(QMainWindow):
         insert_menu.addAction("添加文本 (Ctrl+T)", self.add_text)
         insert_menu.addAction("插入图片 (Ctrl+Shift+I)", self.add_image)
         insert_menu.addAction("编辑选中文字", self.edit_selected_text)
+        insert_menu.addAction("按符号拆分选中文字 (Ctrl+Shift+X)", self.split_selected_text_by_symbol)
         
         insert_btn = QToolButton()
         insert_btn.setText("插入 ▼")
@@ -13042,6 +13285,11 @@ class MainWindow(QMainWindow):
         selected_img_opacity_action.triggered.connect(self.change_selected_images_opacity)
         edit_menu.addAction(selected_img_opacity_action)
 
+        split_text_action = QAction('按指定符号拆分文本框...', self)
+        split_text_action.setShortcut('Ctrl+Shift+X')
+        split_text_action.triggered.connect(self.split_selected_text_by_symbol)
+        edit_menu.addAction(split_text_action)
+
         edit_menu.addSeparator()
         cmd_palette_action = QAction('搜索功能/命令面板...', self)
         cmd_palette_action.setShortcut('Ctrl+K')
@@ -13552,6 +13800,11 @@ class MainWindow(QMainWindow):
             selected_items[0].start_inline_editing()
         else:
             print("请先选择一个文字元素")
+
+    def split_selected_text_by_symbol(self):
+        """按指定符号将选中的文本框拆分为两个文本框"""
+        if self.scene:
+            self.scene.split_text_items_by_symbol_dialog()
 
     def toggle_smart_brush(self, enabled):
         self.view.set_smart_brush_enabled(enabled)
