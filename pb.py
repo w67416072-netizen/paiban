@@ -7842,6 +7842,7 @@ class LayoutScene(QGraphicsScene):
                 if view.is_smart_brush_enabled():
                     view.set_smart_brush_enabled(False)
                 view.setCursor(Qt.CursorShape.CrossCursor)
+                view.setFocus()
             self._show_status_message(
                 "点图片连线：直接点击人物头像即可连线（同排自动连a↔a，上下代自动连b→a；按住Shift连续接龙，按住Ctrl固定起点一对多，右键/Esc取消）",
                 0
@@ -9072,10 +9073,7 @@ class LayoutScene(QGraphicsScene):
                 event.accept()
                 return
             if self.avatar_connect_mode:
-                if self.avatar_connect_source is not None:
-                    self.clear_avatar_connect_source()
-                else:
-                    self.set_avatar_connect_mode(False)
+                self.set_avatar_connect_mode(False)
                 event.accept()
                 return
             if self.connection_mode:
@@ -9740,8 +9738,20 @@ class LayoutView(QGraphicsView):
             self.viewport().update()
             event.accept()
             return
-        # 处理中键平移
+        # 处理中键：一键退出所有连线模式，并支持拖拽平移画布
         if event.button() == Qt.MouseButton.MiddleButton:
+            sc = self.scene()
+            if sc:
+                if getattr(sc, 'avatar_connect_mode', False):
+                    sc.set_avatar_connect_mode(False)
+                if getattr(sc, 'connection_mode', False):
+                    sc.cancel_connection_mode()
+                if getattr(sc, 'image_text_binding_mode', False):
+                    sc.image_text_binding_mode = False
+                    sc.image_text_source = None
+                    sc.avatar_connect_source = None
+                    sc.update()
+                    sc._show_status_message("已退出连线模式", 2500)
             self._is_panning = True
             self._pan_start = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -12080,22 +12090,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(preset_group)
         self._refresh_text_preset_combo()
 
-        selection_group = QGroupBox("选择模式")
-        selection_form = QFormLayout(selection_group)
-        selection_form.setContentsMargins(10, 14, 10, 10)
-        selection_form.setHorizontalSpacing(8)
-        selection_form.setVerticalSpacing(8)
 
-        self.marquee_mode_combo = QComboBox()
-        self.marquee_mode_combo.addItem("全选", "all")
-        self.marquee_mode_combo.addItem("仅图片", "images")
-        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
-        self.marquee_mode_combo.setToolTip("框选模式，Alt+M 可循环切换")
-        self.marquee_mode_combo.currentIndexChanged.connect(
-            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
-        )
-        selection_form.addRow("框选", self.marquee_mode_combo)
-        layout.addWidget(selection_group)
 
         layout.addStretch(1)
         return panel
@@ -13979,6 +13974,23 @@ class MainWindow(QMainWindow):
                 gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
                 if not self._cmd_palette.frameGeometry().contains(gp):
                     self.hide_command_palette()
+        elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+            if self.scene and not isinstance(obj, InlineTextEditor):
+                if getattr(self.scene, 'avatar_connect_mode', False):
+                    self.scene.set_avatar_connect_mode(False)
+                    return True
+                if getattr(self.scene, 'connection_mode', False):
+                    self.scene.cancel_connection_mode()
+                    return True
+                if getattr(self.scene, 'image_text_binding_mode', False):
+                    self.scene.image_text_binding_mode = False
+                    self.scene.image_text_source = None
+                    self.scene.avatar_connect_source = None
+                    if self.scene.views():
+                        self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                    self.scene.update()
+                    self.scene._show_status_message("已退出图文连线模式", 2500)
+                    return True
         return super().eventFilter(obj, event)
 
     def open_excel_column_map_dialog(self):
