@@ -162,6 +162,8 @@ class ConfigManager:
                     'text_right_edge_snap_enabled',
                     config.get('image_right_edge_snap_enabled', False)
                 )
+                # 默认框选模式始终为仅图片
+                config['marquee_mode'] = "images"
                 print(f"配置已加载: {self.config_file}")
                 return config
             except Exception as e:
@@ -193,7 +195,7 @@ class ConfigManager:
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片（兼容旧版）
             'marquee_only_connected': False,  # 框选时仅选择有连接点的元素（兼容旧版）
-            'marquee_mode': 'all',  # 框选模式：all / images / connected
+            'marquee_mode': 'images',  # 框选模式默认：仅图片 (images) / 全选 (all)
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
@@ -214,6 +216,10 @@ class ConfigManager:
             'insert_image_fit_canvas': False,  # 插入图片时自动适应画布大小
             'hide_connection_points_when_image_selected': False,
             'show_text_hover_tooltip': False,
+            'default_split_symbol': '|',  # 用户自定义的默认文本框拆分符号（全半角自动兼容）
+            'default_split_keep_mode': 'remove',  # 默认拆分符号处理方式：remove / left / right
+            'last_split_symbol': '|',
+            'last_split_keep_mode': 'remove',
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
@@ -1022,6 +1028,279 @@ class FontPickerDialog(QDialog):
         dlg.setWindowTitle(title)
         ok = dlg.exec() == QDialog.DialogCode.Accepted
         return dlg.selected_font(), ok
+
+class TextStyleSettingsDialog(QDialog):
+    """文字样式与排版设置对话框 - 合并字体、颜色、每列字数、列间距、字间距设置"""
+
+    def __init__(self, text_item, target_items=None, config_manager=None, parent=None):
+        super().__init__(parent)
+        self.text_item = text_item
+        self.target_items = list(target_items) if target_items else [text_item]
+        self.config_manager = config_manager
+        self.setWindowTitle(
+            f"文字样式与排版设置 (共 {len(self.target_items)} 个文字对象)"
+            if len(self.target_items) > 1 else "文字样式与排版设置"
+        )
+        self.setMinimumWidth(460)
+
+        # 保存初始状态以便取消时还原
+        self._original_states = []
+        for item in self.target_items:
+            self._original_states.append({
+                'item': item,
+                'font_family': item.font_family,
+                'font_size': item.font_size,
+                'text_color': QColor(item.text_color),
+                'chars_per_column': item.chars_per_column,
+                'column_spacing': item.column_spacing,
+                'character_spacing': item.character_spacing,
+                'scene_pos': item.scenePos(),
+            })
+
+        self._font_family = text_item.font_family
+        self._font_size = text_item.font_size
+        self._text_color = QColor(text_item.text_color)
+        self._chars_per_column = text_item.chars_per_column
+        self._column_spacing = text_item.column_spacing
+        self._character_spacing = text_item.character_spacing
+
+        self._build_ui()
+        self._update_color_btn()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(14, 14, 14, 14)
+
+        # ── 1. 字体与颜色设置 ──────────────────────────────────────────
+        font_group = QGroupBox("字体与颜色 (Font && Color)")
+        font_form = QFormLayout(font_group)
+        font_form.setHorizontalSpacing(12)
+        font_form.setVerticalSpacing(10)
+
+        # 字体选择行（下拉框 + 高级字体选择器按钮）
+        font_row = QHBoxLayout()
+        self.font_combo = QComboBox()
+        self.font_combo.setEditable(True)
+        self.font_combo.setMinimumWidth(180)
+        for fam in QFontDatabase.families():
+            self.font_combo.addItem(fam)
+        idx = self.font_combo.findText(self._font_family)
+        if idx >= 0:
+            self.font_combo.setCurrentIndex(idx)
+        else:
+            self.font_combo.setCurrentText(self._font_family)
+        self.font_combo.currentTextChanged.connect(self._on_font_family_changed)
+        font_row.addWidget(self.font_combo, 1)
+
+        btn_font_picker = QPushButton("字体选择器...")
+        btn_font_picker.setToolTip("打开带常用字体、常用字号和预览的字体选择器")
+        btn_font_picker.clicked.connect(self._open_font_picker)
+        font_row.addWidget(btn_font_picker)
+        font_form.addRow("字体 (Font):", font_row)
+
+        # 字号行
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(4, 400)
+        self.size_spin.setValue(self._font_size)
+        self.size_spin.setSuffix(" pt")
+        self.size_spin.valueChanged.connect(self._on_font_size_changed)
+        font_form.addRow("字号 (Size):", self.size_spin)
+
+        # 颜色行（颜色按钮 + 快捷色块）
+        color_row = QHBoxLayout()
+        self.btn_color = QPushButton()
+        self.btn_color.setFixedWidth(110)
+        self.btn_color.setFixedHeight(28)
+        self.btn_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_color.clicked.connect(self._pick_color)
+        color_row.addWidget(self.btn_color)
+
+        quick_colors = [
+            ("#000000", "黑色"),
+            ("#C00000", "深红"),
+            ("#FF0000", "红色"),
+            ("#005A9E", "蓝色"),
+            ("#107C41", "绿色"),
+            ("#7F6000", "棕金"),
+        ]
+        for hex_code, tip in quick_colors:
+            swatch = QPushButton()
+            swatch.setFixedSize(22, 22)
+            swatch.setToolTip(f"{tip} ({hex_code})")
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setStyleSheet(
+                f"QPushButton {{ background-color: {hex_code}; border: 1px solid #888; border-radius: 3px; padding: 0px; min-height: 0px; }}"
+                f"QPushButton:hover {{ border: 2px solid #0969da; }}"
+            )
+            swatch.clicked.connect(lambda _, c=hex_code: self._set_quick_color(c))
+            color_row.addWidget(swatch)
+        color_row.addStretch()
+        font_form.addRow("设置颜色 (Color):", color_row)
+
+        root.addWidget(font_group)
+
+        # ── 2. 竖排排版参数 ────────────────────────────────────────────
+        layout_group = QGroupBox("竖排参数 (Layout && Spacing)")
+        layout_form = QFormLayout(layout_group)
+        layout_form.setHorizontalSpacing(12)
+        layout_form.setVerticalSpacing(10)
+
+        self.chars_per_col_spin = QSpinBox()
+        self.chars_per_col_spin.setRange(1, 200)
+        self.chars_per_col_spin.setValue(self._chars_per_column)
+        self.chars_per_col_spin.setSuffix(" 字/列")
+        self.chars_per_col_spin.valueChanged.connect(self._on_chars_per_col_changed)
+        layout_form.addRow("每列字数 (Chars per Column):", self.chars_per_col_spin)
+
+        self.col_spacing_spin = QSpinBox()
+        self.col_spacing_spin.setRange(0, 200)
+        self.col_spacing_spin.setValue(self._column_spacing)
+        self.col_spacing_spin.setSuffix(" px")
+        self.col_spacing_spin.valueChanged.connect(self._on_col_spacing_changed)
+        layout_form.addRow("列间距 (Column Spacing):", self.col_spacing_spin)
+
+        self.char_spacing_spin = QSpinBox()
+        self.char_spacing_spin.setRange(-200, 200)
+        self.char_spacing_spin.setValue(self._character_spacing)
+        self.char_spacing_spin.setSuffix(" px")
+        self.char_spacing_spin.valueChanged.connect(self._on_char_spacing_changed)
+        layout_form.addRow("字间距 (Character Spacing):", self.char_spacing_spin)
+
+        root.addWidget(layout_group)
+
+        # ── 3. 实时预览与确定/取消按钮 ──────────────────────────────────
+        bottom_row = QHBoxLayout()
+        self.chk_live_preview = QCheckBox("画布实时预览")
+        self.chk_live_preview.setChecked(True)
+        self.chk_live_preview.toggled.connect(self._on_live_preview_toggled)
+        bottom_row.addWidget(self.chk_live_preview)
+        bottom_row.addStretch()
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self._on_reject)
+        bottom_row.addWidget(btns)
+
+        root.addLayout(bottom_row)
+
+    def _update_color_btn(self):
+        c = self._text_color
+        text_fg = "white" if c.lightness() < 128 else "#24292f"
+        self.btn_color.setText(c.name().upper())
+        self.btn_color.setStyleSheet(
+            f"QPushButton {{ background-color: {c.name()}; color: {text_fg}; "
+            f"border: 1px solid #8c959f; border-radius: 4px; padding: 3px 8px; font-weight: 600; min-height: 20px; }}"
+            f"QPushButton:hover {{ border: 1px solid #0969da; }}"
+        )
+
+    def _open_font_picker(self):
+        cur_font = QFont(self._font_family)
+        cur_font.setPointSize(self._font_size)
+        font, ok = FontPickerDialog.get_font(cur_font, self.config_manager, self, "选择字体与字号")
+        if ok:
+            self._font_family = font.family()
+            self._font_size = font.pointSize()
+            self.font_combo.blockSignals(True)
+            self.size_spin.blockSignals(True)
+            idx = self.font_combo.findText(self._font_family)
+            if idx >= 0:
+                self.font_combo.setCurrentIndex(idx)
+            else:
+                self.font_combo.setCurrentText(self._font_family)
+            self.size_spin.setValue(self._font_size)
+            self.font_combo.blockSignals(False)
+            self.size_spin.blockSignals(False)
+            self._maybe_live_apply()
+
+    def _pick_color(self):
+        color = QColorDialog.getColor(self._text_color, self, "选择颜色")
+        if color.isValid():
+            self._text_color = color
+            self._update_color_btn()
+            self._maybe_live_apply()
+
+    def _set_quick_color(self, hex_code):
+        color = QColor(hex_code)
+        if color.isValid():
+            self._text_color = color
+            self._update_color_btn()
+            self._maybe_live_apply()
+
+    def _on_font_family_changed(self, family):
+        if family.strip():
+            self._font_family = family.strip()
+            self._maybe_live_apply()
+
+    def _on_font_size_changed(self, val):
+        self._font_size = val
+        self._maybe_live_apply()
+
+    def _on_chars_per_col_changed(self, val):
+        self._chars_per_column = val
+        self._maybe_live_apply()
+
+    def _on_col_spacing_changed(self, val):
+        self._column_spacing = val
+        self._maybe_live_apply()
+
+    def _on_char_spacing_changed(self, val):
+        self._character_spacing = val
+        self._maybe_live_apply()
+
+    def _on_live_preview_toggled(self, checked):
+        if checked:
+            self.apply_to_targets()
+        else:
+            self.restore_original_states()
+
+    def _maybe_live_apply(self):
+        if self.chk_live_preview.isChecked():
+            self.apply_to_targets()
+
+    def apply_to_targets(self):
+        for item in self.target_items:
+            item.font_family = self._font_family
+            item.font_size = self._font_size
+            item.text_color = QColor(self._text_color)
+            item.chars_per_column = self._chars_per_column
+            item.column_spacing = self._column_spacing
+            item.character_spacing = self._character_spacing
+            item.rebuild()
+            if item.scene():
+                item.scene().update_connectors(item)
+                item.scene().update_image_text_connectors(item)
+
+    def restore_original_states(self):
+        for state in self._original_states:
+            item = state['item']
+            item.font_family = state['font_family']
+            item.font_size = state['font_size']
+            item.text_color = QColor(state['text_color'])
+            item.chars_per_column = state['chars_per_column']
+            item.column_spacing = state['column_spacing']
+            item.character_spacing = state['character_spacing']
+            item.rebuild()
+            if item.parentItem():
+                item.setPos(item.parentItem().mapFromScene(state['scene_pos']))
+            else:
+                item.setPos(state['scene_pos'])
+            if item.scene():
+                item.scene().update_connectors(item)
+                item.scene().update_image_text_connectors(item)
+
+    def _on_accept(self):
+        self.apply_to_targets()
+        self.accept()
+
+    def _on_reject(self):
+        self.restore_original_states()
+        self.reject()
+
 
 
 class ToastNotification(QWidget):
@@ -3874,7 +4153,9 @@ class BaseElement(QGraphicsItem):
             scene = self.scene()
             if scene and scene.config_manager.get('select_child_selects_parent', True) and not getattr(self, 'is_editing', False):
                 root = self.get_root_parent_element()
-                if root is not self and not getattr(root, 'locked', False):
+                # 若当前子元素已被单独选中（且父级未被选中，例如刚拆分出的文本框），允许直接拖动该子元素
+                individually_selected_child = self.isSelected() and not root.isSelected()
+                if root is not self and not getattr(root, 'locked', False) and not individually_selected_child:
                     scene._image_right_edge_snap_indicator = None
                     scene._image_top_edge_snap_indicator = None
                     if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -3987,11 +4268,8 @@ class BaseElement(QGraphicsItem):
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
         set_parent_action = menu.addAction("设置父级 (Set Parent)")
         
-        # 图文连接选项
         menu.addSeparator()
-        connect_image_text_action = menu.addAction("图文连接 (Connect to Image/Text)")
         perp_to_guide_action = menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)")
-        disconnect_image_text_action = menu.addAction("断开图文连接 (Disconnect Image/Text)")
         
         # 批量图文连接选项
         if len(selected_items) >= 2:
@@ -4041,17 +4319,11 @@ class BaseElement(QGraphicsItem):
                 self.scene().connect_all_texts_to_image()
             elif action == clear_connections_action:
                 self.scene().remove_all_image_text_connections()
-        elif action == connect_image_text_action:
-            if self.scene():
-                self.scene().start_image_text_binding(self)
         elif action == perp_to_guide_action:
             if self.scene():
                 sel = [i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
                 targets = sel if (len(sel) > 1 and (self in sel or self.get_root_parent_element() in sel)) else [self]
                 self.scene().draw_perpendicular_to_guide(items=targets)
-        elif action == disconnect_image_text_action:
-            if self.scene():
-                self.scene().remove_image_text_connectors(self)
         
         if action == unbind_action:
             # 使用撤销命令解除父级绑定
@@ -4322,17 +4594,89 @@ class InlineTextEditor(QTextEdit):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
-            self.editingCancelled.emit()
-            self.hide()
-            self.text_item = None
-            self.original_text = ""
+            self._finishing = True
+            try:
+                self.editingCancelled.emit()
+                self.text_item = None
+                self.original_text = ""
+                self.hide()
+            finally:
+                self._finishing = False
         elif event.key() == Qt.Key.Key_Return and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self.finish_editing()
+        elif event.key() == Qt.Key.Key_X and (
+            event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+        ):
+            target_item = self.text_item
+            sc = target_item.scene() if target_item else None
+            self.finish_editing()
+            if sc and target_item:
+                QTimer.singleShot(0, lambda: sc.split_text_items_by_symbol_dialog([target_item]))
+            event.accept()
+        elif event.key() == Qt.Key.Key_X and event.modifiers() == Qt.KeyboardModifier.AltModifier:
+            target_item = self.text_item
+            sc = target_item.scene() if target_item else None
+            self.finish_editing()
+            if sc and target_item:
+                QTimer.singleShot(0, lambda: sc.split_text_items_by_default_symbol([target_item]))
+            event.accept()
         elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right):
             # 竖排方向键逻辑：上下=同列移动，左右=跨列移动
             self._handle_vertical_arrow(event)
         else:
             super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event):
+        """内联编辑状态下右键菜单：整合排版拆分与标准文本编辑操作"""
+        self._inserting_snippet = True
+        try:
+            menu = self.createStandardContextMenu()
+            target_item = self.text_item
+            sc = target_item.scene() if target_item else None
+            cur_pos = self.textCursor().position()
+            current_text = self.toPlainText()
+
+            first_act = menu.actions()[0] if menu.actions() else None
+            split_cursor_act = None
+            split_default_act = None
+            finish_edit_act = None
+
+            if sc and target_item:
+                default_sym = sc.get_default_split_symbol()
+                disp_sym = "\\n(换行)" if default_sym in ("\n", "\\n") else default_sym
+                split_default_act = QAction(f"✂ 按默认符号「{disp_sym}」直接拆分 (Alt+X)", menu)
+                if 0 < cur_pos < len(current_text):
+                    split_cursor_act = QAction("✂ 在当前光标处拆分为两个文本框", menu)
+                finish_edit_act = QAction("✓ 完成文本编辑 (Ctrl+Enter)", menu)
+
+                if first_act:
+                    if split_cursor_act:
+                        menu.insertAction(first_act, split_cursor_act)
+                    menu.insertAction(first_act, split_default_act)
+                    menu.insertAction(first_act, finish_edit_act)
+                    menu.insertSeparator(first_act)
+                else:
+                    if split_cursor_act:
+                        menu.addAction(split_cursor_act)
+                    menu.addAction(split_default_act)
+                    menu.addAction(finish_edit_act)
+
+            chosen = menu.exec(event.globalPos())
+        finally:
+            self._inserting_snippet = False
+
+        if chosen is None:
+            return
+        if finish_edit_act and chosen == finish_edit_act:
+            self.finish_editing()
+        elif split_cursor_act and chosen == split_cursor_act:
+            self.finish_editing()
+            if sc and target_item:
+                sc.split_text_item_at_index(target_item, cur_pos)
+        elif split_default_act and chosen == split_default_act:
+            self.finish_editing()
+            if sc and target_item:
+                sc.split_text_items_by_default_symbol([target_item])
 
     def _handle_vertical_arrow(self, event):
         """竖排方向键：上下=同列上下移动，左=移到左边列（col_idx更大），右=移到右边列（col_idx更小）"""
@@ -4387,18 +4731,24 @@ class InlineTextEditor(QTextEdit):
                 self.text_item.update()
 
     def focusOutEvent(self, event):
-        if getattr(self, '_inserting_snippet', False):
+        if getattr(self, '_inserting_snippet', False) or getattr(self, '_finishing', False):
             super().focusOutEvent(event)
             return
         self.finish_editing()
         super().focusOutEvent(event)
 
     def finish_editing(self):
-        new_text = self.toPlainText()
-        self.editingFinished.emit(new_text)
-        self.hide()
-        self.text_item = None
-        self.original_text = ""
+        if getattr(self, '_finishing', False) or self.text_item is None:
+            return
+        self._finishing = True
+        try:
+            new_text = self.toPlainText()
+            self.editingFinished.emit(new_text)
+            self.text_item = None
+            self.original_text = ""
+            self.hide()
+        finally:
+            self._finishing = False
 
 class VTextItem(BaseElement):
     """Vertical Text Engine (Right-to-Left columns)"""
@@ -4629,22 +4979,23 @@ class VTextItem(BaseElement):
         self._build_text_context_menu(event.screenPos(), event.pos())
 
     def _build_text_context_menu(self, global_pos, item_pos=None):
+        if self.is_editing and self.inline_editor:
+            self.inline_editor.finish_editing()
         menu = QMenu()
         clicked_cursor_position = self._cursor_position_from_point(item_pos) if item_pos is not None else None
+        default_sym = self.scene().get_default_split_symbol() if self.scene() else "|"
+        disp_sym = "\\n(换行)" if default_sym in ("\n", "\\n") else default_sym
         
         # 编辑选项
         action_inline_edit = menu.addAction("直接编辑 (Inline Edit)")
         action_dialog_edit = menu.addAction("对话框编辑 (Dialog Edit)")
-        action_split_symbol = menu.addAction("按指定符号拆分文本框...")
+        action_split_default = menu.addAction(f"按默认符号「{disp_sym}」直接拆分 (Alt+X)")
+        action_set_default_split = menu.addAction("设置默认拆分符号...")
         action_split_cursor = menu.addAction("在此处拆分为两个文本框") if (clicked_cursor_position is not None and 0 < clicked_cursor_position < len(self.full_text)) else None
         action_reset_editing = menu.addAction("重置编辑状态 (Reset Editing)")
         menu.addSeparator()
         
-        action_font = menu.addAction("设置字体 (Font)")
-        action_color = menu.addAction("设置颜色 (Color)")
-        action_chars_per_col = menu.addAction("设置每列字数 (Chars per Column)")
-        action_column_spacing = menu.addAction("设置列间距 (Column Spacing)")
-        action_character_spacing = menu.addAction("设置字间距 (Character Spacing)")
+        action_text_style = menu.addAction("文字样式与排版设置 (字体/颜色/字数/间距)...")
         menu.addSeparator()
         
         # 添加隐藏/显示/删除连接点选项
@@ -4691,11 +5042,9 @@ class VTextItem(BaseElement):
         
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
         set_parent_action = menu.addAction("设置父级 (Set Parent)")
-        menu.addSeparator()
-        connect_image_text_action = menu.addAction("图文连接 (Connect to Image/Text)")
-        disconnect_image_text_action = menu.addAction("断开图文连接 (Disconnect Image/Text)")
         
         if len(selected_items) >= 2:
+            menu.addSeparator()
             batch_menu = menu.addMenu("批量连接 (Batch Connect)")
             auto_connect_action = batch_menu.addAction("智能连接")
             position_connect_action = batch_menu.addAction("位置连接")
@@ -4720,26 +5069,23 @@ class VTextItem(BaseElement):
             self.start_inline_editing(cursor_position=clicked_cursor_position, select_all=False)
         elif action == action_dialog_edit:
             self.start_dialog_editing()
-        elif action == action_split_symbol:
+        elif action == action_split_default:
             if self.scene():
                 sel_texts = [i for i in self.scene().selectedItems() if isinstance(i, VTextItem)]
                 targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
-                self.scene().split_text_items_by_symbol_dialog(targets)
+                self.scene().split_text_items_by_default_symbol(targets)
+        elif action == action_set_default_split:
+            if main_window and hasattr(main_window, 'set_default_split_symbol'):
+                main_window.set_default_split_symbol()
+            elif self.scene():
+                self.scene().configure_default_split_symbol_dialog()
         elif action_split_cursor and action == action_split_cursor:
             if self.scene():
                 self.scene().split_text_item_at_index(self, clicked_cursor_position)
         elif action == action_reset_editing:
             self.reset_editing_state()
-        elif action == action_font:
-            self.change_font_settings()
-        elif action == action_color:
-            self.change_color_settings()
-        elif action == action_chars_per_col:
-            self.change_chars_per_column_settings()
-        elif action == action_column_spacing:
-            self.change_column_spacing_settings()
-        elif action == action_character_spacing:
-            self.change_character_spacing_settings()
+        elif action == action_text_style:
+            self.open_text_style_dialog()
         elif action == toggle_connection_point_action:
             self.toggle_connection_point()
         elif delete_cp_action and action == delete_cp_action:
@@ -4772,12 +5118,6 @@ class VTextItem(BaseElement):
                 self.scene().connect_all_texts_to_image()
             elif action == clear_connections_action:
                 self.scene().remove_all_image_text_connections()
-        elif action == connect_image_text_action:
-            if self.scene():
-                self.scene().start_image_text_binding(self)
-        elif action == disconnect_image_text_action:
-            if self.scene():
-                self.scene().remove_image_text_connectors(self)
         
         if action == unbind_action:
             if self.scene():
@@ -4788,6 +5128,18 @@ class VTextItem(BaseElement):
                     self.scene().undo_stack.push(command)
         elif action == set_parent_action:
             if self.scene(): self.scene().start_binding_mode(self)
+
+    def open_text_style_dialog(self):
+        """打开合并后的文字样式与排版设置窗口（支持多选文字同时设置）"""
+        sc = self.scene()
+        cfg = sc.config_manager if sc else None
+        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
+        sel_texts = [i for i in sc.selectedItems() if isinstance(i, VTextItem)] if sc else []
+        targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
+        dlg = TextStyleSettingsDialog(self, target_items=targets, config_manager=cfg, parent=parent_win)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if parent_win and hasattr(parent_win, 'update_font_controls'):
+                parent_win.update_font_controls()
 
     def change_font_settings(self):
         current_font = QFont(self.font_family)
@@ -5646,11 +5998,7 @@ class VImageItem(BaseElement):
                 t_menu.addAction("内联编辑").triggered.connect(lambda _, t=txt: t.start_inline_editing())
                 t_menu.addAction("对话框编辑").triggered.connect(lambda _, t=txt: t.start_dialog_editing())
                 t_menu.addSeparator()
-                t_menu.addAction("设置字体").triggered.connect(lambda _, t=txt: t.change_font_settings())
-                t_menu.addAction("设置颜色").triggered.connect(lambda _, t=txt: t.change_color_settings())
-                t_menu.addAction("每列字数").triggered.connect(lambda _, t=txt: t.change_chars_per_column_settings())
-                t_menu.addAction("列间距").triggered.connect(lambda _, t=txt: t.change_column_spacing_settings())
-                t_menu.addAction("字间距").triggered.connect(lambda _, t=txt: t.change_character_spacing_settings())
+                t_menu.addAction("文字样式与排版设置...").triggered.connect(lambda _, t=txt: t.open_text_style_dialog())
                 t_menu.addSeparator()
                 t_menu.addAction("解除父级绑定").triggered.connect(
                     lambda _, t=txt: (
@@ -5717,14 +6065,12 @@ class VImageItem(BaseElement):
         )
         menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
         menu.addSeparator()
-        menu.addAction("图文连接").triggered.connect(lambda: self.scene().start_image_text_binding(self) if self.scene() else None)
         menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)").triggered.connect(
             lambda: self.scene().draw_perpendicular_to_guide(
                 items=([i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
                        if (self.isSelected() and len(self.scene().selectedItems()) > 1) else [self])
             ) if self.scene() else None
         )
-        menu.addAction("断开图文连接").triggered.connect(lambda: self.scene().remove_image_text_connectors(self) if self.scene() else None)
 
         menu.exec(global_pos)
 
@@ -6093,12 +6439,26 @@ class GuideItem(QGraphicsItem):
         else:
             self.setPos(self.pos_value, r.top())
 
+    def _hit_half_width(self):
+        """根据当前视图缩放动态计算感应半宽，保证画布缩小时也至少有 8 屏幕像素的点击/双击范围"""
+        if self.scene() and self.scene().views():
+            scale = abs(self.scene().views()[0].transform().m11())
+            if scale > 0:
+                return max(6.0, 8.0 / scale)
+        return 12.0
+
     def boundingRect(self):
         r = self.scene_rect
+        hw = self._hit_half_width()
         if self.orientation == Qt.Orientation.Horizontal:
-            return QRectF(0, -4, r.width(), 8)
+            return QRectF(0, -hw, r.width(), hw * 2)
         else:
-            return QRectF(-4, 0, 8, r.height())
+            return QRectF(-hw, 0, hw * 2, r.height())
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
 
     def paint(self, painter, option, widget):
         if getattr(self, "_selected_for_edit", False):
@@ -6177,14 +6537,17 @@ class GuideItem(QGraphicsItem):
             self.scene().remove_guide(self)
         event.accept()
 
-    def contextMenuEvent(self, event):
+    def _show_context_menu(self, global_pos):
         if self.scene():
             self.scene().select_guide(self)
         menu = QMenu()
-        menu.addAction("删除此辅助线").triggered.connect(
+        menu.addAction("删除此辅助线 (双击或按 Delete)").triggered.connect(
             lambda: self.scene().remove_guide(self) if self.scene() else None
         )
-        menu.exec(event.screenPos())
+        menu.exec(global_pos)
+
+    def contextMenuEvent(self, event):
+        self._show_context_menu(event.screenPos())
 
 
 class NavigatorWidget(QWidget):
@@ -7944,7 +8307,7 @@ class LayoutScene(QGraphicsScene):
                 view.setCursor(Qt.CursorShape.CrossCursor)
                 view.setFocus()
             self._show_status_message(
-                "点图片连线：直接点击人物头像即可连线（同排自动连a↔a，上下代自动连b→a；按住Shift连续接龙，按住Ctrl固定起点一对多，右键/Esc取消）",
+                "点图片连线：直接连续点击人物头像即可一直连线（同排自动连a↔a，上下代自动连b→a；按住Ctrl固定起点一对多，右键/点空白重置起点，Esc退出）",
                 0
             )
         else:
@@ -8003,7 +8366,7 @@ class LayoutScene(QGraphicsScene):
             if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
                 target_root.setSelected(True)
             self._show_status_message(
-                "已选起点：请点击目标人物头像（自动识别横向a↔a / 纵向b→a；按住Shift连续接龙，按住Ctrl一对多分叉，右键取消起点）",
+                "已选起点：请直接连续点击目标人物头像（自动识别横向a↔a / 纵向b→a并连续接龙；按住Ctrl固定起点一对多，右键或点空白取消起点）",
                 0
             )
             self.update()
@@ -8023,19 +8386,9 @@ class LayoutScene(QGraphicsScene):
                 f"已创建{mode_label}连线（已固定当前起点，可继续点击其他目标进行一对多连线）",
                 4000
             )
-        elif modifiers & Qt.KeyboardModifier.ShiftModifier:
-            # 按住 Shift：把目标设为新起点，连续向下或横向接龙
-            self.avatar_connect_source = target_root
-            self.clearSelection()
-            if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
-                target_root.setSelected(True)
-            self._show_status_message(
-                f"已接龙{mode_label}连线，起点已切至当前人物，可继续点击下一人物",
-                4000
-            )
         else:
-            # 普通点击：完成当前一对连线，清空起点以便直接点下一对（若来自一次性右键图文连接则退出）
-            if self.image_text_binding_mode and not self.avatar_connect_mode:
+            # 若来自一次性右键“图文连接”且未开启点图片连线模式，且未按Shift，则完成单次连接退出
+            if self.image_text_binding_mode and not self.avatar_connect_mode and not (modifiers & Qt.KeyboardModifier.ShiftModifier):
                 self.image_text_binding_mode = False
                 self.image_text_source = None
                 self.avatar_connect_source = None
@@ -8043,12 +8396,13 @@ class LayoutScene(QGraphicsScene):
                     self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
                 self._show_status_message(f"已完成{mode_label}连线", 3000)
             else:
-                self.avatar_connect_source = None
+                # 默认直接连续接龙（无需按住 Shift）：自动把当前目标设为新起点，继续点击下一个人物即可连续连线
+                self.avatar_connect_source = target_root
                 self.clearSelection()
                 if isinstance(target_root, BaseElement) and not getattr(target_root, 'locked', False):
                     target_root.setSelected(True)
                 self._show_status_message(
-                    f"已完成{mode_label}连线！点击任意人物开始下一条（提示：按住Shift点击可连续接龙，按住Ctrl可一对多）",
+                    f"已连续连接{mode_label}，起点已切至当前人物，直接点击下一人物即可继续连线（右键/点空白重置起点，按住Ctrl固定起点一对多）",
                     4000
                 )
         self.update()
@@ -9133,6 +9487,101 @@ class LayoutScene(QGraphicsScene):
     def delete_item(self, item):
         self.undo_stack.push_and_execute(DeleteItemCommand(self, item))
 
+    # 全角与半角字符一对一归一化映射表（保证归一化前后字符串长度严格一致）
+    _FULL_HALF_TRANSLATION_TABLE = str.maketrans({
+        **{chr(0xFF01 + i): chr(0x21 + i) for i in range(94)},  # 全角 ！..～ -> 半角 !..~（含 ｜->|, ，->,, ；->;, ：->:, ／->/, ＃-># 等）
+        '\u3000': ' ',   # 全角空格 -> 半角空格
+        '¦': '|',        # 断竖线 -> 竖线
+        '。': '.',       # 中文句号 -> 英文句点
+        '【': '[',       # 中文方括号 -> 英文方括号
+        '】': ']',
+        '—': '-',        # 中文破折号 -> 连字符
+        '“': '"',
+        '”': '"',
+        '‘': "'",
+        '’': "'",
+    })
+
+    @classmethod
+    def _normalize_full_half_text(cls, text):
+        """将全角符号/标点一对一归一化为半角，用于全半角无感匹配（长度保持严格不变）"""
+        if not text:
+            return ""
+        return text.translate(cls._FULL_HALF_TRANSLATION_TABLE)
+
+    @classmethod
+    def _find_split_symbol_in_text(cls, text, symbol, match_full_half=True):
+        """在 text 中查找拆分符号 symbol，返回 (匹配起始索引, 匹配长度)。
+        当 match_full_half=True 时，无论用户输入全角还是半角符号，均可自动匹配正文中最早出现的对应符号。
+        """
+        if not text or not symbol:
+            return -1, 0
+        actual_symbol = "\n" if symbol in ("\n", "\\n") else symbol
+        if actual_symbol == "\n" or not match_full_half:
+            idx = text.find(actual_symbol)
+            return (idx, len(actual_symbol)) if idx != -1 else (-1, 0)
+
+        exact_idx = text.find(actual_symbol)
+        norm_text = cls._normalize_full_half_text(text)
+        norm_symbol = cls._normalize_full_half_text(actual_symbol)
+        norm_idx = norm_text.find(norm_symbol)
+
+        if exact_idx != -1 and norm_idx != -1:
+            return min(exact_idx, norm_idx), len(actual_symbol)
+        if exact_idx != -1:
+            return exact_idx, len(actual_symbol)
+        if norm_idx != -1:
+            return norm_idx, len(actual_symbol)
+        return -1, 0
+
+    def get_default_split_symbol(self):
+        """获取用户配置的默认拆分符号"""
+        sym = self.config_manager.get('default_split_symbol', '')
+        if not sym:
+            sym = self.config_manager.get('last_split_symbol', '|') or '|'
+        return sym
+
+    def get_default_split_keep_mode(self):
+        """获取用户配置的默认拆分符号处理方式"""
+        mode = self.config_manager.get('default_split_keep_mode', '')
+        if mode not in ('remove', 'left', 'right'):
+            mode = self.config_manager.get('last_split_keep_mode', 'remove')
+        return mode if mode in ('remove', 'left', 'right') else 'remove'
+
+    def _resolve_target_text_items_for_split(self, items=None):
+        """收集待拆分的 VTextItem：兼容正在内联编辑的文本框、直接选中的文本框、以及选中父级图片下的子文字"""
+        # 先确保场景中正在内联编辑的文本框落盘保存刚输入的符号
+        editing_items = [
+            it for it in self.items()
+            if isinstance(it, VTextItem) and getattr(it, 'is_editing', False)
+        ]
+        for ed_item in editing_items:
+            if ed_item.inline_editor:
+                ed_item.inline_editor.finish_editing()
+
+        if items is not None:
+            resolved = []
+            for it in items:
+                if isinstance(it, VTextItem) and it not in resolved:
+                    resolved.append(it)
+                elif isinstance(it, VImageItem):
+                    for ch in it.childItems():
+                        if isinstance(ch, VTextItem) and ch not in resolved:
+                            resolved.append(ch)
+            return resolved
+
+        resolved = [i for i in self.selectedItems() if isinstance(i, VTextItem)]
+        for ed_item in editing_items:
+            if ed_item not in resolved:
+                resolved.append(ed_item)
+        if not resolved:
+            for sel in self.selectedItems():
+                if isinstance(sel, VImageItem):
+                    for ch in sel.childItems():
+                        if isinstance(ch, VTextItem) and ch not in resolved:
+                            resolved.append(ch)
+        return resolved
+
     def split_text_item_at_index(self, item, split_index, remove_len=0, strip_newline=True):
         """在指定字符索引处将单个 VTextItem 拆分为两个文本框"""
         if not isinstance(item, VTextItem) or item.scene() != self:
@@ -9155,22 +9604,25 @@ class LayoutScene(QGraphicsScene):
         cmd.execute()
         self.undo_stack.push(cmd)
         self.clearSelection()
-        item.setSelected(True)
         if cmd.new_item:
             cmd.new_item.setSelected(True)
-        self._show_status_message("已拆分为两个文本框（可按 Ctrl+Z 撤销）", 3000)
+        else:
+            item.setSelected(True)
+        self._show_status_message("已拆分为两个文本框，当前已选中新拆出的左侧文本框（可直接拖动，Ctrl+Z 撤销）", 3500)
         return cmd.new_item
 
-    def split_text_items_by_symbol(self, items=None, symbol="|", keep_symbol="remove"):
-        """将选中的文本框在指定符号（首次出现位置）处拆分为两个文本框
+    def split_text_items_by_symbol(self, items=None, symbol=None, keep_symbol=None, match_full_half=True):
+        """将选中的文本框在指定符号（首次出现位置，默认全角/半角通用）处拆分为两个文本框
         keep_symbol: 'remove' (删除符号) | 'left' (保留在第一段末尾) | 'right' (保留在第二段开头)
         """
-        if items is None:
-            items = [i for i in self.selectedItems() if isinstance(i, VTextItem)]
+        items = self._resolve_target_text_items_for_split(items)
+        if symbol is None:
+            symbol = self.get_default_split_symbol()
+        if keep_symbol is None:
+            keep_symbol = self.get_default_split_keep_mode()
         if not items or not symbol:
             return []
 
-        actual_symbol = "\n" if symbol in ("\n", "\\n") else symbol
         commands = []
         new_items = []
 
@@ -9181,19 +9633,19 @@ class LayoutScene(QGraphicsScene):
                 item.inline_editor.finish_editing()
 
             text = item.full_text
-            idx = text.find(actual_symbol)
-            if idx == -1:
+            idx, match_len = self._find_split_symbol_in_text(text, symbol, match_full_half=match_full_half)
+            if idx == -1 or match_len <= 0:
                 continue
 
             if keep_symbol == "left":
-                part1 = text[:idx + len(actual_symbol)]
-                part2 = text[idx + len(actual_symbol):]
+                part1 = text[:idx + match_len]
+                part2 = text[idx + match_len:]
             elif keep_symbol == "right":
                 part1 = text[:idx]
                 part2 = text[idx:]
             else:
                 part1 = text[:idx]
-                part2 = text[idx + len(actual_symbol):]
+                part2 = text[idx + match_len:]
 
             part1 = part1.rstrip('\n')
             part2 = part2.lstrip('\n')
@@ -9214,46 +9666,112 @@ class LayoutScene(QGraphicsScene):
         if commands:
             self.clearSelection()
             for cmd in commands:
-                cmd.item.setSelected(True)
                 if cmd.new_item:
                     cmd.new_item.setSelected(True)
-            self._show_status_message(f"已成功将 {len(commands)} 个文本框拆分为两个文本框（Ctrl+Z 可撤销）", 3500)
+                else:
+                    cmd.item.setSelected(True)
+            self._show_status_message(
+                f"已成功将 {len(commands)} 个文本框拆分为两个文本框，并选中拆出的新文本框（可直接拖动，Ctrl+Z 撤销）",
+                3500
+            )
         else:
-            self._show_status_message(f"选中的文本框中未找到符号「{symbol}」或拆分后有一侧为空", 3500)
+            self._show_status_message(f"选中的文本框中未找到符号「{symbol}」（已同时匹配全半角）或拆分后有一侧为空", 3500)
         return new_items
+
+    def split_text_items_by_default_symbol(self, items=None):
+        """使用用户设定的默认拆分符号一键拆分选中文本框（无需弹窗）"""
+        items = self._resolve_target_text_items_for_split(items)
+        if not items:
+            self._show_status_message("请先选中要拆分的文本框", 3000)
+            return []
+        default_sym = self.get_default_split_symbol()
+        default_mode = self.get_default_split_keep_mode()
+        return self.split_text_items_by_symbol(items, symbol=default_sym, keep_symbol=default_mode, match_full_half=True)
+
+    def configure_default_split_symbol_dialog(self, parent_widget=None):
+        """弹出设置默认拆分符号对话框，允许软件使用者自定义默认分割符及处理方式"""
+        dlg = QDialog(parent_widget)
+        dlg.setWindowTitle("设置默认拆分符号")
+        dlg.setMinimumWidth(380)
+        layout = QFormLayout(dlg)
+
+        cur_symbol = self.get_default_split_symbol()
+        symbol_edit = QLineEdit(cur_symbol, dlg)
+        symbol_edit.setPlaceholderText(r"输入默认分隔符，如 | 、 / 、 # 、 ； 或 \n（换行）")
+        layout.addRow("默认拆分符号：", symbol_edit)
+
+        mode_combo = QComboBox(dlg)
+        mode_combo.addItem("删除该拆分符号", "remove")
+        mode_combo.addItem("保留在右侧（第一个文本框末尾）", "left")
+        mode_combo.addItem("保留在左侧（第二个文本框开头）", "right")
+        cur_mode = self.get_default_split_keep_mode()
+        idx = mode_combo.findData(cur_mode)
+        if idx >= 0:
+            mode_combo.setCurrentIndex(idx)
+        layout.addRow("默认符号处理：", mode_combo)
+
+        hint_lbl = QLabel("说明：全角与半角符号自动双向兼容（例如设置 | 时，正文输入 | 或 ｜ 均可识别）。\n设置后可通过 Alt+X 或右键菜单一键按此默认符号拆分。")
+        hint_lbl.setStyleSheet("color: #666; font-size: 11px;")
+        hint_lbl.setWordWrap(True)
+        layout.addRow(hint_lbl)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("保存为默认")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addRow(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        new_sym = symbol_edit.text()
+        if not new_sym:
+            self._show_status_message("默认拆分符号不能为空", 3000)
+            return False
+
+        new_mode = mode_combo.currentData()
+        self.config_manager.set('default_split_symbol', new_sym)
+        self.config_manager.set('default_split_keep_mode', new_mode)
+        self.config_manager.set('last_split_symbol', new_sym)
+        self.config_manager.set('last_split_keep_mode', new_mode)
+        self._show_status_message(f"默认拆分符号已设为「{new_sym}」（自动兼容全角/半角）", 3500)
+        return True
 
     def split_text_items_by_symbol_dialog(self, items=None):
         """弹出对话框，让用户输入分隔符号并选择是否保留符号，然后将选中文本框拆分为两个"""
-        if items is None:
-            items = [i for i in self.selectedItems() if isinstance(i, VTextItem)]
-        if not items:
-            # 若选中的是父级图片，也支持自动查找其子文字
-            for sel in self.selectedItems():
-                if isinstance(sel, VImageItem):
-                    items.extend([c for c in sel.childItems() if isinstance(c, VTextItem)])
+        items = self._resolve_target_text_items_for_split(items)
         if not items:
             self._show_status_message("请先选中要拆分的文本框", 3000)
             return []
 
         dlg = QDialog()
         dlg.setWindowTitle("按指定符号拆分文本框")
-        dlg.setMinimumWidth(340)
+        dlg.setMinimumWidth(380)
         layout = QFormLayout(dlg)
 
-        last_symbol = self.config_manager.get('last_split_symbol', '｜')
-        symbol_edit = QLineEdit(last_symbol, dlg)
-        symbol_edit.setPlaceholderText("输入分隔符，如 | 、 # 、 / 或 \n（换行）")
+        default_symbol = self.get_default_split_symbol()
+        symbol_edit = QLineEdit(default_symbol, dlg)
+        symbol_edit.setPlaceholderText(r"输入分隔符，如 | 、 # 、 / 或 \n（换行），全半角自动通用")
         layout.addRow("拆分符号：", symbol_edit)
 
         mode_combo = QComboBox(dlg)
         mode_combo.addItem("删除该拆分符号", "remove")
         mode_combo.addItem("保留在右侧（第一个文本框末尾）", "left")
         mode_combo.addItem("保留在左侧（第二个文本框开头）", "right")
-        last_mode = self.config_manager.get('last_split_keep_mode', 'remove')
-        idx = mode_combo.findData(last_mode)
+        default_mode = self.get_default_split_keep_mode()
+        idx = mode_combo.findData(default_mode)
         if idx >= 0:
             mode_combo.setCurrentIndex(idx)
         layout.addRow("符号处理：", mode_combo)
+
+        chk_full_half = QCheckBox("自动兼容全角与半角符号（如 | 与 ｜、, 与 ，、/ 与 ／）", dlg)
+        chk_full_half.setChecked(True)
+        layout.addRow("", chk_full_half)
+
+        chk_save_default = QCheckBox("将当前拆分符号和处理方式保存为默认", dlg)
+        chk_save_default.setChecked(True)
+        layout.addRow("", chk_save_default)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("拆分")
@@ -9273,7 +9791,15 @@ class LayoutScene(QGraphicsScene):
         keep_mode = mode_combo.currentData()
         self.config_manager.set('last_split_symbol', symbol)
         self.config_manager.set('last_split_keep_mode', keep_mode)
-        return self.split_text_items_by_symbol(items, symbol=symbol, keep_symbol=keep_mode)
+        if chk_save_default.isChecked():
+            self.config_manager.set('default_split_symbol', symbol)
+            self.config_manager.set('default_split_keep_mode', keep_mode)
+        return self.split_text_items_by_symbol(
+            items,
+            symbol=symbol,
+            keep_symbol=keep_mode,
+            match_full_half=chk_full_half.isChecked()
+        )
 
     def add_item_with_undo(self, item):
         """添加元素到场景并记录撤销"""
@@ -9364,7 +9890,11 @@ class LayoutScene(QGraphicsScene):
                 if base_elements: self.copy_items(base_elements)
             elif event.key() == Qt.Key.Key_V:
                 self.paste_items()
-        elif event.key() == Qt.Key.Key_Delete:
+        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            if self._selected_guide is not None:
+                self.remove_guide(self._selected_guide)
+                event.accept()
+                return
             selected = self.selectedItems()
             for item in selected:
                 if isinstance(item, BaseElement):
@@ -9658,7 +10188,7 @@ class LayoutView(QGraphicsView):
             return False
         if not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
             return False
-        mode = self.scene().config_manager.get('marquee_mode', 'all') if self.scene() else 'all'
+        mode = self.scene().config_manager.get('marquee_mode', 'images') if self.scene() else 'all'
         if mode == 'images':
             return isinstance(item, VImageItem)
         if mode == 'connected':
@@ -9779,7 +10309,7 @@ class LayoutView(QGraphicsView):
         path.addPolygon(scene_polygon)
 
         scene = self.scene()
-        mode = scene.config_manager.get('marquee_mode', 'all')
+        mode = scene.config_manager.get('marquee_mode', 'images')
         scene.clearSelection()
         items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
@@ -9943,6 +10473,17 @@ class LayoutView(QGraphicsView):
                 it._show_context_menu(event.globalPos())
                 event.accept()
                 return
+        # 辅助线右键菜单：直接点击或靠近辅助线（8屏幕像素内）时弹出“删除此辅助线”
+        for it in items_at:
+            if isinstance(it, GuideItem) and it.isVisible():
+                it._show_context_menu(event.globalPos())
+                event.accept()
+                return
+        near_guide = self.scene().find_guide_near_pos(scene_pos, self.transform(), pixel_tolerance=8.0) if self.scene() else None
+        if near_guide is not None and not any(isinstance(it, (VTextItem, VImageItem, BaseElement)) for it in items_at):
+            near_guide._show_context_menu(event.globalPos())
+            event.accept()
+            return
         for it in items_at:
             if isinstance(it, VTextItem):
                 target = it
@@ -10196,7 +10737,7 @@ class LayoutView(QGraphicsView):
             if hit_element is None and raw_hit is not None:
                 # raw_hit 可能是连线
                 if isinstance(raw_hit, (VImageTextConnector, VGenericConnector)):
-                    mode = self.scene().config_manager.get('marquee_mode', 'all')
+                    mode = self.scene().config_manager.get('marquee_mode', 'images')
                     if mode == 'images':
                         if self._main_window and hasattr(self._main_window, '_toast'):
                             self._main_window._toast.show_message(
@@ -10246,7 +10787,7 @@ class LayoutView(QGraphicsView):
                 scene_polygon = self.mapToScene(current_rect)
                 path = QPainterPath()
                 path.addPolygon(scene_polygon)
-                mode = scene.config_manager.get('marquee_mode', 'all')
+                mode = scene.config_manager.get('marquee_mode', 'images')
                 items_in_rect = scene.items(path, self._marquee_mode,
                                             Qt.SortOrder.DescendingOrder, self.transform())
                 newly_entered = []
@@ -11956,7 +12497,7 @@ class MainWindow(QMainWindow):
             self.show_connection_points_action.blockSignals(True)
             self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
             self.show_connection_points_action.blockSignals(False)
-        if hasattr(self, 'marquee_mode_combo'):
+        if hasattr(self, 'btn_marquee_mode') or hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'refresh_ui'):
             self.refresh_ui()
@@ -12567,10 +13108,7 @@ class MainWindow(QMainWindow):
         btn_align_top.triggered.connect(self.align_top)
         main_toolbar.addAction(btn_align_top)
 
-        btn_smart_connect = QAction("智能连接", self)
-        btn_smart_connect.setToolTip("按选中顺序逐对连接元素（Ctrl+点击确定顺序）")
-        btn_smart_connect.triggered.connect(self.auto_connect_selected)
-        main_toolbar.addAction(btn_smart_connect)
+
         
         main_toolbar.addSeparator()
         
@@ -12679,17 +13217,13 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.manual_line_break_btn)
 
         main_toolbar.addSeparator()
-        main_toolbar.addWidget(QLabel("框选:"))
-        self.marquee_mode_combo = QComboBox()
-        self.marquee_mode_combo.addItem("全选", "all")
-        self.marquee_mode_combo.addItem("仅图片", "images")
-        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
-        self.marquee_mode_combo.setToolTip("框选模式（Alt+M 循环切换）")
-        self.marquee_mode_combo.setFixedWidth(96)
-        self.marquee_mode_combo.currentIndexChanged.connect(
-            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
+        self.btn_marquee_mode = self._add_toolbar_action(
+            main_toolbar,
+            "框选: 仅图片",
+            self.on_marquee_button_toggled,
+            "框选模式切换（Alt+M）：默认「仅图片」，按下切换为「全选」",
+            checkable=True
         )
-        main_toolbar.addWidget(self.marquee_mode_combo)
 
         main_toolbar.addSeparator()
         btn_group_connect = QAction("垂直连接", self)
@@ -12730,7 +13264,9 @@ class MainWindow(QMainWindow):
         insert_menu.addAction("添加文本 (Ctrl+T)", self.add_text)
         insert_menu.addAction("插入图片 (Ctrl+Shift+I)", self.add_image)
         insert_menu.addAction("编辑选中文字", self.edit_selected_text)
-        insert_menu.addAction("按符号拆分选中文字 (Ctrl+Shift+X)", self.split_selected_text_by_symbol)
+        insert_menu.addAction("按默认符号直接拆分 (Alt+X)", self.split_selected_text_by_default_symbol)
+        insert_menu.addAction("按指定符号拆分文字... (Ctrl+Shift+X)", self.split_selected_text_by_symbol)
+        insert_menu.addAction("设置默认拆分符号...", self.set_default_split_symbol)
         
         insert_btn = QToolButton()
         insert_btn.setText("插入 ▼")
@@ -12796,7 +13332,7 @@ class MainWindow(QMainWindow):
             main_toolbar,
             "点图片连线",
             self.toggle_avatar_connect_mode,
-            "开启后只管点击人物头像，自动按横向(a↔a)/纵向(b→a)选点连线（连接点隐藏时照常可用；按住Shift连续接龙，按住Ctrl一对多）",
+            "开启后直接点击人物头像即可连续接龙连线，自动按横向(a↔a)/纵向(b→a)选点（右键/点空白断开当前链条，按住Ctrl固定起点一对多）",
             checkable=True
         )
         self.btn_show_cp = self._add_toolbar_action(
@@ -12809,7 +13345,6 @@ class MainWindow(QMainWindow):
         self.btn_show_cp.blockSignals(True)
         self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
         self.btn_show_cp.blockSignals(False)
-        self._add_toolbar_action(main_toolbar, "智能连接", self.auto_connect_selected, "框选或多选人物后一键连接（自动判断同排横向a↔a / 跨代纵向b→a）")
 
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
@@ -12821,17 +13356,13 @@ class MainWindow(QMainWindow):
         )
 
         main_toolbar.addSeparator()
-        main_toolbar.addWidget(QLabel("框选:"))
-        self.marquee_mode_combo = QComboBox()
-        self.marquee_mode_combo.addItem("全选", "all")
-        self.marquee_mode_combo.addItem("仅图片", "images")
-        self.marquee_mode_combo.addItem("仅连接点元素", "connected")
-        self.marquee_mode_combo.setToolTip("框选模式（Alt+M 循环切换）")
-        self.marquee_mode_combo.setFixedWidth(110)
-        self.marquee_mode_combo.currentIndexChanged.connect(
-            lambda idx: self.set_marquee_mode(self.marquee_mode_combo.itemData(idx))
+        self.btn_marquee_mode = self._add_toolbar_action(
+            main_toolbar,
+            "框选: 仅图片",
+            self.on_marquee_button_toggled,
+            "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
+            checkable=True
         )
-        main_toolbar.addWidget(self.marquee_mode_combo)
 
 
 
@@ -13160,12 +13691,12 @@ class MainWindow(QMainWindow):
         self.auto_exit_paste_action.toggled.connect(self.toggle_auto_exit_setting)
         edit_menu.addAction(self.auto_exit_paste_action)
 
-        # 框选模式：三选一，替代原来的两个开关
-        marquee_mode_menu = edit_menu.addMenu('框选模式  [Alt+M 循环切换]')
+        # 框选模式：默认仅图片，可切换为全选
+        marquee_mode_menu = edit_menu.addMenu('框选模式  [Alt+M 切换]')
         self._marquee_mode_actions = {}
         for label, value in [
-            ('全选（默认）', 'all'),
-            ('仅选图片', 'images'),
+            ('仅选图片（默认）', 'images'),
+            ('全选', 'all'),
             ('仅选有连接点的元素', 'connected'),
         ]:
             a = QAction(label, self)
@@ -13285,10 +13816,19 @@ class MainWindow(QMainWindow):
         selected_img_opacity_action.triggered.connect(self.change_selected_images_opacity)
         edit_menu.addAction(selected_img_opacity_action)
 
+        quick_split_text_action = QAction('按默认符号直接拆分文本框', self)
+        quick_split_text_action.setShortcut('Alt+X')
+        quick_split_text_action.triggered.connect(self.split_selected_text_by_default_symbol)
+        edit_menu.addAction(quick_split_text_action)
+
         split_text_action = QAction('按指定符号拆分文本框...', self)
         split_text_action.setShortcut('Ctrl+Shift+X')
         split_text_action.triggered.connect(self.split_selected_text_by_symbol)
         edit_menu.addAction(split_text_action)
+
+        set_default_split_action = QAction('设置默认拆分符号...', self)
+        set_default_split_action.triggered.connect(self.set_default_split_symbol)
+        edit_menu.addAction(set_default_split_action)
 
         edit_menu.addSeparator()
         cmd_palette_action = QAction('搜索功能/命令面板...', self)
@@ -13382,12 +13922,20 @@ class MainWindow(QMainWindow):
             else:
                 self.status_bar.showMessage('已关闭：图片顶部Y自动吸附', 3000)
 
+    def on_marquee_button_toggled(self, checked):
+        """工具栏框选按钮切换：未按下=仅图片（默认），按下=全选"""
+        self.set_marquee_mode('all' if checked else 'images')
+
     def set_marquee_mode(self, mode):
-        """设置框选模式：all / images / connected"""
-        self.scene.config_manager.set('marquee_mode', mode)
+        """设置框选模式：images（默认仅图片） / all（全选） / connected"""
+        for document in getattr(self, '_documents', []):
+            document.scene.config_manager.set('marquee_mode', mode)
+        if self.scene:
+            self.scene.config_manager.set('marquee_mode', mode)
         self._sync_marquee_mode_ui()
-        labels = {'all': '全选', 'images': '仅选图片', 'connected': '仅选有连接点的元素'}
-        self.status_bar.showMessage(f'框选模式：{labels.get(mode, mode)}  (Alt+M 循环切换)', 3000)
+        labels = {'all': '全选', 'images': '仅图片', 'connected': '仅选有连接点的元素'}
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage(f'框选模式：{labels.get(mode, mode)}  (Alt+M 切换)', 3000)
 
     def _selected_texts_for_eye_role(self):
         selected_texts = [
@@ -13415,18 +13963,23 @@ class MainWindow(QMainWindow):
         )
 
     def cycle_marquee_mode(self):
-        """Alt+M 循环切换框选模式"""
-        modes = ['all', 'images', 'connected']
-        current = self.scene.config_manager.get('marquee_mode', 'all')
-        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else 'all'
+        """Alt+M 在「仅图片」与「全选」之间切换"""
+        current = self.scene.config_manager.get('marquee_mode', 'images')
+        next_mode = 'all' if current != 'all' else 'images'
         self.set_marquee_mode(next_mode)
 
     def _sync_marquee_mode_ui(self):
-        """同步菜单和工具栏下拉框的选中状态"""
-        current = self.scene.config_manager.get('marquee_mode', 'all')
+        """同步菜单和工具栏框选按钮的选中状态与文字"""
+        current = self.scene.config_manager.get('marquee_mode', 'images')
         if hasattr(self, '_marquee_mode_actions'):
             for value, action in self._marquee_mode_actions.items():
                 action.setChecked(value == current)
+        if hasattr(self, 'btn_marquee_mode'):
+            is_all = (current == 'all')
+            self.btn_marquee_mode.blockSignals(True)
+            self.btn_marquee_mode.setChecked(is_all)
+            self.btn_marquee_mode.setText("框选: 全选" if is_all else "框选: 仅图片")
+            self.btn_marquee_mode.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             idx = self.marquee_mode_combo.findData(current)
             if idx >= 0:
@@ -13801,10 +14354,29 @@ class MainWindow(QMainWindow):
         else:
             print("请先选择一个文字元素")
 
+    def split_selected_text_by_default_symbol(self):
+        """按用户设定的默认拆分符号一键将选中文本框拆分为两个文本框"""
+        if self.scene:
+            self.scene.split_text_items_by_default_symbol()
+
     def split_selected_text_by_symbol(self):
         """按指定符号将选中的文本框拆分为两个文本框"""
         if self.scene:
             self.scene.split_text_items_by_symbol_dialog()
+
+    def set_default_split_symbol(self):
+        """设置默认的文本框拆分符号及处理方式（同步到所有打开文档）"""
+        if not self.scene:
+            return
+        if self.scene.configure_default_split_symbol_dialog(self):
+            new_sym = self.scene.config_manager.get('default_split_symbol', '|')
+            new_mode = self.scene.config_manager.get('default_split_keep_mode', 'remove')
+            self._set_shared_configs({
+                'default_split_symbol': new_sym,
+                'default_split_keep_mode': new_mode,
+                'last_split_symbol': new_sym,
+                'last_split_keep_mode': new_mode,
+            })
 
     def toggle_smart_brush(self, enabled):
         self.view.set_smart_brush_enabled(enabled)
@@ -15060,7 +15632,7 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("右键=批量连接/对齐  Ctrl+G=保存组合")
             else:
                 connectors = [i for i in selected if isinstance(i, (VImageTextConnector, VGenericConnector))]
-                mode = self.scene.config_manager.get('marquee_mode', 'all')
+                mode = self.scene.config_manager.get('marquee_mode', 'images')
                 if connectors and mode == 'images':
                     self.status_bar.showMessage("已选中连线 — 当前仅图片模式，Alt+M 切换为全选模式", 5000)
                 elif connectors:

@@ -4,7 +4,7 @@
   "background_scale_mode": "fit",
   "default_font_family": "黑体",
   "default_font_size": 30,
-  "default_line_width": 5,
+  "default_line_width": 10,
   "common_phrases": [
     "（一）"
   ],
@@ -44,7 +44,7 @@
     "green": "left"
   },
   "smart_brush_radius": 10,
-  "default_save_dir": "C:\\Users\\A\\Desktop",
+  "default_save_dir": "C:/Users/A/Desktop",
   "insert_image_max_width_ratio": 1.0,
   "insert_image_default_width": 3524,
   "insert_image_default_height": 5021,
@@ -94,10 +94,20 @@
       "t1": 1,
       "t2": 3,
       "t3": 2
+    },
+    "组合11": {
+      "t1": 1,
+      "t2": 3,
+      "t3": 2
+    },
+    "组合12": {
+      "t1": 3,
+      "t2": 1,
+      "t3": null
     }
   },
-  "ftimport_excel_path": "C:/Users/A/Desktop/b/西游记406_分组格式.xlsx",
-  "ftimport_template_name": "组合10",
+  "ftimport_excel_path": "C:/Users/A/Desktop/b/西游记411_分组格式.xlsx",
+  "ftimport_template_name": "组合11",
   "ftimport_unit": "mm",
   "ftimport_start_x": 280.0,
   "ftimport_spacing": 50.0,
@@ -111,7 +121,7 @@
   "ftimport_img_width": 150.0,
   "hide_connection_points_when_image_selected": false,
   "show_text_hover_tooltip": false,
-  "insert_image_fit_canvas": false,
+  "insert_image_fit_canvas": true,
   "horizontal_move_only": true,
   "license_expiry_date": "2026-11-30 09:43",
   "image_right_edge_snap_enabled": true,
@@ -179,6 +189,12 @@
     "t3": "",
     "d": ""
   },
-  "last_login_time": "2026-11-02 12:23:15",
-  "text_right_edge_snap_enabled": true
+  "last_login_time": "2026-11-09 09:59:56",
+  "text_right_edge_snap_enabled": true,
+  "show_connection_points_default": false,
+  "select_child_selects_parent": true,
+  "last_split_symbol": "|",
+  "last_split_keep_mode": "remove",
+  "default_split_symbol": "|",
+  "default_split_keep_mode": "remove"
 }
