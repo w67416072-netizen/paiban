@@ -164,6 +164,9 @@ class ConfigManager:
                 )
                 # 默认框选模式始终为仅图片
                 config['marquee_mode'] = "images"
+                # 对齐基准模式：first_selected（对第一个选中对象对齐） / pick_reference（点选指定对象对齐）
+                if config.get('align_mode') not in ('first_selected', 'pick_reference'):
+                    config['align_mode'] = 'first_selected'
                 print(f"配置已加载: {self.config_file}")
                 return config
             except Exception as e:
@@ -196,6 +199,7 @@ class ConfigManager:
             'marquee_only_images': False,  # 框选时仅选择图片（兼容旧版）
             'marquee_only_connected': False,  # 框选时仅选择有连接点的元素（兼容旧版）
             'marquee_mode': 'images',  # 框选模式默认：仅图片 (images) / 全选 (all)
+            'align_mode': 'first_selected',  # 多选对齐模式：first_selected（对第一个选中对象对齐） / pick_reference（点选指定对象对齐）
             'insert_image_to_bottom': False,  # 插入图片时置于底层
             'nudge_large_step': 10,  # Shift+方向键大步长（像素）
             'horizontal_move_only': False,  # 拖动/方向键移动时只允许水平移动
@@ -4257,12 +4261,23 @@ class BaseElement(QGraphicsItem):
         
         # 对齐功能
         selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
+        align_mode_first_action = None
+        align_mode_pick_action = None
         if len(selected_items) >= 2:
-            align_menu = menu.addMenu("对齐 (Align)")
+            cur_align_mode = self.scene().config_manager.get('align_mode', 'first_selected') if self.scene() else 'first_selected'
+            mode_tag = "首选对象" if cur_align_mode == 'first_selected' else "点选指定"
+            align_menu = menu.addMenu(f"对齐 (Align) [{mode_tag}]")
             align_top_action = align_menu.addAction("顶部对齐")
             align_right_action = align_menu.addAction("右对齐")
             align_center_h_action = align_menu.addAction("水平居中对齐")
             align_center_v_action = align_menu.addAction("垂直居中对齐")
+            align_menu.addSeparator()
+            align_mode_first_action = align_menu.addAction("基准：对选择的第一个对象对齐")
+            align_mode_first_action.setCheckable(True)
+            align_mode_first_action.setChecked(cur_align_mode == 'first_selected')
+            align_mode_pick_action = align_menu.addAction("基准：点选指定对象对齐")
+            align_mode_pick_action.setCheckable(True)
+            align_mode_pick_action.setChecked(cur_align_mode == 'pick_reference')
             menu.addSeparator()
         
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
@@ -4307,6 +4322,10 @@ class BaseElement(QGraphicsItem):
                 self.scene().align_center_horizontal(selected_items)
             elif action == align_center_v_action:
                 self.scene().align_center_vertical(selected_items)
+            elif align_mode_first_action and action == align_mode_first_action:
+                self.scene().set_align_mode('first_selected')
+            elif align_mode_pick_action and action == align_mode_pick_action:
+                self.scene().set_align_mode('pick_reference')
             elif action == chain_connect_action:
                 self.scene().batch_chain_connect_selected_items()
             elif action == auto_connect_action:
@@ -5032,12 +5051,23 @@ class VTextItem(BaseElement):
             cur_op = int(selected_images_in_sel[0].image_opacity * 100)
             batch_img_opacity_action = menu.addAction(f"设置选中图片透明度 ({len(selected_images_in_sel)} 张, 当前 {cur_op}%)")
             menu.addSeparator()
+        align_mode_first_action = None
+        align_mode_pick_action = None
         if len(selected_items) >= 2:
-            align_menu = menu.addMenu("对齐 (Align)")
+            cur_align_mode = self.scene().config_manager.get('align_mode', 'first_selected') if self.scene() else 'first_selected'
+            mode_tag = "首选对象" if cur_align_mode == 'first_selected' else "点选指定"
+            align_menu = menu.addMenu(f"对齐 (Align) [{mode_tag}]")
             align_top_action = align_menu.addAction("顶部对齐")
             align_right_action = align_menu.addAction("右对齐")
             align_center_h_action = align_menu.addAction("水平居中对齐")
             align_center_v_action = align_menu.addAction("垂直居中对齐")
+            align_menu.addSeparator()
+            align_mode_first_action = align_menu.addAction("基准：对选择的第一个对象对齐")
+            align_mode_first_action.setCheckable(True)
+            align_mode_first_action.setChecked(cur_align_mode == 'first_selected')
+            align_mode_pick_action = align_menu.addAction("基准：点选指定对象对齐")
+            align_mode_pick_action.setCheckable(True)
+            align_mode_pick_action.setChecked(cur_align_mode == 'pick_reference')
             menu.addSeparator()
         
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
@@ -5108,6 +5138,10 @@ class VTextItem(BaseElement):
                 self.scene().align_center_horizontal(selected_items)
             elif action == align_center_v_action:
                 self.scene().align_center_vertical(selected_items)
+            elif align_mode_first_action and action == align_mode_first_action:
+                self.scene().set_align_mode('first_selected')
+            elif align_mode_pick_action and action == align_mode_pick_action:
+                self.scene().set_align_mode('pick_reference')
             elif action == auto_connect_action:
                 self.scene().auto_connect_selected_items()
             elif action == position_connect_action:
@@ -6047,11 +6081,22 @@ class VImageItem(BaseElement):
 
         selected_items = [i for i in self.scene().selectedItems() if isinstance(i, BaseElement)] if self.scene() else []
         if len(selected_items) >= 2:
-            align_menu = menu.addMenu("对齐")
+            cur_align_mode = self.scene().config_manager.get('align_mode', 'first_selected') if self.scene() else 'first_selected'
+            mode_tag = "首选对象" if cur_align_mode == 'first_selected' else "点选指定"
+            align_menu = menu.addMenu(f"对齐 [{mode_tag}]")
             align_menu.addAction("顶部对齐").triggered.connect(lambda: self.scene().align_top(selected_items))
             align_menu.addAction("右对齐").triggered.connect(lambda: self.scene().align_right(selected_items))
             align_menu.addAction("水平居中").triggered.connect(lambda: self.scene().align_center_horizontal(selected_items))
             align_menu.addAction("垂直居中").triggered.connect(lambda: self.scene().align_center_vertical(selected_items))
+            align_menu.addSeparator()
+            act_first = align_menu.addAction("基准：对选择的第一个对象对齐")
+            act_first.setCheckable(True)
+            act_first.setChecked(cur_align_mode == 'first_selected')
+            act_first.triggered.connect(lambda: self.scene().set_align_mode('first_selected'))
+            act_pick = align_menu.addAction("基准：点选指定对象对齐")
+            act_pick.setCheckable(True)
+            act_pick.setChecked(cur_align_mode == 'pick_reference')
+            act_pick.triggered.connect(lambda: self.scene().set_align_mode('pick_reference'))
             batch_menu = menu.addMenu("批量连接")
             batch_menu.addAction("智能连接").triggered.connect(lambda: self.scene().auto_connect_selected_items())
             batch_menu.addAction("清除所有连接").triggered.connect(lambda: self.scene().remove_all_image_text_connections())
@@ -7507,10 +7552,19 @@ class LayoutScene(QGraphicsScene):
         newly_selected = current_selected - previous_set
         if newly_selected:
             clicked_item = self._pending_selection_click_item
+            if (clicked_item is not None
+                    and isinstance(clicked_item, BaseElement)
+                    and self.config_manager.get('select_child_selects_parent', True)):
+                root_item = clicked_item.get_root_parent_element()
+                if root_item in newly_selected:
+                    clicked_item = root_item
             # 单击/Ctrl加选：标记为非框选
             if clicked_item in newly_selected and len(newly_selected) == 1:
                 self.last_selection_by_marquee = False
                 self.selection_order.append(clicked_item)
+            elif len(newly_selected) == 1:
+                self.last_selection_by_marquee = False
+                self.selection_order.extend(newly_selected)
             else:
                 # 框选/Ctrl+A 等批量选中：由 LayoutView 的实时扫描顺序决定，这里只补充未被扫到的元素
                 if clicked_item in newly_selected:
@@ -7579,18 +7633,26 @@ class LayoutScene(QGraphicsScene):
             event.accept()
             return
 
-        # 对齐基准选择模式：点选当前已选对象中的一个作为基准
-        if self.align_reference_mode and event.button() == Qt.MouseButton.LeftButton:
-            raw = self.itemAt(event.scenePos(), QTransform())
-            target_item = raw
-            while target_item is not None and not isinstance(target_item, BaseElement):
-                target_item = target_item.parentItem()
+        # 对齐基准选择模式：右键可取消，左键点选当前已选对象中的一个作为基准
+        if self.align_reference_mode and event.button() == Qt.MouseButton.RightButton:
+            self._cancel_align_reference_mode()
+            event.accept()
+            return
 
+        if self.align_reference_mode and event.button() == Qt.MouseButton.LeftButton:
+            target_item = self._find_align_reference_candidate_at(event.scenePos())
             if target_item and target_item in self.align_reference_candidates:
-                self._execute_alignment_with_reference(self.align_reference_mode, target_item, self.align_reference_candidates)
-                self._cancel_align_reference_mode()
+                self._execute_alignment_with_reference(
+                    self.align_reference_mode,
+                    target_item,
+                    self.align_reference_candidates,
+                    mode_hint="点选指定对象"
+                )
+                self._cancel_align_reference_mode(silent=True)
             else:
-                print("请点击当前已选对象中的一个作为对齐基准，按 ESC 可取消")
+                msg = "请点击当前已选对象中的一个作为对齐基准，按 ESC 或右键可取消"
+                print(msg)
+                self._show_status_message(msg, 3000)
             event.accept()
             return
 
@@ -9940,21 +10002,72 @@ class LayoutScene(QGraphicsScene):
         else:
             super().keyPressEvent(event)
     
+    ALIGN_TYPE_LABELS = {
+        'top': '顶部对齐',
+        'right': '右对齐',
+        'center_h': '水平居中对齐',
+        'center_v': '垂直居中对齐',
+    }
+
+    def set_align_mode(self, mode):
+        """设置对齐基准模式：first_selected（对选择的第一个对象对齐） / pick_reference（点选指定对象对齐）"""
+        if mode not in ('first_selected', 'pick_reference'):
+            mode = 'first_selected'
+        main_win = self.parent()
+        if main_win is None and self.views():
+            main_win = getattr(self.views()[0], '_main_window', None)
+        if main_win and hasattr(main_win, 'set_align_mode'):
+            main_win.set_align_mode(mode)
+            return
+        self.config_manager.set('align_mode', mode)
+        if mode == 'first_selected' and self.align_reference_mode:
+            self._cancel_align_reference_mode(silent=True)
+        label = '对选择的第一个对象对齐' if mode == 'first_selected' else '点选指定对象作为基准对齐'
+        self._show_status_message(f'对齐基准模式：{label}  (Alt+A 切换)', 3500)
+
+    def _find_align_reference_candidate_at(self, scene_pos):
+        """在指定场景位置查找属于当前候选对齐列表的对象（自动穿透锁定底图并兼容子元素点击）"""
+        view_transform = self.views()[0].transform() if self.views() else QTransform()
+        raw_items = self.items(
+            scene_pos,
+            Qt.ItemSelectionMode.IntersectsItemShape,
+            Qt.SortOrder.DescendingOrder,
+            view_transform
+        )
+        candidate_set = set(self.align_reference_candidates)
+        for it in raw_items:
+            curr = it
+            while curr is not None and not isinstance(curr, BaseElement):
+                curr = curr.parentItem()
+            if curr is None:
+                continue
+            if isinstance(curr, VImageItem) and getattr(curr, 'locked', False):
+                continue
+            if curr in candidate_set:
+                return curr
+            root = curr.get_root_parent_element()
+            if root in candidate_set:
+                return root
+        return None
+
     def _start_align_reference_mode(self, align_mode, items, tip_text):
         self.align_reference_mode = align_mode
         self.align_reference_candidates = list(items)
         if self.views():
             self.views()[0].setCursor(Qt.CursorShape.CrossCursor)
         print(tip_text)
+        self._show_status_message(tip_text, 0)
 
-    def _cancel_align_reference_mode(self):
+    def _cancel_align_reference_mode(self, silent=False):
         self.align_reference_mode = None
         self.align_reference_candidates = []
         if self.views():
             self.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
-        print("已取消对齐基准选择")
+        if not silent:
+            print("已取消对齐基准选择")
+            self._show_status_message("已取消对齐基准选择", 2500)
 
-    def _execute_alignment_with_reference(self, align_mode, ref, items):
+    def _execute_alignment_with_reference(self, align_mode, ref, items, mode_hint=None):
         # 收集所有移动命令
         move_commands = []
         
@@ -10011,43 +10124,72 @@ class LayoutScene(QGraphicsScene):
             macro_cmd = MacroCommand(self, move_commands)
             self.undo_stack.push(macro_cmd)
 
-        print(f"已完成对齐，基准对象: {type(ref).__name__}")
+        align_label = self.ALIGN_TYPE_LABELS.get(align_mode, '对齐')
+        ref_desc = mode_hint or type(ref).__name__
+        msg = f"已完成{align_label}（基准：{ref_desc}，可按 Ctrl+Z 撤销，Alt+A 切换对齐基准模式）"
+        print(msg)
+        self._show_status_message(msg, 3500)
 
-    def _top_level_selected(self):
+    def _top_level_selected(self, items=None):
         """只取顶层选中元素，子级跟着父级移动不需要单独对齐"""
-        all_selected = [item for item in self.selectedItems() if isinstance(item, BaseElement)]
+        source_items = self.selectedItems() if items is None else items
+        all_selected = [item for item in source_items if isinstance(item, BaseElement)]
         selected_set = set(all_selected)
         return [item for item in all_selected
                 if not isinstance(item.parentItem(), BaseElement) or
                 item.parentItem() not in selected_set]
 
-    def align_top(self, items=None):
-        if items is None:
-            items = self._top_level_selected()
-        if len(items) < 2:
-            return
-        self._start_align_reference_mode('top', items, '请在画布中点选一个已选对象作为"顶部对齐"基准，按 ESC 可取消')
+    def _get_first_selected_reference(self, items):
+        """从待对齐元素列表中获取第一个被选中的基准对象"""
+        if not items:
+            return None
+        item_set = set(items)
+        for cand in self.selection_order:
+            if cand in item_set:
+                return cand
+            if isinstance(cand, BaseElement):
+                root = cand.get_root_parent_element()
+                if root in item_set:
+                    return root
+        return items[0]
 
-    def align_right(self, items=None):
-        if items is None:
-            items = self._top_level_selected()
+    def _trigger_alignment(self, align_type, items=None, target_mode=None):
+        """根据当前对齐模式执行对第一个选中对象对齐，或进入点选指定对象对齐模式"""
+        items = self._top_level_selected(items)
         if len(items) < 2:
+            self._show_status_message("请至少选中两个对象后再执行对齐", 3000)
             return
-        self._start_align_reference_mode('right', items, '请在画布中点选一个已选对象作为"右对齐"基准，按 ESC 可取消')
 
-    def align_center_horizontal(self, items=None):
-        if items is None:
-            items = self._top_level_selected()
-        if len(items) < 2:
-            return
-        self._start_align_reference_mode('center_h', items, '请在画布中点选一个已选对象作为"水平居中"基准，按 ESC 可取消')
+        mode = target_mode or self.config_manager.get('align_mode', 'first_selected')
+        align_label = self.ALIGN_TYPE_LABELS.get(align_type, '对齐')
 
-    def align_center_vertical(self, items=None):
-        if items is None:
-            items = self._top_level_selected()
-        if len(items) < 2:
-            return
-        self._start_align_reference_mode('center_v', items, '请在画布中点选一个已选对象作为“垂直居中”基准，按 ESC 可取消')
+        if mode == 'first_selected':
+            if self.align_reference_mode:
+                self._cancel_align_reference_mode(silent=True)
+            ref = self._get_first_selected_reference(items)
+            if ref is None:
+                return
+            self._execute_alignment_with_reference(
+                align_type,
+                ref,
+                items,
+                mode_hint="第一个选中对象"
+            )
+        else:
+            tip_text = f'请在画布中点选一个已选对象作为"{align_label}"基准，按 ESC 或右键可取消（Alt+A 可切换为对第一个选中对象对齐）'
+            self._start_align_reference_mode(align_type, items, tip_text)
+
+    def align_top(self, items=None, target_mode=None):
+        self._trigger_alignment('top', items=items, target_mode=target_mode)
+
+    def align_right(self, items=None, target_mode=None):
+        self._trigger_alignment('right', items=items, target_mode=target_mode)
+
+    def align_center_horizontal(self, items=None, target_mode=None):
+        self._trigger_alignment('center_h', items=items, target_mode=target_mode)
+
+    def align_center_vertical(self, items=None, target_mode=None):
+        self._trigger_alignment('center_v', items=items, target_mode=target_mode)
 
     def batch_copy(self, params):
         """步长和重复复制"""
@@ -10541,9 +10683,14 @@ class LayoutView(QGraphicsView):
             event.accept()
             return
 
-        # 右键：若正处于连线起点等待状态，单击右键立即取消当前起点（不弹菜单）
+        # 右键：若正处于连线起点等待状态或对齐基准点选状态，单击右键立即取消（不弹菜单）
         if event.button() == Qt.MouseButton.RightButton and self.scene():
             sc = self.scene()
+            if sc.align_reference_mode:
+                sc._cancel_align_reference_mode()
+                self._suppress_next_context_menu = True
+                event.accept()
+                return
             if sc.connection_mode:
                 sc.cancel_connection_mode()
                 self._suppress_next_context_menu = True
@@ -10557,6 +10704,11 @@ class LayoutView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
             sc = self.scene()
+            # 0) 若正处于「点选指定对象对齐」基准选择模式：直接交由场景选择基准对象（自动穿透锁定底图、不触发连接点连线）
+            if sc.align_reference_mode and not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
+                super().mousePressEvent(event)
+                event.accept()
+                return
             # 1) 若开启了「点图片连线」模式 或 右键「图文连接」模式：直接点人物头像/文字/独立拐点即可自动判断 a/b 点连线
             #    （被锁定的底图/图片会自动被 find_connectable_element_at 穿透忽略；连接点隐藏时同样正常工作）
             if sc.avatar_connect_mode or sc.image_text_binding_mode:
@@ -10816,19 +10968,19 @@ class LayoutView(QGraphicsView):
                                 (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
                             newly_entered.append(item)
 
-                # 新进入的元素按连接点到鼠标距离排序（最近的排前面，模拟扫过顺序）
+                # 新进入的元素按到框选起点距离排序（离框选起点越近越先进入，确保第一个框选对象准确）
                 if newly_entered:
-                    mouse_scene = self.mapToScene(event.pos())
+                    origin_scene = self.mapToScene(self._marquee_origin)
 
-                    def dist_to_mouse(it):
+                    def dist_to_origin(it):
                         cp = getattr(it, 'connection_point', None)
                         if cp and cp.isVisible():
                             p = cp.get_scene_center()
                         else:
                             p = it.scenePos()
-                        return (p.x() - mouse_scene.x()) ** 2 + (p.y() - mouse_scene.y()) ** 2
+                        return (p.x() - origin_scene.x()) ** 2 + (p.y() - origin_scene.y()) ** 2
 
-                    newly_entered.sort(key=dist_to_mouse)
+                    newly_entered.sort(key=dist_to_origin)
                     self._marquee_sweep_order.extend(newly_entered)
 
             self.viewport().update()
@@ -10929,14 +11081,27 @@ class LayoutView(QGraphicsView):
         if self._marquee_active and event.button() == self._marquee_trigger_button:
             self._marquee_active = False
             self._apply_marquee_selection()
-            # 用框选过程中实时追踪的扫过顺序覆盖 selection_order
+            # 用框选过程中实时追踪的扫过顺序更新 selection_order，并补齐释放瞬间新选中的元素
             scene = self.scene()
-            if scene and self._marquee_sweep_order:
-                # 只保留最终确实被选中的元素，顺序不变
-                selected_set = set(scene.selectedItems())
-                scene.selection_order = [item for item in self._marquee_sweep_order
-                                         if item in selected_set]
-            scene.last_selection_by_marquee = True  # 标记为框选
+            if scene:
+                selected_elements = [
+                    item for item in scene.selectedItems()
+                    if isinstance(item, (VImageItem, VTextItem))
+                ]
+                selected_set = set(selected_elements)
+                ordered = [item for item in self._marquee_sweep_order if item in selected_set]
+                remaining = [item for item in selected_elements if item not in ordered]
+                if remaining:
+                    origin_scene = self.mapToScene(self._marquee_origin)
+                    remaining.sort(
+                        key=lambda it: (
+                            (it.scenePos().x() - origin_scene.x()) ** 2
+                            + (it.scenePos().y() - origin_scene.y()) ** 2
+                        )
+                    )
+                    ordered.extend(remaining)
+                scene.selection_order = ordered
+                scene.last_selection_by_marquee = True  # 标记为框选
             self._marquee_sweep_order = []
             self._marquee_band.hide()
             event.accept()
@@ -12329,8 +12494,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.document_tabs)
         self.create_menu_bar()
         self.create_toolbars()
-        # 同步框选模式 UI 初始状态
+        # 同步框选模式与对齐基准模式 UI 初始状态
         self._sync_marquee_mode_ui()
+        self._sync_align_mode_ui()
         
         # 创建状态栏
         self.status_bar = self.statusBar()
@@ -12499,6 +12665,8 @@ class MainWindow(QMainWindow):
             self.show_connection_points_action.blockSignals(False)
         if hasattr(self, 'btn_marquee_mode') or hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
+        if hasattr(self, 'btn_align_mode') or hasattr(self, '_align_mode_actions'):
+            self._sync_align_mode_ui()
         if hasattr(self, 'refresh_ui'):
             self.refresh_ui()
         if hasattr(self, 'fit_in_view'):
@@ -13108,6 +13276,14 @@ class MainWindow(QMainWindow):
         btn_align_top.triggered.connect(self.align_top)
         main_toolbar.addAction(btn_align_top)
 
+        self.btn_align_mode = self._add_toolbar_action(
+            main_toolbar,
+            "对齐: 首选对象",
+            self.on_align_mode_button_toggled,
+            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
+            checkable=True
+        )
+
 
         
         main_toolbar.addSeparator()
@@ -13259,10 +13435,12 @@ class MainWindow(QMainWindow):
         main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
 
-        # 插入下拉组：整合添加文本、插入图片、编辑文字
+        # 1. 插入与拆分下拉组
         insert_menu = QMenu(self)
-        insert_menu.addAction("添加文本 (Ctrl+T)", self.add_text)
-        insert_menu.addAction("插入图片 (Ctrl+Shift+I)", self.add_image)
+        insert_menu.addAction("添加竖排文本 (Ctrl+T)", self.add_text)
+        insert_menu.addAction("插入图片... (Ctrl+Shift+I)", self.add_image)
+        insert_menu.addAction("从 Excel 批量导入族谱... (Ctrl+I)", self.open_family_tree_import_dialog)
+        insert_menu.addSeparator()
         insert_menu.addAction("编辑选中文字", self.edit_selected_text)
         insert_menu.addAction("按默认符号直接拆分 (Alt+X)", self.split_selected_text_by_default_symbol)
         insert_menu.addAction("按指定符号拆分文字... (Ctrl+Shift+X)", self.split_selected_text_by_symbol)
@@ -13272,13 +13450,13 @@ class MainWindow(QMainWindow):
         insert_btn.setText("插入 ▼")
         insert_btn.setMenu(insert_menu)
         insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        insert_btn.setToolTip("添加文本、插入图片、编辑文字")
+        insert_btn.setToolTip("添加文本、插入图片、导入 Excel 与拆分文字")
         main_toolbar.addWidget(insert_btn)
 
         main_toolbar.addSeparator()
         self._add_toolbar_action(main_toolbar, "撤销", self.undo, "撤销上一步操作", "Ctrl+Z")
         
-        # 水平移动开关
+        # 2. 移动与选区模式组
         self.btn_horizontal_move = self._add_toolbar_action(
             main_toolbar,
             "🔒水平移动",
@@ -13288,7 +13466,6 @@ class MainWindow(QMainWindow):
         )
         self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
 
-        # 选子集即选父级开关
         self.btn_select_parent = self._add_toolbar_action(
             main_toolbar,
             "🔗选子即选父",
@@ -13299,7 +13476,15 @@ class MainWindow(QMainWindow):
         self.btn_select_parent.blockSignals(True)
         self.btn_select_parent.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
         self.btn_select_parent.blockSignals(False)
-        
+
+        self.btn_marquee_mode = self._add_toolbar_action(
+            main_toolbar,
+            "框选: 仅图片",
+            self.on_marquee_button_toggled,
+            "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
+            checkable=True
+        )
+
         self.btn_resize = self._add_toolbar_action(
             main_toolbar,
             "调整图片",
@@ -13325,15 +13510,47 @@ class MainWindow(QMainWindow):
         self.smart_brush_size_spin.valueChanged.connect(self.view.set_smart_brush_radius)
         main_toolbar.addWidget(self.smart_brush_size_spin)
 
+        # 3. 对齐与基准模式组（收纳 4 种对齐方式 + 基准一键切换）
         main_toolbar.addSeparator()
-        self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
+        align_toolbar_menu = QMenu(self)
+        align_toolbar_menu.addAction("顶部对齐", self.align_top)
+        align_toolbar_menu.addAction("右对齐", self.align_right)
+        align_toolbar_menu.addAction("水平居中对齐", self.align_center_horizontal)
+        align_toolbar_menu.addAction("垂直居中对齐", self.align_center_vertical)
+        align_toolbar_menu.addSeparator()
+        align_toolbar_menu.addAction("切换对齐基准模式 (Alt+A)", self.cycle_align_mode)
+        align_btn = QToolButton()
+        align_btn.setText("对齐 ▼")
+        align_btn.setMenu(align_toolbar_menu)
+        align_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        align_btn.setToolTip("多选对象对齐（顶部 / 右边缘 / 水平居中 / 垂直居中）")
+        main_toolbar.addWidget(align_btn)
+
         self._add_toolbar_action(main_toolbar, "顶部对齐", self.align_top, "按顶部边缘对齐选中对象")
+        self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
+        self.btn_align_mode = self._add_toolbar_action(
+            main_toolbar,
+            "对齐: 首选对象",
+            self.on_align_mode_button_toggled,
+            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
+            checkable=True
+        )
+
+        # 4. 连线与连接点组
+        main_toolbar.addSeparator()
         self.btn_avatar_connect = self._add_toolbar_action(
             main_toolbar,
             "点图片连线",
             self.toggle_avatar_connect_mode,
             "开启后直接点击人物头像即可连续接龙连线，自动按横向(a↔a)/纵向(b→a)选点（右键/点空白断开当前链条，按住Ctrl固定起点一对多）",
             checkable=True
+        )
+        self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
+        self._add_toolbar_action(
+            main_toolbar,
+            "水平连接",
+            lambda: self.scene.connect_image_points_right_to_left(),
+            "按从右到左顺序连接选中图片的连接点"
         )
         self.btn_show_cp = self._add_toolbar_action(
             main_toolbar,
@@ -13346,57 +13563,25 @@ class MainWindow(QMainWindow):
         self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
         self.btn_show_cp.blockSignals(False)
 
-        main_toolbar.addSeparator()
-        self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
-        self._add_toolbar_action(
-            main_toolbar,
-            "水平连接",
-            lambda: self.scene.connect_image_points_right_to_left(),
-            "按从右到左顺序连接选中图片的连接点"
-        )
-
-        main_toolbar.addSeparator()
-        self.btn_marquee_mode = self._add_toolbar_action(
-            main_toolbar,
-            "框选: 仅图片",
-            self.on_marquee_button_toggled,
-            "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
-            checkable=True
-        )
-
-
-
     def create_menu_bar(self):
+        """构建顶部级联菜单栏：遵循「用户思维分类、视觉减负（每层5~8项）、搜索优先」三大原则"""
         menubar = self.menuBar()
+
+        # ══════════════════════════════════════════════════════════════════
+        # 1. 文件（工程管理、保存与导出成果）
+        # ══════════════════════════════════════════════════════════════════
         file_menu = menubar.addMenu('文件')
-        
+
         new_action = QAction('新建文档', self)
         new_action.setShortcut('Ctrl+N')
         new_action.triggered.connect(self.new_document)
         file_menu.addAction(new_action)
 
-        new_project_action = QAction('新建工程', self)
-        new_project_action.setShortcut('Ctrl+Shift+N')
-        new_project_action.triggered.connect(self.new_project)
-        file_menu.addAction(new_project_action)
-
-        close_document_action = QAction('关闭当前文档', self)
-        close_document_action.setShortcut('Ctrl+W')
-        close_document_action.triggered.connect(self.close_document)
-        file_menu.addAction(close_document_action)
-
-        rename_document_action = QAction('重命名当前文档', self)
-        rename_document_action.setShortcut('F2')
-        rename_document_action.triggered.connect(self.rename_document)
-        file_menu.addAction(rename_document_action)
-        
-        file_menu.addSeparator()
-        
         open_action = QAction('打开工程...', self)
         open_action.setShortcut('Ctrl+O')
         open_action.triggered.connect(self.load_proj)
         file_menu.addAction(open_action)
-        
+
         save_action = QAction('快速保存', self)
         save_action.setShortcut('Ctrl+S')
         save_action.triggered.connect(self.quick_save_proj)
@@ -13407,383 +13592,144 @@ class MainWindow(QMainWindow):
         save_as_action.triggered.connect(self.save_proj)
         file_menu.addAction(save_as_action)
 
+        file_menu.addSeparator()
+
+        # 二级：导出成果
+        export_submenu = file_menu.addMenu('导出成果')
+        export_pdf_action = QAction('导出当前文档 PDF...', self)
+        export_pdf_action.setShortcut('Ctrl+Alt+P')
+        export_pdf_action.triggered.connect(self.export_pdf)
+        export_submenu.addAction(export_pdf_action)
+
         save_and_pdf_action = QAction('保存项目并导出全部文档 PDF', self)
         save_and_pdf_action.setShortcut('Ctrl+Shift+P')
         save_and_pdf_action.triggered.connect(self.save_proj_and_pdf)
-        file_menu.addAction(save_and_pdf_action)
+        export_submenu.addAction(save_and_pdf_action)
+
+        export_submenu.addSeparator()
+
+        export_svg_action = QAction('导出 CorelDRAW SVG...', self)
+        export_svg_action.triggered.connect(self.export_coreldraw_svg)
+        export_submenu.addAction(export_svg_action)
+
+        export_action = QAction('导出图片 (PNG)...', self)
+        export_action.setShortcut('Ctrl+E')
+        export_action.triggered.connect(self.export_image)
+        export_submenu.addAction(export_action)
+
+        export_excel_action = QAction('导出 Excel 数据表...', self)
+        export_excel_action.triggered.connect(self.export_excel)
+        export_submenu.addAction(export_excel_action)
+
+        # 二级：文档管理与打印
+        doc_print_submenu = file_menu.addMenu('文档管理与打印')
+        new_project_action = QAction('新建空白工程', self)
+        new_project_action.setShortcut('Ctrl+Shift+N')
+        new_project_action.triggered.connect(self.new_project)
+        doc_print_submenu.addAction(new_project_action)
+
+        rename_document_action = QAction('重命名当前文档...', self)
+        rename_document_action.setShortcut('F2')
+        rename_document_action.triggered.connect(self.rename_document)
+        doc_print_submenu.addAction(rename_document_action)
+
+        close_document_action = QAction('关闭当前文档', self)
+        close_document_action.setShortcut('Ctrl+W')
+        close_document_action.triggered.connect(self.close_document)
+        doc_print_submenu.addAction(close_document_action)
+
+        doc_print_submenu.addSeparator()
+
+        print_preview_action = QAction('打印预览...', self)
+        print_preview_action.triggered.connect(self.print_preview)
+        doc_print_submenu.addAction(print_preview_action)
 
         print_action = QAction('打印...', self)
         print_action.setShortcut('Ctrl+P')
         print_action.triggered.connect(self.print_document)
-        file_menu.addAction(print_action)
+        doc_print_submenu.addAction(print_action)
 
-        print_preview_action = QAction('打印预览...', self)
-        print_preview_action.triggered.connect(self.print_preview)
-        file_menu.addAction(print_preview_action)
-        
         file_menu.addSeparator()
-        
-        export_action = QAction('导出图片...', self)
-        export_action.setShortcut('Ctrl+E')
-        export_action.triggered.connect(self.export_image)
-        file_menu.addAction(export_action)
 
-        export_svg_action = QAction('导出CorelDRAW SVG...', self)
-        export_svg_action.triggered.connect(self.export_coreldraw_svg)
-        file_menu.addAction(export_svg_action)
-
-        export_excel_action = QAction('导出 Excel 数据表...', self)
-        export_excel_action.triggered.connect(self.export_excel)
-        file_menu.addAction(export_excel_action)
-
-        export_pdf_action = QAction('导出 PDF...', self)
-        export_pdf_action.setShortcut('Ctrl+Alt+P')
-        export_pdf_action.triggered.connect(self.export_pdf)
-        file_menu.addAction(export_pdf_action)
-        
-        file_menu.addSeparator()
-        
-        # 设置默认字体
-        set_default_font_action = QAction('设置默认字体...', self)
-        set_default_font_action.triggered.connect(self.set_default_font)
-        file_menu.addAction(set_default_font_action)
-
-        set_current_text_default_action = QAction('将选中文字格式设为默认', self)
-        set_current_text_default_action.triggered.connect(self.set_current_text_format_as_default)
-        file_menu.addAction(set_current_text_default_action)
-
-        add_text_preset_action = QAction('将选中文字格式新增为预设...', self)
-        add_text_preset_action.triggered.connect(self.add_current_text_format_preset)
-        file_menu.addAction(add_text_preset_action)
-
+        # 二级：系统偏好与授权
+        sys_pref_submenu = file_menu.addMenu('系统偏好与授权')
         set_save_dir_action = QAction('设置默认保存目录...', self)
         set_save_dir_action.triggered.connect(self.set_default_save_dir)
-        file_menu.addAction(set_save_dir_action)
+        sys_pref_submenu.addAction(set_save_dir_action)
 
-        set_img_size_action = QAction('设置插入图片默认大小...', self)
-        set_img_size_action.triggered.connect(self.set_insert_image_size)
-        file_menu.addAction(set_img_size_action)
-
-        file_menu.addSeparator()
+        sys_pref_submenu.addSeparator()
 
         license_expiry_action = QAction('设置软件到期日期...', self)
         license_expiry_action.triggered.connect(self.set_license_expiry_date)
-        file_menu.addAction(license_expiry_action)
+        sys_pref_submenu.addAction(license_expiry_action)
 
         license_password_action = QAction('修改授权密码...', self)
         license_password_action.triggered.connect(self.change_license_password)
-        file_menu.addAction(license_password_action)
-        
-        # 添加素材菜单
-        asset_menu = menubar.addMenu('素材')
-        save_group_action = QAction('保存组合素材', self)
-        save_group_action.setShortcut('Ctrl+G')
-        save_group_action.triggered.connect(self.save_selected_as_group)
-        asset_menu.addAction(save_group_action)
+        sys_pref_submenu.addAction(license_password_action)
 
-        asset_menu.addSeparator()
-        batch_copy_action = QAction('批量复制...', self)
-        batch_copy_action.setShortcut('Ctrl+Shift+D')
-        batch_copy_action.triggered.connect(self.batch_copy)
-        asset_menu.addAction(batch_copy_action)
+        # ══════════════════════════════════════════════════════════════════
+        # 2. 插入与排版（文字、图片、对齐排列与批量复制）
+        # ══════════════════════════════════════════════════════════════════
+        layout_menu = menubar.addMenu('插入与排版')
 
-        group_connect_action = QAction('垂直连接', self)
-        group_connect_action.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
-        group_connect_action.triggered.connect(lambda: self.scene.group_chain_connect())
-        asset_menu.addAction(group_connect_action)
+        add_text_menu_action = QAction('添加竖排文本', self)
+        add_text_menu_action.setShortcut('Ctrl+T')
+        add_text_menu_action.triggered.connect(self.add_text)
+        layout_menu.addAction(add_text_menu_action)
 
-        open_library_action = QAction('切换素材库面板', self)
-        open_library_action.setShortcut('F9')
-        open_library_action.triggered.connect(self.open_asset_library)
-        asset_menu.addAction(open_library_action)
+        add_img_menu_action = QAction('插入图片...', self)
+        add_img_menu_action.setShortcut('Ctrl+Shift+I')
+        add_img_menu_action.triggered.connect(self.add_image)
+        layout_menu.addAction(add_img_menu_action)
 
-        asset_menu.addSeparator()
         import_excel_action = QAction('从 Excel 批量导入族谱...', self)
         import_excel_action.setShortcut('Ctrl+I')
         import_excel_action.triggered.connect(self.open_family_tree_import_dialog)
-        asset_menu.addAction(import_excel_action)
-        
-        # 添加视图菜单
-        view_menu = menubar.addMenu('视图')
-        
-        fit_view_action = QAction('合适屏幕', self)
-        fit_view_action.setShortcut('Ctrl+0')
-        fit_view_action.triggered.connect(self.fit_in_view)
-        view_menu.addAction(fit_view_action)
-        
-        fill_view_action = QAction('填充屏幕', self)
-        fill_view_action.setShortcut('Ctrl+Alt+0')
-        fill_view_action.triggered.connect(self.fill_view)
-        view_menu.addAction(fill_view_action)
-        
-        actual_size_action = QAction('实际大小', self)
-        actual_size_action.setShortcut('Ctrl+1')
-        actual_size_action.triggered.connect(self.actual_size)
-        view_menu.addAction(actual_size_action)
-        
-        view_menu.addSeparator()
-        
-        zoom_in_action = QAction('放大', self)
-        zoom_in_action.setShortcut('Ctrl+=')
-        zoom_in_action.triggered.connect(self.zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction('缩小', self)
-        zoom_out_action.setShortcut('Ctrl+-')
-        zoom_out_action.triggered.connect(self.zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        zoom_selection_action = QAction('缩放到选中', self)
-        zoom_selection_action.setShortcut('Ctrl+2')
-        zoom_selection_action.triggered.connect(self.zoom_to_selection)
-        view_menu.addAction(zoom_selection_action)
+        layout_menu.addAction(import_excel_action)
 
-        canvas_size_action = QAction('设置画布大小...', self)
-        canvas_size_action.triggered.connect(self.set_canvas_size)
-        view_menu.addAction(canvas_size_action)
+        layout_menu.addSeparator()
 
-        # 导航器稍后创建；此菜单动作与其显示状态保持同步。
-        self.toggle_navigator_action = QAction('显示导航器', self)
-        self.toggle_navigator_action.setCheckable(True)
-        self.toggle_navigator_action.setChecked(True)
-        self.toggle_navigator_action.toggled.connect(self.set_navigator_visible)
-        view_menu.addAction(self.toggle_navigator_action)
+        # 二级：文字编辑与拆分
+        text_submenu = layout_menu.addMenu('文字编辑与拆分')
+        edit_text_action = QAction('编辑选中文字', self)
+        edit_text_action.triggered.connect(self.edit_selected_text)
+        text_submenu.addAction(edit_text_action)
 
-        view_menu.addSeparator()
+        quick_split_text_action = QAction('按默认符号直接拆分文本框', self)
+        quick_split_text_action.setShortcut('Alt+X')
+        quick_split_text_action.triggered.connect(self.split_selected_text_by_default_symbol)
+        text_submenu.addAction(quick_split_text_action)
 
-        self.bg_above_connectors_action = QAction('背景图片在连线之上', self)
-        self.bg_above_connectors_action.setCheckable(True)
-        self.bg_above_connectors_action.setChecked(self.scene.config_manager.get('bg_above_connectors', False))
-        self.bg_above_connectors_action.triggered.connect(self.toggle_bg_above_connectors)
-        view_menu.addAction(self.bg_above_connectors_action)
-        
-        view_menu.addSeparator()
-        
-        # 背景设置
-        set_background_action = QAction('设置默认背景图片...', self)
-        set_background_action.triggered.connect(self.set_background_image)
-        view_menu.addAction(set_background_action)
-        
-        clear_background_action = QAction('清除背景图片', self)
-        clear_background_action.triggered.connect(self.clear_background_image)
-        view_menu.addAction(clear_background_action)
+        split_text_action = QAction('按指定符号拆分文本框...', self)
+        split_text_action.setShortcut('Ctrl+Shift+X')
+        split_text_action.triggered.connect(self.split_selected_text_by_symbol)
+        text_submenu.addAction(split_text_action)
 
-        show_all_images_action = QAction('显示所有隐藏图片', self)
-        show_all_images_action.triggered.connect(self.show_all_hidden_images)
-        view_menu.addAction(show_all_images_action)
+        set_default_split_action = QAction('设置默认拆分符号...', self)
+        set_default_split_action.triggered.connect(self.set_default_split_symbol)
+        text_submenu.addAction(set_default_split_action)
 
-        image_manage_action = QAction('图片管理模式', self)
-        image_manage_action.setShortcut('Alt+,')
-        image_manage_action.triggered.connect(lambda: self.scene.toggle_image_manage_mode())
-        view_menu.addAction(image_manage_action)
-        
-        background_opacity_action = QAction('设置背景透明度...', self)
-        background_opacity_action.triggered.connect(self.set_background_opacity)
-        view_menu.addAction(background_opacity_action)
-        
-        # 背景缩放模式子菜单
-        scale_mode_menu = view_menu.addMenu('背景缩放模式')
-        
-        scale_fit_action = QAction('适应画布', self)
-        scale_fit_action.triggered.connect(lambda: self.set_background_scale_mode('fit'))
-        scale_mode_menu.addAction(scale_fit_action)
-        
-        scale_fill_action = QAction('填充画布', self)
-        scale_fill_action.triggered.connect(lambda: self.set_background_scale_mode('fill'))
-        scale_mode_menu.addAction(scale_fill_action)
-        
-        scale_stretch_action = QAction('拉伸填充', self)
-        scale_stretch_action.triggered.connect(lambda: self.set_background_scale_mode('stretch'))
-        scale_mode_menu.addAction(scale_stretch_action)
-        
-        scale_tile_action = QAction('平铺', self)
-        scale_tile_action.triggered.connect(lambda: self.set_background_scale_mode('tile'))
-        scale_mode_menu.addAction(scale_tile_action)
+        text_submenu.addSeparator()
 
-        # 辅助线菜单
-        view_menu.addSeparator()
-        toggle_guides_action = QAction('显示/隐藏辅助线', self)
-        toggle_guides_action.setShortcut('Ctrl+;')
-        toggle_guides_action.triggered.connect(self.toggle_guides)
-        view_menu.addAction(toggle_guides_action)
-
-        clear_guides_action = QAction('清除所有辅助线', self)
-        clear_guides_action.triggered.connect(self.clear_guides)
-        view_menu.addAction(clear_guides_action)
-
-        perp_guide_action = QAction('⊥ 连接点向辅助线画垂线', self)
-        perp_guide_action.setShortcut('Alt+V')
-        perp_guide_action.triggered.connect(lambda: self.scene.draw_perpendicular_to_guide())
-        view_menu.addAction(perp_guide_action)
-
-        unit_menu = view_menu.addMenu('界面单位')
-        self.display_unit_group = QActionGroup(self)
-        self.display_unit_group.setExclusive(True)
-        self.display_unit_px_action = QAction('像素 (px)', self)
-        self.display_unit_px_action.setCheckable(True)
-        self.display_unit_px_action.setData('px')
-        self.display_unit_mm_action = QAction('毫米 (mm)', self)
-        self.display_unit_mm_action.setCheckable(True)
-        self.display_unit_mm_action.setData('mm')
-        self.display_unit_group.addAction(self.display_unit_px_action)
-        self.display_unit_group.addAction(self.display_unit_mm_action)
-        unit_menu.addActions([self.display_unit_px_action, self.display_unit_mm_action])
-        current_unit = self.scene.config_manager.get('display_unit', 'mm')
-        (self.display_unit_px_action if current_unit == 'px' else self.display_unit_mm_action).setChecked(True)
-        self.display_unit_group.triggered.connect(self.set_display_unit)
-
-        self.startup_horizontal_guides_action = QAction('启动时添加横向辅助线', self)
-        self.startup_horizontal_guides_action.setCheckable(True)
-        self.startup_horizontal_guides_action.setChecked(
-            self.scene.config_manager.get('startup_horizontal_guides_enabled', False)
-        )
-        self.startup_horizontal_guides_action.toggled.connect(self.toggle_startup_horizontal_guides)
-        view_menu.addAction(self.startup_horizontal_guides_action)
-
-        startup_horizontal_guides_settings_action = QAction('设置启动横向辅助线位置...', self)
-        startup_horizontal_guides_settings_action.triggered.connect(self.set_startup_horizontal_guides)
-        view_menu.addAction(startup_horizontal_guides_settings_action)
-
-        self.show_connection_points_action = QAction('显示连接点（隐藏后不影响头像连线）', self)
-        self.show_connection_points_action.setCheckable(True)
-        self.show_connection_points_action.setShortcut('Alt+P')
-        self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
-        self.show_connection_points_action.toggled.connect(self.set_all_connection_points_visible)
-        view_menu.addAction(self.show_connection_points_action)
-
-        self.hide_points_on_image_select_action = QAction('选中图片时隐藏连接点', self)
-        self.hide_points_on_image_select_action.setCheckable(True)
-        self.hide_points_on_image_select_action.setChecked(
-            self.scene.config_manager.get('hide_connection_points_when_image_selected', False)
-        )
-        self.hide_points_on_image_select_action.toggled.connect(self.toggle_hide_points_on_image_select)
-        view_menu.addAction(self.hide_points_on_image_select_action)
-
-        self.text_hover_tooltip_action = QAction('鼠标悬停显示文字内容', self)
-        self.text_hover_tooltip_action.setCheckable(True)
-        self.text_hover_tooltip_action.setChecked(
-            self.scene.config_manager.get('show_text_hover_tooltip', False)
-        )
-        self.text_hover_tooltip_action.toggled.connect(self.toggle_text_hover_tooltip)
-        view_menu.addAction(self.text_hover_tooltip_action)
-
-        snap_threshold_action = QAction('设置吸附距离...', self)
-        snap_threshold_action.triggered.connect(self.set_snap_threshold)
-        view_menu.addAction(snap_threshold_action)
-        
-        # 编辑行为菜单（合并原连线菜单）
-        edit_menu = menubar.addMenu('编辑设置')
-
-        # 连线设置
-        self.avatar_connect_action = QAction('点图片智能连线模式（自动判断a/b点）', self)
-        self.avatar_connect_action.setCheckable(True)
-        self.avatar_connect_action.setShortcut('Alt+C')
-        self.avatar_connect_action.toggled.connect(self.toggle_avatar_connect_mode)
-        edit_menu.addAction(self.avatar_connect_action)
-
-        set_line_width_action = QAction('设置连线粗细...', self)
-        set_line_width_action.triggered.connect(lambda: self.set_line_width())
-        edit_menu.addAction(set_line_width_action)
-        edit_menu.addSeparator()
         self.auto_exit_paste_action = QAction('粘贴后自动退出编辑', self)
         self.auto_exit_paste_action.setCheckable(True)
         self.auto_exit_paste_action.setChecked(self.scene.config_manager.get('auto_exit_after_paste', False))
         self.auto_exit_paste_action.toggled.connect(self.toggle_auto_exit_setting)
-        edit_menu.addAction(self.auto_exit_paste_action)
+        text_submenu.addAction(self.auto_exit_paste_action)
 
-        # 框选模式：默认仅图片，可切换为全选
-        marquee_mode_menu = edit_menu.addMenu('框选模式  [Alt+M 切换]')
-        self._marquee_mode_actions = {}
-        for label, value in [
-            ('仅选图片（默认）', 'images'),
-            ('全选', 'all'),
-            ('仅选有连接点的元素', 'connected'),
-        ]:
-            a = QAction(label, self)
-            a.setCheckable(True)
-            a.setData(value)
-            a.triggered.connect(lambda checked, v=value: self.set_marquee_mode(v))
-            marquee_mode_menu.addAction(a)
-            self._marquee_mode_actions[value] = a
-        self._sync_marquee_mode_ui()
+        set_default_font_action = QAction('设置默认字体...', self)
+        set_default_font_action.triggered.connect(self.set_default_font)
+        text_submenu.addAction(set_default_font_action)
 
-        cycle_marquee_action = QAction('循环切换框选模式', self)
-        cycle_marquee_action.setShortcut('Alt+M')
-        cycle_marquee_action.triggered.connect(self.cycle_marquee_mode)
-        edit_menu.addAction(cycle_marquee_action)
+        set_current_text_default_action = QAction('将选中文字格式设为默认', self)
+        set_current_text_default_action.triggered.connect(self.set_current_text_format_as_default)
+        text_submenu.addAction(set_current_text_default_action)
 
-        smart_brush_action = QAction('智能笔刷', self)
-        smart_brush_action.setCheckable(True)
-        smart_brush_action.setShortcut('B')
-        smart_brush_action.toggled.connect(self.toggle_smart_brush)
-        smart_brush_action.toggled.connect(
-            lambda checked: self.btn_smart_brush.setChecked(checked)
-            if hasattr(self, 'btn_smart_brush') and self.btn_smart_brush.isChecked() != checked else None
-        )
-        edit_menu.addAction(smart_brush_action)
-        self.smart_brush_action = smart_brush_action
+        add_text_preset_action = QAction('将选中文字格式新增为预设...', self)
+        add_text_preset_action.triggered.connect(self.add_current_text_format_preset)
+        text_submenu.addAction(add_text_preset_action)
 
-        brush_smaller_action = QAction('缩小智能笔刷', self)
-        brush_smaller_action.setShortcut('[')
-        brush_smaller_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(-4))
-        edit_menu.addAction(brush_smaller_action)
-
-        brush_larger_action = QAction('放大智能笔刷', self)
-        brush_larger_action.setShortcut(']')
-        brush_larger_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(4))
-        edit_menu.addAction(brush_larger_action)
-
-        self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
-        self.insert_image_to_bottom_action.setCheckable(True)
-        self.insert_image_to_bottom_action.setChecked(self.scene.config_manager.get('insert_image_to_bottom', False))
-        self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
-        edit_menu.addAction(self.insert_image_to_bottom_action)
-
-        self.insert_image_fit_canvas_action = QAction('插入图片时自动适应画布大小', self)
-        self.insert_image_fit_canvas_action.setCheckable(True)
-        self.insert_image_fit_canvas_action.setChecked(self.scene.config_manager.get('insert_image_fit_canvas', False))
-        self.insert_image_fit_canvas_action.toggled.connect(self.toggle_insert_image_fit_canvas)
-        edit_menu.addAction(self.insert_image_fit_canvas_action)
-
-        self.horizontal_move_only_action = QAction('水平移动选中对象（锁定Y）', self)
-        self.horizontal_move_only_action.setCheckable(True)
-        self.horizontal_move_only_action.setShortcut('Ctrl+H')
-        self.horizontal_move_only_action.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
-        self.horizontal_move_only_action.toggled.connect(self.toggle_horizontal_move_only)
-        edit_menu.addAction(self.horizontal_move_only_action)
-
-        self.select_child_selects_parent_action = QAction('选择子集时自动选中父级（选子即选父）', self)
-        self.select_child_selects_parent_action.setCheckable(True)
-        self.select_child_selects_parent_action.setShortcut('Alt+G')
-        self.select_child_selects_parent_action.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
-        self.select_child_selects_parent_action.toggled.connect(self.toggle_select_child_selects_parent)
-        edit_menu.addAction(self.select_child_selects_parent_action)
-
-        self.image_right_edge_snap_action = QAction('图片右边缘X自动吸附', self)
-        self.image_right_edge_snap_action.setCheckable(True)
-        self.image_right_edge_snap_action.setChecked(
-            self.scene.config_manager.get('image_right_edge_snap_enabled', False)
-        )
-        self.image_right_edge_snap_action.toggled.connect(self.toggle_image_right_edge_snap)
-        edit_menu.addAction(self.image_right_edge_snap_action)
-
-        self.text_right_edge_snap_action = QAction('文字右边缘X自动吸附', self)
-        self.text_right_edge_snap_action.setCheckable(True)
-        self.text_right_edge_snap_action.setChecked(
-            self.scene.config_manager.get('text_right_edge_snap_enabled', False)
-        )
-        self.text_right_edge_snap_action.toggled.connect(self.toggle_text_right_edge_snap)
-        edit_menu.addAction(self.text_right_edge_snap_action)
-
-        self.image_top_edge_snap_action = QAction('图片顶部Y自动吸附', self)
-        self.image_top_edge_snap_action.setCheckable(True)
-        self.image_top_edge_snap_action.setChecked(
-            self.scene.config_manager.get('image_top_edge_snap_enabled', False)
-        )
-        self.image_top_edge_snap_action.toggled.connect(self.toggle_image_top_edge_snap)
-        edit_menu.addAction(self.image_top_edge_snap_action)
-
-        eye_role_from_selection_menu = edit_menu.addMenu('设置选中文字眼睛颜色')
+        eye_role_from_selection_menu = text_submenu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
             ('yellow', '设为黄色眼睛'),
             ('red', '设为红色眼睛'),
@@ -13798,45 +13744,418 @@ class MainWindow(QMainWindow):
         clear_eye_action.triggered.connect(lambda: self.set_layer_eye_role_from_selection(None))
         eye_role_from_selection_menu.addAction(clear_eye_action)
 
-        edit_menu.addSeparator()
-        nudge_step_action = QAction('设置Shift+方向键步长...', self)
-        nudge_step_action.triggered.connect(self.set_nudge_large_step)
-        edit_menu.addAction(nudge_step_action)
-
-        brush_size_action = QAction('设置笔刷默认大小...', self)
-        brush_size_action.triggered.connect(self.set_default_brush_size)
-        edit_menu.addAction(brush_size_action)
-
-        edit_menu.addSeparator()
-        excel_col_map_action = QAction('Excel 列映射设置...', self)
-        excel_col_map_action.triggered.connect(self.open_excel_column_map_dialog)
-        edit_menu.addAction(excel_col_map_action)
-
+        # 二级：图片属性与默认尺寸
+        img_submenu = layout_menu.addMenu('图片属性与尺寸')
         selected_img_opacity_action = QAction('设置选中图片透明度...', self)
         selected_img_opacity_action.triggered.connect(self.change_selected_images_opacity)
-        edit_menu.addAction(selected_img_opacity_action)
+        img_submenu.addAction(selected_img_opacity_action)
 
-        quick_split_text_action = QAction('按默认符号直接拆分文本框', self)
-        quick_split_text_action.setShortcut('Alt+X')
-        quick_split_text_action.triggered.connect(self.split_selected_text_by_default_symbol)
-        edit_menu.addAction(quick_split_text_action)
+        image_manage_action = QAction('图片管理模式（显示/隐藏切换）', self)
+        image_manage_action.setShortcut('Alt+,')
+        image_manage_action.triggered.connect(lambda: self.scene.toggle_image_manage_mode())
+        img_submenu.addAction(image_manage_action)
 
-        split_text_action = QAction('按指定符号拆分文本框...', self)
-        split_text_action.setShortcut('Ctrl+Shift+X')
-        split_text_action.triggered.connect(self.split_selected_text_by_symbol)
-        edit_menu.addAction(split_text_action)
+        show_all_images_action = QAction('显示所有隐藏图片', self)
+        show_all_images_action.triggered.connect(self.show_all_hidden_images)
+        img_submenu.addAction(show_all_images_action)
 
-        set_default_split_action = QAction('设置默认拆分符号...', self)
-        set_default_split_action.triggered.connect(self.set_default_split_symbol)
-        edit_menu.addAction(set_default_split_action)
+        img_submenu.addSeparator()
 
-        edit_menu.addSeparator()
+        set_img_size_action = QAction('设置插入图片默认大小...', self)
+        set_img_size_action.triggered.connect(self.set_insert_image_size)
+        img_submenu.addAction(set_img_size_action)
+
+        self.insert_image_to_bottom_action = QAction('插入图片时置于底层', self)
+        self.insert_image_to_bottom_action.setCheckable(True)
+        self.insert_image_to_bottom_action.setChecked(self.scene.config_manager.get('insert_image_to_bottom', False))
+        self.insert_image_to_bottom_action.toggled.connect(self.toggle_insert_image_to_bottom)
+        img_submenu.addAction(self.insert_image_to_bottom_action)
+
+        self.insert_image_fit_canvas_action = QAction('插入图片时自动适应画布大小', self)
+        self.insert_image_fit_canvas_action.setCheckable(True)
+        self.insert_image_fit_canvas_action.setChecked(self.scene.config_manager.get('insert_image_fit_canvas', False))
+        self.insert_image_fit_canvas_action.toggled.connect(self.toggle_insert_image_fit_canvas)
+        img_submenu.addAction(self.insert_image_fit_canvas_action)
+
+        # 二级：对齐与批量排列
+        align_arrange_submenu = layout_menu.addMenu('对齐与批量排列')
+        align_arrange_submenu.addAction('顶部对齐', self.align_top)
+        align_arrange_submenu.addAction('右对齐', self.align_right)
+        align_arrange_submenu.addAction('水平居中对齐', self.align_center_horizontal)
+        align_arrange_submenu.addAction('垂直居中对齐', self.align_center_vertical)
+        align_arrange_submenu.addSeparator()
+
+        self._align_mode_actions = {}
+        for label, value in [
+            ('基准：对选择的第一个对象对齐（默认）', 'first_selected'),
+            ('基准：点选指定对象作为基准对齐', 'pick_reference'),
+        ]:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setData(value)
+            a.triggered.connect(lambda checked, v=value: self.set_align_mode(v))
+            align_arrange_submenu.addAction(a)
+            self._align_mode_actions[value] = a
+        self._sync_align_mode_ui()
+
+        cycle_align_action = QAction('切换对齐基准模式（首个对象/点选指定）', self)
+        cycle_align_action.setShortcut('Alt+A')
+        cycle_align_action.triggered.connect(self.cycle_align_mode)
+        align_arrange_submenu.addAction(cycle_align_action)
+
+        align_arrange_submenu.addSeparator()
+        batch_copy_action = QAction('批量复制（步长和重复）...', self)
+        batch_copy_action.setShortcut('Ctrl+Shift+D')
+        batch_copy_action.triggered.connect(self.batch_copy)
+        align_arrange_submenu.addAction(batch_copy_action)
+
+        # ══════════════════════════════════════════════════════════════════
+        # 3. 选择与交互（框选、笔刷、移动约束与智能吸附）
+        # ══════════════════════════════════════════════════════════════════
+        interact_menu = menubar.addMenu('选择与交互')
+
+        # 二级：框选模式
+        marquee_mode_menu = interact_menu.addMenu('框选模式  [Alt+M]')
+        self._marquee_mode_actions = {}
+        for label, value in [
+            ('仅选图片（默认）', 'images'),
+            ('全选所有元素', 'all'),
+            ('仅选有连接点的元素', 'connected'),
+        ]:
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setData(value)
+            a.triggered.connect(lambda checked, v=value: self.set_marquee_mode(v))
+            marquee_mode_menu.addAction(a)
+            self._marquee_mode_actions[value] = a
+        self._sync_marquee_mode_ui()
+
+        marquee_mode_menu.addSeparator()
+        cycle_marquee_action = QAction('循环切换框选模式', self)
+        cycle_marquee_action.setShortcut('Alt+M')
+        cycle_marquee_action.triggered.connect(self.cycle_marquee_mode)
+        marquee_mode_menu.addAction(cycle_marquee_action)
+
+        # 二级：智能笔刷
+        brush_submenu = interact_menu.addMenu('智能笔刷  [B]')
+        smart_brush_action = QAction('开启智能笔刷涂抹选择', self)
+        smart_brush_action.setCheckable(True)
+        smart_brush_action.setShortcut('B')
+        smart_brush_action.toggled.connect(self.toggle_smart_brush)
+        smart_brush_action.toggled.connect(
+            lambda checked: self.btn_smart_brush.setChecked(checked)
+            if hasattr(self, 'btn_smart_brush') and self.btn_smart_brush.isChecked() != checked else None
+        )
+        brush_submenu.addAction(smart_brush_action)
+        self.smart_brush_action = smart_brush_action
+
+        brush_smaller_action = QAction('缩小智能笔刷', self)
+        brush_smaller_action.setShortcut('[')
+        brush_smaller_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(-4))
+        brush_submenu.addAction(brush_smaller_action)
+
+        brush_larger_action = QAction('放大智能笔刷', self)
+        brush_larger_action.setShortcut(']')
+        brush_larger_action.triggered.connect(lambda: self.view.adjust_smart_brush_radius(4))
+        brush_submenu.addAction(brush_larger_action)
+
+        brush_submenu.addSeparator()
+        brush_size_action = QAction('设置笔刷默认大小...', self)
+        brush_size_action.triggered.connect(self.set_default_brush_size)
+        brush_submenu.addAction(brush_size_action)
+
+        interact_menu.addSeparator()
+
+        # 一级高频开关：选子即选父 & 水平移动锁定
+        self.select_child_selects_parent_action = QAction('选子即选父（点击子文字联动父级图片）', self)
+        self.select_child_selects_parent_action.setCheckable(True)
+        self.select_child_selects_parent_action.setShortcut('Alt+G')
+        self.select_child_selects_parent_action.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
+        self.select_child_selects_parent_action.toggled.connect(self.toggle_select_child_selects_parent)
+        interact_menu.addAction(self.select_child_selects_parent_action)
+
+        self.horizontal_move_only_action = QAction('仅水平移动选中对象（锁定Y轴）', self)
+        self.horizontal_move_only_action.setCheckable(True)
+        self.horizontal_move_only_action.setShortcut('Ctrl+H')
+        self.horizontal_move_only_action.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+        self.horizontal_move_only_action.toggled.connect(self.toggle_horizontal_move_only)
+        interact_menu.addAction(self.horizontal_move_only_action)
+
+        nudge_step_action = QAction('设置 Shift+方向键微调步长...', self)
+        nudge_step_action.triggered.connect(self.set_nudge_large_step)
+        interact_menu.addAction(nudge_step_action)
+
+        interact_menu.addSeparator()
+
+        # 二级：智能边缘吸附
+        snap_submenu = interact_menu.addMenu('智能边缘吸附')
+        self.image_right_edge_snap_action = QAction('图片右边缘 X 自动吸附', self)
+        self.image_right_edge_snap_action.setCheckable(True)
+        self.image_right_edge_snap_action.setChecked(
+            self.scene.config_manager.get('image_right_edge_snap_enabled', False)
+        )
+        self.image_right_edge_snap_action.toggled.connect(self.toggle_image_right_edge_snap)
+        snap_submenu.addAction(self.image_right_edge_snap_action)
+
+        self.text_right_edge_snap_action = QAction('文字右边缘 X 自动吸附', self)
+        self.text_right_edge_snap_action.setCheckable(True)
+        self.text_right_edge_snap_action.setChecked(
+            self.scene.config_manager.get('text_right_edge_snap_enabled', False)
+        )
+        self.text_right_edge_snap_action.toggled.connect(self.toggle_text_right_edge_snap)
+        snap_submenu.addAction(self.text_right_edge_snap_action)
+
+        self.image_top_edge_snap_action = QAction('图片顶部 Y 自动吸附', self)
+        self.image_top_edge_snap_action.setCheckable(True)
+        self.image_top_edge_snap_action.setChecked(
+            self.scene.config_manager.get('image_top_edge_snap_enabled', False)
+        )
+        self.image_top_edge_snap_action.toggled.connect(self.toggle_image_top_edge_snap)
+        snap_submenu.addAction(self.image_top_edge_snap_action)
+
+        snap_submenu.addSeparator()
+        snap_threshold_action = QAction('设置吸附触发距离...', self)
+        snap_threshold_action.triggered.connect(self.set_snap_threshold)
+        snap_submenu.addAction(snap_threshold_action)
+
+        # ══════════════════════════════════════════════════════════════════
+        # 4. 连线与素材（族谱世系连线、连接点与组合素材库）
+        # ══════════════════════════════════════════════════════════════════
+        connect_asset_menu = menubar.addMenu('连线与素材')
+
+        self.avatar_connect_action = QAction('点图片智能连线模式（自动判断 a/b 点）', self)
+        self.avatar_connect_action.setCheckable(True)
+        self.avatar_connect_action.setShortcut('Alt+C')
+        self.avatar_connect_action.toggled.connect(self.toggle_avatar_connect_mode)
+        connect_asset_menu.addAction(self.avatar_connect_action)
+
+        group_connect_action = QAction('垂直连接（上代 b点 → 下代 a点）', self)
+        group_connect_action.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
+        group_connect_action.triggered.connect(lambda: self.scene.group_chain_connect())
+        connect_asset_menu.addAction(group_connect_action)
+
+        horiz_connect_action = QAction('水平连接（同行图片从右到左 a↔a）', self)
+        horiz_connect_action.triggered.connect(lambda: self.scene.connect_image_points_right_to_left())
+        connect_asset_menu.addAction(horiz_connect_action)
+
+        perp_guide_action = QAction('⊥ 连接点向辅助线画垂线', self)
+        perp_guide_action.setShortcut('Alt+V')
+        perp_guide_action.triggered.connect(lambda: self.scene.draw_perpendicular_to_guide())
+        connect_asset_menu.addAction(perp_guide_action)
+
+        connect_asset_menu.addSeparator()
+
+        # 二级：连接点与连线样式
+        cp_style_submenu = connect_asset_menu.addMenu('连接点与连线样式')
+        self.show_connection_points_action = QAction('显示所有连接点（隐藏不影响头像连线）', self)
+        self.show_connection_points_action.setCheckable(True)
+        self.show_connection_points_action.setShortcut('Alt+P')
+        self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
+        self.show_connection_points_action.toggled.connect(self.set_all_connection_points_visible)
+        cp_style_submenu.addAction(self.show_connection_points_action)
+
+        self.hide_points_on_image_select_action = QAction('选中图片时自动隐藏连接点', self)
+        self.hide_points_on_image_select_action.setCheckable(True)
+        self.hide_points_on_image_select_action.setChecked(
+            self.scene.config_manager.get('hide_connection_points_when_image_selected', False)
+        )
+        self.hide_points_on_image_select_action.toggled.connect(self.toggle_hide_points_on_image_select)
+        cp_style_submenu.addAction(self.hide_points_on_image_select_action)
+
+        cp_style_submenu.addSeparator()
+        set_line_width_action = QAction('设置连线粗细...', self)
+        set_line_width_action.triggered.connect(lambda: self.set_line_width())
+        cp_style_submenu.addAction(set_line_width_action)
+
+        # 二级：组合素材与 Excel 映射
+        asset_submenu = connect_asset_menu.addMenu('组合素材与模板映射')
+        save_group_action = QAction('保存选中元素为组合素材', self)
+        save_group_action.setShortcut('Ctrl+G')
+        save_group_action.triggered.connect(self.save_selected_as_group)
+        asset_submenu.addAction(save_group_action)
+
+        open_library_action = QAction('显示/隐藏素材库面板', self)
+        open_library_action.setShortcut('F9')
+        open_library_action.triggered.connect(self.open_asset_library)
+        asset_submenu.addAction(open_library_action)
+
+        asset_submenu.addSeparator()
+        excel_col_map_action = QAction('Excel 导入列映射设置...', self)
+        excel_col_map_action.triggered.connect(self.open_excel_column_map_dialog)
+        asset_submenu.addAction(excel_col_map_action)
+
+        # ══════════════════════════════════════════════════════════════════
+        # 5. 视图与画布（缩放、辅助线、标尺单位与背景底图）
+        # ══════════════════════════════════════════════════════════════════
+        view_menu = menubar.addMenu('视图与画布')
+
+        fit_view_action = QAction('合适屏幕', self)
+        fit_view_action.setShortcut('Ctrl+0')
+        fit_view_action.triggered.connect(self.fit_in_view)
+        view_menu.addAction(fit_view_action)
+
+        actual_size_action = QAction('实际大小 (100%)', self)
+        actual_size_action.setShortcut('Ctrl+1')
+        actual_size_action.triggered.connect(self.actual_size)
+        view_menu.addAction(actual_size_action)
+
+        zoom_selection_action = QAction('缩放到选中对象', self)
+        zoom_selection_action.setShortcut('Ctrl+2')
+        zoom_selection_action.triggered.connect(self.zoom_to_selection)
+        view_menu.addAction(zoom_selection_action)
+
+        self.toggle_navigator_action = QAction('显示右下角导航器面板', self)
+        self.toggle_navigator_action.setCheckable(True)
+        self.toggle_navigator_action.setChecked(True)
+        self.toggle_navigator_action.toggled.connect(self.set_navigator_visible)
+        view_menu.addAction(self.toggle_navigator_action)
+
+        view_menu.addSeparator()
+
+        # 二级：更多缩放与悬停提示
+        zoom_more_submenu = view_menu.addMenu('更多缩放与视图提示')
+        zoom_in_action = QAction('放大视图', self)
+        zoom_in_action.setShortcut('Ctrl+=')
+        zoom_in_action.triggered.connect(self.zoom_in)
+        zoom_more_submenu.addAction(zoom_in_action)
+
+        zoom_out_action = QAction('缩小视图', self)
+        zoom_out_action.setShortcut('Ctrl+-')
+        zoom_out_action.triggered.connect(self.zoom_out)
+        zoom_more_submenu.addAction(zoom_out_action)
+
+        fill_view_action = QAction('填充屏幕', self)
+        fill_view_action.setShortcut('Ctrl+Alt+0')
+        fill_view_action.triggered.connect(self.fill_view)
+        zoom_more_submenu.addAction(fill_view_action)
+
+        zoom_more_submenu.addSeparator()
+        self.text_hover_tooltip_action = QAction('鼠标悬停显示文字全文提示', self)
+        self.text_hover_tooltip_action.setCheckable(True)
+        self.text_hover_tooltip_action.setChecked(
+            self.scene.config_manager.get('show_text_hover_tooltip', False)
+        )
+        self.text_hover_tooltip_action.toggled.connect(self.toggle_text_hover_tooltip)
+        zoom_more_submenu.addAction(self.text_hover_tooltip_action)
+
+        # 二级：辅助线与标尺单位
+        guide_unit_submenu = view_menu.addMenu('辅助线与标尺单位')
+        toggle_guides_action = QAction('显示/隐藏辅助线', self)
+        toggle_guides_action.setShortcut('Ctrl+;')
+        toggle_guides_action.triggered.connect(self.toggle_guides)
+        guide_unit_submenu.addAction(toggle_guides_action)
+
+        clear_guides_action = QAction('清除所有辅助线', self)
+        clear_guides_action.triggered.connect(self.clear_guides)
+        guide_unit_submenu.addAction(clear_guides_action)
+
+        guide_unit_submenu.addSeparator()
+        self.startup_horizontal_guides_action = QAction('启动时自动添加横向辅助线', self)
+        self.startup_horizontal_guides_action.setCheckable(True)
+        self.startup_horizontal_guides_action.setChecked(
+            self.scene.config_manager.get('startup_horizontal_guides_enabled', False)
+        )
+        self.startup_horizontal_guides_action.toggled.connect(self.toggle_startup_horizontal_guides)
+        guide_unit_submenu.addAction(self.startup_horizontal_guides_action)
+
+        startup_horizontal_guides_settings_action = QAction('设置启动横向辅助线位置...', self)
+        startup_horizontal_guides_settings_action.triggered.connect(self.set_startup_horizontal_guides)
+        guide_unit_submenu.addAction(startup_horizontal_guides_settings_action)
+
+        guide_unit_submenu.addSeparator()
+        self.display_unit_group = QActionGroup(self)
+        self.display_unit_group.setExclusive(True)
+        self.display_unit_mm_action = QAction('标尺与界面单位：毫米 (mm)', self)
+        self.display_unit_mm_action.setCheckable(True)
+        self.display_unit_mm_action.setData('mm')
+        self.display_unit_px_action = QAction('标尺与界面单位：像素 (px)', self)
+        self.display_unit_px_action.setCheckable(True)
+        self.display_unit_px_action.setData('px')
+        self.display_unit_group.addAction(self.display_unit_mm_action)
+        self.display_unit_group.addAction(self.display_unit_px_action)
+        guide_unit_submenu.addActions([self.display_unit_mm_action, self.display_unit_px_action])
+        current_unit = self.scene.config_manager.get('display_unit', 'mm')
+        (self.display_unit_px_action if current_unit == 'px' else self.display_unit_mm_action).setChecked(True)
+        self.display_unit_group.triggered.connect(self.set_display_unit)
+
+        # 二级：画布尺寸与背景底图
+        canvas_bg_submenu = view_menu.addMenu('画布尺寸与背景底图')
+        canvas_size_action = QAction('设置画布大小...', self)
+        canvas_size_action.triggered.connect(self.set_canvas_size)
+        canvas_bg_submenu.addAction(canvas_size_action)
+
+        canvas_bg_submenu.addSeparator()
+        set_background_action = QAction('设置默认背景图片...', self)
+        set_background_action.triggered.connect(self.set_background_image)
+        canvas_bg_submenu.addAction(set_background_action)
+
+        clear_background_action = QAction('清除背景图片', self)
+        clear_background_action.triggered.connect(self.clear_background_image)
+        canvas_bg_submenu.addAction(clear_background_action)
+
+        background_opacity_action = QAction('设置背景透明度...', self)
+        background_opacity_action.triggered.connect(self.set_background_opacity)
+        canvas_bg_submenu.addAction(background_opacity_action)
+
+        self.bg_above_connectors_action = QAction('背景图片显示在连线之上', self)
+        self.bg_above_connectors_action.setCheckable(True)
+        self.bg_above_connectors_action.setChecked(self.scene.config_manager.get('bg_above_connectors', False))
+        self.bg_above_connectors_action.triggered.connect(self.toggle_bg_above_connectors)
+        canvas_bg_submenu.addAction(self.bg_above_connectors_action)
+
+        scale_mode_menu = canvas_bg_submenu.addMenu('背景缩放模式')
+        scale_fit_action = QAction('适应画布', self)
+        scale_fit_action.triggered.connect(lambda: self.set_background_scale_mode('fit'))
+        scale_mode_menu.addAction(scale_fit_action)
+        scale_fill_action = QAction('填充画布', self)
+        scale_fill_action.triggered.connect(lambda: self.set_background_scale_mode('fill'))
+        scale_mode_menu.addAction(scale_fill_action)
+        scale_stretch_action = QAction('拉伸填充', self)
+        scale_stretch_action.triggered.connect(lambda: self.set_background_scale_mode('stretch'))
+        scale_mode_menu.addAction(scale_stretch_action)
+        scale_tile_action = QAction('平铺', self)
+        scale_tile_action.triggered.connect(lambda: self.set_background_scale_mode('tile'))
+        scale_mode_menu.addAction(scale_tile_action)
+
+        # ══════════════════════════════════════════════════════════════════
+        # 搜索优先：菜单栏右侧常驻「🔍 搜索功能 (Ctrl+K)」胶囊入口 + 全局快捷键
+        # ══════════════════════════════════════════════════════════════════
         cmd_palette_action = QAction('搜索功能/命令面板...', self)
         cmd_palette_action.setShortcut('Ctrl+K')
         cmd_palette_action.triggered.connect(self.show_command_palette)
-        edit_menu.addAction(cmd_palette_action)
+        self.addAction(cmd_palette_action)
 
-        # 初始化按 Ctrl+K 弹出的居中悬浮搜索框（平时完全隐藏，保持界面简洁美观）
+        corner_container = QWidget(menubar)
+        corner_layout = QHBoxLayout(corner_container)
+        corner_layout.setContentsMargins(4, 2, 8, 2)
+        corner_layout.setSpacing(0)
+        self.menubar_search_btn = QPushButton("🔍 搜索功能 / 命令 (Ctrl+K)", corner_container)
+        self.menubar_search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.menubar_search_btn.setToolTip("快速搜索并执行任意菜单功能、开关或设置项（快捷键 Ctrl+K）")
+        self.menubar_search_btn.setFixedHeight(24)
+        self.menubar_search_btn.setMinimumWidth(190)
+        self.menubar_search_btn.setStyleSheet("""
+            QPushButton {
+                background: #f3f6fa;
+                border: 1px solid #cbd5e1;
+                border-radius: 12px;
+                padding: 2px 12px;
+                font-size: 12px;
+                color: #475569;
+                text-align: left;
+                min-height: 20px;
+            }
+            QPushButton:hover {
+                background: #ffffff;
+                border-color: #0969da;
+                color: #0969da;
+            }
+        """)
+        self.menubar_search_btn.clicked.connect(self.show_command_palette)
+        corner_layout.addWidget(self.menubar_search_btn)
+        menubar.setCornerWidget(corner_container, Qt.Corner.TopRightCorner)
+
+        # 初始化按 Ctrl+K 或点击顶部搜索框弹出的智能命令搜索面板
         self._setup_command_palette()
 
     def toggle_auto_exit_setting(self, enabled):
@@ -13994,6 +14313,51 @@ class MainWindow(QMainWindow):
     def toggle_marquee_connected_setting(self, enabled):
         """兼容旧调用"""
         self.set_marquee_mode('connected' if enabled else 'all')
+
+    def on_align_mode_button_toggled(self, checked):
+        """工具栏对齐基准按钮切换：未按下=对第一个选中对象对齐，按下=点选指定对象对齐"""
+        self.set_align_mode('pick_reference' if checked else 'first_selected')
+
+    def set_align_mode(self, mode):
+        """设置多选对齐基准模式：first_selected（对选择的第一个对象对齐） / pick_reference（点选指定对象对齐）"""
+        if mode not in ('first_selected', 'pick_reference'):
+            mode = 'first_selected'
+        for document in getattr(self, '_documents', []):
+            document.scene.config_manager.set('align_mode', mode)
+            if mode == 'first_selected' and getattr(document.scene, 'align_reference_mode', None):
+                document.scene._cancel_align_reference_mode(silent=True)
+        if self.scene:
+            self.scene.config_manager.set('align_mode', mode)
+            if mode == 'first_selected' and getattr(self.scene, 'align_reference_mode', None):
+                self.scene._cancel_align_reference_mode(silent=True)
+        self._sync_align_mode_ui()
+        labels = {
+            'first_selected': '对选择的第一个对象对齐',
+            'pick_reference': '点选指定对象作为基准对齐',
+        }
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage(f'对齐基准模式：{labels.get(mode, mode)}  (Alt+A 切换)', 3500)
+
+    def cycle_align_mode(self):
+        """Alt+A 在「对选择的第一个对象对齐」与「点选指定对象对齐」之间切换"""
+        current = self.scene.config_manager.get('align_mode', 'first_selected')
+        next_mode = 'pick_reference' if current == 'first_selected' else 'first_selected'
+        self.set_align_mode(next_mode)
+
+    def _sync_align_mode_ui(self):
+        """同步菜单和工具栏对齐基准模式按钮的选中状态与文字"""
+        current = self.scene.config_manager.get('align_mode', 'first_selected')
+        if hasattr(self, '_align_mode_actions'):
+            for value, action in self._align_mode_actions.items():
+                action.blockSignals(True)
+                action.setChecked(value == current)
+                action.blockSignals(False)
+        if hasattr(self, 'btn_align_mode'):
+            is_pick = (current == 'pick_reference')
+            self.btn_align_mode.blockSignals(True)
+            self.btn_align_mode.setChecked(is_pick)
+            self.btn_align_mode.setText("对齐: 点选指定" if is_pick else "对齐: 首选对象")
+            self.btn_align_mode.blockSignals(False)
 
     def toggle_insert_image_to_bottom(self, enabled):
         """切换插入图片时是否置于底层"""
@@ -14560,45 +14924,67 @@ class MainWindow(QMainWindow):
             return
         sel_imgs[0]._change_opacity()
 
+    # 用户思维搜索同义词词典：用自然口语或任务意图词即可搜到对应功能
+    _USER_INTENT_SYNONYMS = {
+        '拆分': '分割 切分 断开 截断 分段 文本框 alt+x',
+        '对齐': '首个 第一个 首选 点选 基准 靠齐 居中 顶部 右边 alt+a',
+        '连线': '世系 族谱 红线 父子 接龙 箭头 连接 a点 b点 alt+c',
+        '连接点': '红点 锚点 节点 隐藏点 显示点 alt+p',
+        '垂线': '垂直线 辅助线 标尺 垂足 alt+v',
+        '水平移动': '锁定y 固定高度 横移 ctrl+h',
+        '选子即选父': '父子联动 整体移动 组合选中 alt+g',
+        '框选': '拉框 选择模式 仅图片 全选 alt+m',
+        '智能笔刷': '涂抹 刷子 画笔 选区 b',
+        '背景': '底图 水印 画布底色 垫图',
+        '透明度': '不透明度 半透明 淡化 alpha',
+        'Excel': '表格 批量导入 映射 世系表 数据表 xlsx',
+        '导出': '保存图片 另存 pdf svg coreldraw cdr png',
+        '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
+    }
+
     def _setup_command_palette(self):
-        """创建按 Ctrl+K 呼出的居中悬浮功能搜索面板（平时隐藏，不占用顶部栏空间）"""
+        """创建搜索优先的居中智能命令面板（支持口语同义词检索、分类面包屑与状态直显）"""
         self._cmd_palette = QFrame(self)
         self._cmd_palette.setWindowFlags(
             Qt.WindowType.Dialog
             | Qt.WindowType.FramelessWindowHint
         )
-        self._cmd_palette.setFixedWidth(460)
+        self._cmd_palette.setFixedWidth(520)
         self._cmd_palette.setStyleSheet("""
             QFrame {
                 background: #ffffff;
-                border: 1px solid #0078d4;
+                border: 1.5px solid #0969da;
                 border-radius: 10px;
             }
         """)
 
         vbox = QVBoxLayout(self._cmd_palette)
-        vbox.setContentsMargins(10, 10, 10, 10)
+        vbox.setContentsMargins(12, 12, 12, 10)
         vbox.setSpacing(6)
 
         self.menu_search_edit = QLineEdit(self._cmd_palette)
-        self.menu_search_edit.setPlaceholderText("🔍 输入关键词搜索功能或菜单动作... (↑↓选择，Enter执行，Esc关闭)")
+        self.menu_search_edit.setPlaceholderText("🔍 搜索功能，如：第一个对象对齐、拆分、连线、底图、透明、导出... (↑↓选择，Enter执行)")
         self.menu_search_edit.setClearButtonEnabled(True)
-        self.menu_search_edit.setFixedHeight(32)
+        self.menu_search_edit.setFixedHeight(34)
         self.menu_search_edit.setStyleSheet("""
             QLineEdit {
                 background: #f6f8fa;
                 border: 1px solid #d0d7de;
                 border-radius: 6px;
-                padding: 4px 10px;
+                padding: 4px 12px;
                 font-size: 13px;
                 color: #1f2328;
             }
             QLineEdit:focus {
                 background: #ffffff;
-                border: 1px solid #0078d4;
+                border: 1px solid #0969da;
             }
         """)
         vbox.addWidget(self.menu_search_edit)
+
+        self._menu_search_hint_label = QLabel("💡 推荐常用功能与当前已开启状态（可直接输入任意口语词或快捷键过滤）：", self._cmd_palette)
+        self._menu_search_hint_label.setStyleSheet("color: #656d76; font-size: 11px; border: none; padding: 0 2px;")
+        vbox.addWidget(self._menu_search_hint_label)
 
         self._menu_search_popup = QListWidget(self._cmd_palette)
         self._menu_search_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -14631,7 +15017,7 @@ class MainWindow(QMainWindow):
             QApplication.instance().installEventFilter(self)
 
     def show_command_palette(self):
-        """按 Ctrl+K 弹出或关闭居中功能搜索框"""
+        """按 Ctrl+K 或点击菜单栏右侧搜索入口弹出智能命令面板"""
         if not hasattr(self, '_cmd_palette'):
             return
         if self._cmd_palette.isVisible():
@@ -14642,11 +15028,10 @@ class MainWindow(QMainWindow):
         self.menu_search_edit.blockSignals(False)
         self._update_menu_search_results("")
 
-        # 居中定位在主窗口上方 1/5 处（类似 VS Code / Spotlight）
         win_geo = self.frameGeometry()
         palette_w = self._cmd_palette.width()
         x = win_geo.x() + (win_geo.width() - palette_w) // 2
-        y = win_geo.y() + max(70, int(win_geo.height() * 0.14))
+        y = win_geo.y() + max(68, int(win_geo.height() * 0.12))
         self._cmd_palette.move(max(10, x), max(10, y))
         self._cmd_palette.show()
         self._cmd_palette.raise_()
@@ -14660,9 +15045,17 @@ class MainWindow(QMainWindow):
                 self.view.setFocus()
 
     def _collect_searchable_actions(self):
-        """收集菜单栏及工具栏中所有可执行的动作"""
+        """收集菜单栏及工具栏中所有可执行的动作，并注入用户思维同义词标签"""
         results = []
         seen_actions = set()
+
+        def enrich_synonyms(title, category, tooltip):
+            combined = f"{title} {category} {tooltip}"
+            extra = []
+            for key, syn_words in self._USER_INTENT_SYNONYMS.items():
+                if key.lower() in combined.lower():
+                    extra.append(syn_words)
+            return " ".join(extra)
 
         def walk_menu(menu, path_prefix):
             for act in menu.actions():
@@ -14685,6 +15078,7 @@ class MainWindow(QMainWindow):
                         'category': path_prefix or '菜单',
                         'shortcut': shortcut_str,
                         'tooltip': tip_str,
+                        'synonyms': enrich_synonyms(clean_title, path_prefix, tip_str),
                     })
 
         menubar = self.menuBar()
@@ -14695,7 +15089,6 @@ class MainWindow(QMainWindow):
                 if top_menu:
                     walk_menu(top_menu, top_title)
 
-        # 补充工具栏上的专属动作（包括“插入 ▼”按钮下拉菜单）
         for tb in self.findChildren(QToolBar):
             for act in tb.actions():
                 if act.isSeparator() or not act.isVisible() or act in seen_actions:
@@ -14709,14 +15102,11 @@ class MainWindow(QMainWindow):
                 results.append({
                     'action': act,
                     'title': clean_title,
-                    'category': '工具栏',
+                    'category': '顶部工具栏',
                     'shortcut': shortcut_str,
                     'tooltip': tip_str,
+                    'synonyms': enrich_synonyms(clean_title, '顶部工具栏', tip_str),
                 })
-            for btn in tb.findChildren(QToolButton):
-                btn_menu = btn.menu()
-                if btn_menu:
-                    walk_menu(btn_menu, "工具栏 ▸ 插入")
 
         return results
 
@@ -14728,23 +15118,35 @@ class MainWindow(QMainWindow):
         all_items = self._collect_searchable_actions()
 
         if not keywords:
-            matched = [(0, entry) for entry in all_items]
+            if hasattr(self, '_menu_search_hint_label'):
+                self._menu_search_hint_label.setText("💡 常用高频功能与当前已开启状态（直接输入关键词如“对齐”、“拆分”、“连线”即可过滤）：")
+            # 搜索框为空时：优先将当前已开启的开关 & 带快捷键的高频操作排在前面
+            def default_rank(entry):
+                act = entry['action']
+                is_checked = 0 if (act.isCheckable() and act.isChecked()) else 1
+                has_sc = 0 if entry['shortcut'] else 1
+                return (is_checked, has_sc)
+            sorted_default = sorted(all_items, key=default_rank)
+            matched = [(0, entry) for entry in sorted_default]
         else:
+            if hasattr(self, '_menu_search_hint_label'):
+                self._menu_search_hint_label.setText(f"🔍 搜索 “{text.strip()}” 的匹配结果（↑↓ 选择，Enter 立即执行）：")
             matched = []
             for entry in all_items:
-                haystack = f"{entry['title']} {entry['category']} {entry['shortcut']} {entry['tooltip']}".lower()
+                haystack = f"{entry['title']} {entry['category']} {entry['shortcut']} {entry['tooltip']} {entry.get('synonyms', '')}".lower()
                 if all(k in haystack for k in keywords):
-                    score = 0 if entry['title'].lower().startswith(keywords[0]) else (1 if keywords[0] in entry['title'].lower() else 2)
+                    t_low = entry['title'].lower()
+                    score = 0 if t_low.startswith(keywords[0]) else (1 if keywords[0] in t_low else 2)
                     matched.append((score, entry))
             matched.sort(key=lambda x: x[0])
 
         self._menu_search_popup.clear()
         if not matched:
-            empty_item = QListWidgetItem("未找到匹配的功能动作")
+            empty_item = QListWidgetItem("未找到匹配的功能动作（可尝试输入“对齐”、“拆分”、“连线”、“底图”等关键词）")
             empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._menu_search_popup.addItem(empty_item)
         else:
-            for _, entry in matched[:30]:
+            for _, entry in matched[:35]:
                 act = entry['action']
                 state_badge = ""
                 if act.isCheckable():
@@ -14762,7 +15164,7 @@ class MainWindow(QMainWindow):
         row_h = self._menu_search_popup.sizeHintForRow(0) if self._menu_search_popup.count() > 0 else 30
         list_h = min(320, row_count * max(30, row_h) + 8)
         self._menu_search_popup.setFixedHeight(list_h)
-        self._cmd_palette.setFixedHeight(list_h + 58)
+        self._cmd_palette.setFixedHeight(list_h + 78)
 
     def _execute_menu_search_item(self, item):
         if item is None:
@@ -14801,6 +15203,9 @@ class MainWindow(QMainWindow):
                     self.hide_command_palette()
         elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
             if self.scene and not isinstance(obj, InlineTextEditor):
+                if getattr(self.scene, 'align_reference_mode', None):
+                    self.scene._cancel_align_reference_mode()
+                    return True
                 if getattr(self.scene, 'avatar_connect_mode', False):
                     self.scene.set_avatar_connect_mode(False)
                     return True
@@ -17014,37 +17419,52 @@ class MainWindow(QMainWindow):
             color: #605e5c;
         }
         
-        /* 菜单样式 */
+        /* 菜单样式 - 视觉减负与呼吸感排版 */
         QMenuBar {
-            background: rgba(255, 255, 255, 0.95);
-            border-bottom: 1px solid rgba(0, 0, 0, 0.1);
-            color: #323130;
+            background: #ffffff;
+            border-bottom: 1px solid #e1e4e8;
+            color: #24292f;
+            padding: 2px 6px;
+            font-size: 13px;
+            font-weight: 500;
         }
         
         QMenuBar::item {
             background: transparent;
-            padding: 8px 12px;
-            border-radius: 4px;
+            padding: 6px 12px;
+            margin: 1px 2px;
+            border-radius: 5px;
         }
         
         QMenuBar::item:selected {
-            background: rgba(0, 120, 215, 0.1);
+            background: #eef6ff;
+            color: #0969da;
         }
         
         QMenu {
-            background: rgba(255, 255, 255, 0.95);
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-radius: 6px;
-            padding: 4px;
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 8px;
+            padding: 6px 4px;
+            font-size: 12.5px;
+            color: #24292f;
         }
         
         QMenu::item {
-            padding: 8px 16px;
-            border-radius: 4px;
+            padding: 6px 26px 6px 14px;
+            border-radius: 5px;
+            margin: 1px 3px;
         }
         
         QMenu::item:selected {
-            background: rgba(0, 120, 215, 0.1);
+            background: #e8f2fc;
+            color: #0969da;
+        }
+
+        QMenu::separator {
+            height: 1px;
+            background: #eaeef2;
+            margin: 5px 10px;
         }
         
         /* 滚动条样式 */
