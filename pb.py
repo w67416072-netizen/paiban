@@ -162,6 +162,7 @@ class ConfigManager:
                     'text_right_edge_snap_enabled',
                     config.get('image_right_edge_snap_enabled', False)
                 )
+                config.setdefault('text_top_edge_snap_enabled', False)
                 # 默认框选模式始终为仅图片
                 config['marquee_mode'] = "images"
                 # 对齐基准模式：first_selected（对第一个选中对象对齐） / pick_reference（点选指定对象对齐）
@@ -207,6 +208,7 @@ class ConfigManager:
             'image_right_edge_snap_enabled': False,  # 水平移动图片时吸附右边缘X
             'text_right_edge_snap_enabled': False,  # 水平移动文字时吸附右边缘X
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
+            'text_top_edge_snap_enabled': False,  # 移动文字时吸附顶部Y
             'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
@@ -616,19 +618,410 @@ class AssetManager:
             self.assets['images'] = [a for a in self.assets['images'] if a['id'] != asset_id]
             self.save_assets()
 
+
+class _BaseMinimalSpinBox(QFrame):
+    """现代化极简数值输入框公共组件基类：
+    - 数值右对齐，隐藏上下调节箭头
+    - 单位（px、mm、pt、%、字 等）作为独立标签分离显示在右侧
+    - 默认无明显边框，悬停显示浅灰边框，获得焦点显示淡蓝色边框
+    - 100% 兼容原有 QSpinBox / QDoubleSpinBox 的数值范围、输入校验、信号槽及方法调用
+    """
+    MINIMAL_SPIN_QSS = """
+        QFrame#minimalSpinContainer {
+            background-color: #f4f6f8;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            min-height: 26px;
+        }
+        QFrame#minimalSpinContainer:hover {
+            background-color: #f8f9fb;
+            border: 1px solid #d0d5dd;
+        }
+        QFrame#minimalSpinContainer[focused="true"] {
+            background-color: #ffffff;
+            border: 1px solid #69b1ff;
+        }
+        QFrame#minimalSpinContainer:disabled {
+            background-color: #eff1f4;
+            border: 1px solid transparent;
+        }
+        QAbstractSpinBox#minimalInnerSpin {
+            background: transparent;
+            border: none;
+            padding: 2px 2px 2px 6px;
+            margin: 0px;
+            min-height: 20px;
+            color: #1f2328;
+            font-size: 13px;
+            font-weight: 500;
+            selection-background-color: #bae0ff;
+            selection-color: #1f2328;
+        }
+        QAbstractSpinBox#minimalInnerSpin:disabled {
+            color: #9ca3af;
+        }
+        QAbstractSpinBox#minimalInnerSpin::up-button,
+        QAbstractSpinBox#minimalInnerSpin::down-button {
+            width: 0px;
+            height: 0px;
+            border: none;
+            background: transparent;
+        }
+        QLabel#minimalUnitLabel {
+            background: transparent;
+            border: none;
+            color: #8c959f;
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 0px 6px 0px 2px;
+            margin: 0px;
+        }
+        QLabel#minimalUnitLabel:disabled {
+            color: #b8bfc6;
+        }
+    """
+
+    def __init__(self, inner_spin, parent=None, suffix=""):
+        super().__init__(parent)
+        self.setObjectName("minimalSpinContainer")
+        self.setProperty("focused", False)
+        self._suffix_raw = ""
+
+        self._spin = inner_spin
+        self._spin.setParent(self)
+        self._spin.setObjectName("minimalInnerSpin")
+        self._spin.setFrame(False)
+        self._spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        self._spin.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._spin.setKeyboardTracking(True)
+        self._spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self._unit_label = QLabel(self)
+        self._unit_label.setObjectName("minimalUnitLabel")
+        self._unit_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._unit_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self._unit_label.setCursor(Qt.CursorShape.IBeamCursor)
+        self._unit_label.setVisible(False)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 1, 2, 1)
+        layout.setSpacing(2)
+        layout.addWidget(self._spin, 1)
+        layout.addWidget(self._unit_label, 0)
+
+        self.setStyleSheet(self.MINIMAL_SPIN_QSS)
+        self.setFocusProxy(self._spin)
+
+        self._spin.installEventFilter(self)
+        if self._spin.lineEdit():
+            self._spin.lineEdit().setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._spin.lineEdit().installEventFilter(self)
+        self._unit_label.installEventFilter(self)
+
+        self._spin.valueChanged.connect(self._on_inner_value_changed)
+        self._spin.textChanged.connect(self.textChanged.emit)
+        self._spin.editingFinished.connect(self.editingFinished.emit)
+
+        if suffix:
+            self.setSuffix(suffix)
+
+    def _set_focused_state(self, focused):
+        focused = bool(focused)
+        if self.property("focused") != focused:
+            self.setProperty("focused", focused)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
+
+    def eventFilter(self, watched, event):
+        et = event.type()
+        if watched in (self._spin, self._spin.lineEdit()):
+            if et == QEvent.Type.FocusIn:
+                self._set_focused_state(True)
+            elif et == QEvent.Type.FocusOut:
+                has_focus = self._spin.hasFocus() or (
+                    self._spin.lineEdit() is not None and self._spin.lineEdit().hasFocus()
+                )
+                self._set_focused_state(has_focus)
+        elif watched is self._unit_label and et == QEvent.Type.MouseButtonPress:
+            if self.isEnabled():
+                self._spin.setFocus()
+                self._spin.selectAll()
+                return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event):
+        if self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
+            self._spin.setFocus()
+            self._spin.selectAll()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _on_inner_value_changed(self, val):
+        self._update_unit_visibility()
+        self.valueChanged.emit(val)
+
+    def _update_unit_visibility(self):
+        clean_unit = self._suffix_raw.strip()
+        if not clean_unit:
+            self._unit_label.setVisible(False)
+            return
+        special_txt = self._spin.specialValueText()
+        if special_txt and self._spin.value() == self._spin.minimum():
+            self._unit_label.setVisible(False)
+        else:
+            self._unit_label.setVisible(True)
+
+    # ── 完整兼容 QSpinBox / QDoubleSpinBox 常用方法 ──────────────────────
+    def value(self):
+        return self._spin.value()
+
+    def setValue(self, val):
+        self._spin.setValue(val)
+        self._update_unit_visibility()
+
+    def setRange(self, minimum, maximum):
+        self._spin.setRange(minimum, maximum)
+        self._update_unit_visibility()
+
+    def minimum(self):
+        return self._spin.minimum()
+
+    def setMinimum(self, minimum):
+        self._spin.setMinimum(minimum)
+        self._update_unit_visibility()
+
+    def maximum(self):
+        return self._spin.maximum()
+
+    def setMaximum(self, maximum):
+        self._spin.setMaximum(maximum)
+        self._update_unit_visibility()
+
+    def singleStep(self):
+        return self._spin.singleStep()
+
+    def setSingleStep(self, val):
+        self._spin.setSingleStep(val)
+
+    def suffix(self):
+        return self._suffix_raw
+
+    def setSuffix(self, suffix_text):
+        self._suffix_raw = str(suffix_text or "")
+        clean_unit = self._suffix_raw.strip()
+        self._unit_label.setText(clean_unit)
+        self._update_unit_visibility()
+
+    def prefix(self):
+        return self._spin.prefix()
+
+    def setPrefix(self, prefix_text):
+        self._spin.setPrefix(prefix_text)
+
+    def specialValueText(self):
+        return self._spin.specialValueText()
+
+    def setSpecialValueText(self, text):
+        self._spin.setSpecialValueText(text)
+        self._update_unit_visibility()
+
+    def cleanText(self):
+        return self._spin.cleanText()
+
+    def text(self):
+        return f"{self._spin.text()}{self._suffix_raw}"
+
+    def lineEdit(self):
+        return self._spin.lineEdit()
+
+    def selectAll(self):
+        self._spin.selectAll()
+
+    def setAlignment(self, alignment):
+        self._spin.setAlignment(alignment)
+        if self._spin.lineEdit():
+            self._spin.lineEdit().setAlignment(alignment)
+
+    def alignment(self):
+        return self._spin.alignment()
+
+    def setButtonSymbols(self, _symbols):
+        self._spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+
+    def buttonSymbols(self):
+        return self._spin.buttonSymbols()
+
+    def setReadOnly(self, r):
+        self._spin.setReadOnly(r)
+
+    def isReadOnly(self):
+        return self._spin.isReadOnly()
+
+    def setAccelerated(self, on):
+        self._spin.setAccelerated(on)
+
+    def isAccelerated(self):
+        return self._spin.isAccelerated()
+
+    def setWrapping(self, w):
+        self._spin.setWrapping(w)
+
+    def wrapping(self):
+        return self._spin.wrapping()
+
+    def setKeyboardTracking(self, kt):
+        self._spin.setKeyboardTracking(kt)
+
+    def keyboardTracking(self):
+        return self._spin.keyboardTracking()
+
+    def stepBy(self, steps):
+        self._spin.stepBy(steps)
+
+    def stepUp(self):
+        self._spin.stepUp()
+
+    def stepDown(self):
+        self._spin.stepDown()
+
+    def blockSignals(self, b):
+        self._spin.blockSignals(b)
+        return super().blockSignals(b)
+
+    def setEnabled(self, enabled):
+        super().setEnabled(enabled)
+        self._spin.setEnabled(enabled)
+        self._unit_label.setEnabled(enabled)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class MinimalSpinBox(_BaseMinimalSpinBox):
+    """现代化极简整数输入框（数值右对齐、单位独立显示、无上下箭头、悬停浅灰/聚焦淡蓝边框）"""
+    valueChanged = pyqtSignal(int)
+    textChanged = pyqtSignal(str)
+    editingFinished = pyqtSignal()
+
+    def __init__(self, parent=None, suffix=""):
+        super().__init__(QSpinBox(), parent=parent, suffix=suffix)
+
+    def displayIntegerBase(self):
+        return self._spin.displayIntegerBase()
+
+    def setDisplayIntegerBase(self, base):
+        self._spin.setDisplayIntegerBase(base)
+
+
+class MinimalDoubleSpinBox(_BaseMinimalSpinBox):
+    """现代化极简浮点数输入框（数值右对齐、单位独立显示、无上下箭头、悬停浅灰/聚焦淡蓝边框）"""
+    valueChanged = pyqtSignal(float)
+    textChanged = pyqtSignal(str)
+    editingFinished = pyqtSignal()
+
+    def __init__(self, parent=None, suffix=""):
+        super().__init__(QDoubleSpinBox(), parent=parent, suffix=suffix)
+
+    def decimals(self):
+        return self._spin.decimals()
+
+    def setDecimals(self, prec):
+        self._spin.setDecimals(prec)
+
+
+class MinimalInputDialog(QDialog):
+    """使用 MinimalSpinBox / MinimalDoubleSpinBox 的现代化极简数值输入弹窗，兼容 MinimalInputDialog.getInt / getDouble"""
+
+    @staticmethod
+    def _infer_unit(title, label, explicit_suffix=None):
+        if explicit_suffix is not None:
+            return explicit_suffix
+        combined = f"{title} {label}"
+        if "%" in combined or "百分比" in combined:
+            return "%"
+        if "像素" in combined or "px" in combined.lower():
+            return "px"
+        if "毫米" in combined or "mm" in combined.lower():
+            return "mm"
+        if "字数" in combined or "字符数" in combined:
+            return "字"
+        return ""
+
+    @classmethod
+    def getInt(cls, parent, title, label, value=0, minValue=-2147483647, maxValue=2147483647, step=1, flags=Qt.WindowType.Widget, suffix=None):
+        dlg = cls(parent)
+        if flags != Qt.WindowType.Widget:
+            dlg.setWindowFlags(flags)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        lbl = QLabel(label, dlg)
+        lbl.setStyleSheet("color: #24292f; font-size: 13px;")
+        layout.addWidget(lbl)
+
+        unit = cls._infer_unit(title, label, suffix)
+        spin = MinimalSpinBox(dlg, suffix=unit)
+        spin.setRange(minValue, maxValue)
+        spin.setSingleStep(step)
+        spin.setValue(value)
+        spin.selectAll()
+        layout.addWidget(spin)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        spin.setFocus()
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        return spin.value(), ok
+
+    @classmethod
+    def getDouble(cls, parent, title, label, value=0.0, minValue=-2147483647.0, maxValue=2147483647.0, decimals=1, flags=Qt.WindowType.Widget, step=1.0, suffix=None):
+        dlg = cls(parent)
+        if flags != Qt.WindowType.Widget:
+            dlg.setWindowFlags(flags)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumWidth(300)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        lbl = QLabel(label, dlg)
+        lbl.setStyleSheet("color: #24292f; font-size: 13px;")
+        layout.addWidget(lbl)
+
+        unit = cls._infer_unit(title, label, suffix)
+        spin = MinimalDoubleSpinBox(dlg, suffix=unit)
+        spin.setDecimals(decimals)
+        spin.setRange(minValue, maxValue)
+        spin.setSingleStep(step)
+        spin.setValue(value)
+        spin.selectAll()
+        layout.addWidget(spin)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        spin.setFocus()
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        return spin.value(), ok
+
 class BatchCopyDialog(QDialog):
     """步长和重复 - 仿 CDR 风格"""
     SPINBOX_STYLE = """
-        QSpinBox, QDoubleSpinBox {
-            background: white; border: 1px solid #aaa; border-radius: 4px;
-            padding: 3px 22px 3px 6px; min-height: 22px; color: #323130;
-        }
-        QSpinBox::up-button, QDoubleSpinBox::up-button {
-            subcontrol-origin: border; subcontrol-position: top right; width: 18px;
-        }
-        QSpinBox::down-button, QDoubleSpinBox::down-button {
-            subcontrol-origin: border; subcontrol-position: bottom right; width: 18px;
-        }
         QGroupBox { font-weight: bold; margin-top: 6px; padding-top: 10px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; }
         QRadioButton { spacing: 5px; }
@@ -649,7 +1042,7 @@ class BatchCopyDialog(QDialog):
         # ── 副本数量 ──────────────────────────────
         count_group = QGroupBox("副本数量")
         cg = QFormLayout(count_group)
-        self.spin_count = QSpinBox()
+        self.spin_count = MinimalSpinBox()
         self.spin_count.setRange(1, 999)
         self.spin_count.setValue(3)
         cg.addRow("份数:", self.spin_count)
@@ -670,9 +1063,9 @@ class BatchCopyDialog(QDialog):
         hg.addLayout(h_mode_layout)
 
         h_val_layout = QFormLayout()
-        self.dspin_h_offset = QDoubleSpinBox()
+        self.dspin_h_offset = MinimalDoubleSpinBox()
         self.dspin_h_offset.setRange(-9999, 9999); self.dspin_h_offset.setValue(100); self.dspin_h_offset.setSuffix(" px")
-        self.dspin_h_space  = QDoubleSpinBox()
+        self.dspin_h_space  = MinimalDoubleSpinBox()
         self.dspin_h_space.setRange(-9999, 9999);  self.dspin_h_space.setValue(20);  self.dspin_h_space.setSuffix(" px")
         h_val_layout.addRow("X 偏移量:", self.dspin_h_offset)
         h_val_layout.addRow("间距:", self.dspin_h_space)
@@ -694,9 +1087,9 @@ class BatchCopyDialog(QDialog):
         vg.addLayout(v_mode_layout)
 
         v_val_layout = QFormLayout()
-        self.dspin_v_offset = QDoubleSpinBox()
+        self.dspin_v_offset = MinimalDoubleSpinBox()
         self.dspin_v_offset.setRange(-9999, 9999); self.dspin_v_offset.setValue(0); self.dspin_v_offset.setSuffix(" px")
-        self.dspin_v_space  = QDoubleSpinBox()
+        self.dspin_v_space  = MinimalDoubleSpinBox()
         self.dspin_v_space.setRange(-9999, 9999);  self.dspin_v_space.setValue(20);  self.dspin_v_space.setSuffix(" px")
         v_val_layout.addRow("Y 偏移量:", self.dspin_v_offset)
         v_val_layout.addRow("间距:", self.dspin_v_space)
@@ -829,7 +1222,7 @@ class FontPickerDialog(QDialog):
 
         # 顶部：spinbox + 滑块
         size_ctrl_row = QHBoxLayout()
-        self.size_spin = QSpinBox()
+        self.size_spin = MinimalSpinBox()
         self.size_spin.setRange(4, 400)
         self.size_spin.setValue(self._selected_size)
         self.size_spin.setSuffix(" pt")
@@ -1104,7 +1497,7 @@ class TextStyleSettingsDialog(QDialog):
         font_form.addRow("字体 (Font):", font_row)
 
         # 字号行
-        self.size_spin = QSpinBox()
+        self.size_spin = MinimalSpinBox()
         self.size_spin.setRange(4, 400)
         self.size_spin.setValue(self._font_size)
         self.size_spin.setSuffix(" pt")
@@ -1150,21 +1543,14 @@ class TextStyleSettingsDialog(QDialog):
         layout_form.setHorizontalSpacing(12)
         layout_form.setVerticalSpacing(10)
 
-        self.chars_per_col_spin = QSpinBox()
-        self.chars_per_col_spin.setRange(1, 200)
-        self.chars_per_col_spin.setValue(self._chars_per_column)
-        self.chars_per_col_spin.setSuffix(" 字/列")
-        self.chars_per_col_spin.valueChanged.connect(self._on_chars_per_col_changed)
-        layout_form.addRow("每列字数 (Chars per Column):", self.chars_per_col_spin)
-
-        self.col_spacing_spin = QSpinBox()
+        self.col_spacing_spin = MinimalSpinBox()
         self.col_spacing_spin.setRange(0, 200)
         self.col_spacing_spin.setValue(self._column_spacing)
         self.col_spacing_spin.setSuffix(" px")
         self.col_spacing_spin.valueChanged.connect(self._on_col_spacing_changed)
         layout_form.addRow("列间距 (Column Spacing):", self.col_spacing_spin)
 
-        self.char_spacing_spin = QSpinBox()
+        self.char_spacing_spin = MinimalSpinBox()
         self.char_spacing_spin.setRange(-200, 200)
         self.char_spacing_spin.setValue(self._character_spacing)
         self.char_spacing_spin.setSuffix(" px")
@@ -1299,6 +1685,364 @@ class TextStyleSettingsDialog(QDialog):
 
     def _on_accept(self):
         self.apply_to_targets()
+        self.accept()
+
+    def _on_reject(self):
+        self.restore_original_states()
+        self.reject()
+
+
+class TextPresetEditDialog(QDialog):
+    """修改已有文字格式预设对话框 - 在原预设基础上调整字体、字号、颜色、每列字数、列间距、字间距"""
+
+    def __init__(self, presets, initial_name=None, target_items=None, config_manager=None, parent=None):
+        super().__init__(parent)
+        self.presets = copy.deepcopy(presets)
+        self.target_items = list(target_items) if target_items else []
+        self.config_manager = config_manager
+        self.setWindowTitle("修改文字格式预设")
+        self.setMinimumWidth(480)
+
+        # 保存画布上选中文字的初始状态，以便实时预览或取消时还原
+        self._original_states = []
+        for item in self.target_items:
+            self._original_states.append({
+                'item': item,
+                'font_family': item.font_family,
+                'font_size': item.font_size,
+                'text_color': QColor(item.text_color),
+                'chars_per_column': item.chars_per_column,
+                'column_spacing': item.column_spacing,
+                'character_spacing': item.character_spacing,
+                'manual_line_break': item.manual_line_break,
+                'scene_pos': item.scenePos(),
+            })
+
+        self._current_index = 0
+        if initial_name:
+            for idx, p in enumerate(self.presets):
+                if p.get('name') == initial_name:
+                    self._current_index = idx
+                    break
+
+        self._loading_preset = False
+        self._text_color = QColor("#000000")
+        self._build_ui()
+        if self.presets:
+            self._load_preset_at_index(self._current_index)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(12)
+        root.setContentsMargins(14, 14, 14, 14)
+
+        # ── 0. 选择要修改的预设 & 预设名称 ──────────────────────────────
+        preset_sel_group = QGroupBox("选择预设 (Preset)")
+        preset_sel_form = QFormLayout(preset_sel_group)
+        preset_sel_form.setHorizontalSpacing(12)
+        preset_sel_form.setVerticalSpacing(8)
+
+        self.preset_selector = QComboBox()
+        for p in self.presets:
+            self.preset_selector.addItem(p.get('name', ''), p.get('name', ''))
+        if 0 <= self._current_index < len(self.presets):
+            self.preset_selector.setCurrentIndex(self._current_index)
+        self.preset_selector.currentIndexChanged.connect(self._on_preset_selection_changed)
+        preset_sel_form.addRow("选择已有预设:", self.preset_selector)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("预设名称（可直接修改以重命名该预设）")
+        preset_sel_form.addRow("预设名称:", self.name_edit)
+        root.addWidget(preset_sel_group)
+
+        # ── 1. 字体与颜色设置 ──────────────────────────────────────────
+        font_group = QGroupBox("字体与颜色 (Font && Color)")
+        font_form = QFormLayout(font_group)
+        font_form.setHorizontalSpacing(12)
+        font_form.setVerticalSpacing(10)
+
+        font_row = QHBoxLayout()
+        self.font_combo = QComboBox()
+        self.font_combo.setEditable(True)
+        self.font_combo.setMinimumWidth(180)
+        for fam in QFontDatabase.families():
+            self.font_combo.addItem(fam)
+        self.font_combo.currentTextChanged.connect(self._on_param_changed)
+        font_row.addWidget(self.font_combo, 1)
+
+        btn_font_picker = QPushButton("字体选择器...")
+        btn_font_picker.setToolTip("打开带常用字体、常用字号和预览的字体选择器")
+        btn_font_picker.clicked.connect(self._open_font_picker)
+        font_row.addWidget(btn_font_picker)
+        font_form.addRow("字体 (Font):", font_row)
+
+        self.size_spin = MinimalSpinBox()
+        self.size_spin.setRange(4, 400)
+        self.size_spin.setSuffix(" pt")
+        self.size_spin.valueChanged.connect(self._on_param_changed)
+        font_form.addRow("字号 (Size):", self.size_spin)
+
+        color_row = QHBoxLayout()
+        self.btn_color = QPushButton()
+        self.btn_color.setFixedWidth(110)
+        self.btn_color.setFixedHeight(28)
+        self.btn_color.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_color.clicked.connect(self._pick_color)
+        color_row.addWidget(self.btn_color)
+
+        quick_colors = [
+            ("#000000", "黑色"),
+            ("#C00000", "深红"),
+            ("#FF0000", "红色"),
+            ("#005A9E", "蓝色"),
+            ("#107C41", "绿色"),
+            ("#7F6000", "棕金"),
+        ]
+        for hex_code, tip in quick_colors:
+            swatch = QPushButton()
+            swatch.setFixedSize(22, 22)
+            swatch.setToolTip(f"{tip} ({hex_code})")
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setStyleSheet(
+                f"QPushButton {{ background-color: {hex_code}; border: 1px solid #888; border-radius: 3px; padding: 0px; min-height: 0px; }}"
+                f"QPushButton:hover {{ border: 2px solid #0969da; }}"
+            )
+            swatch.clicked.connect(lambda _, c=hex_code: self._set_quick_color(c))
+            color_row.addWidget(swatch)
+        color_row.addStretch()
+        font_form.addRow("文字颜色 (Color):", color_row)
+        root.addWidget(font_group)
+
+        # ── 2. 竖排排版参数 ────────────────────────────────────────────
+        layout_group = QGroupBox("竖排参数 (Layout && Spacing)")
+        layout_form = QFormLayout(layout_group)
+        layout_form.setHorizontalSpacing(12)
+        layout_form.setVerticalSpacing(10)
+
+        self.col_spacing_spin = MinimalSpinBox()
+        self.col_spacing_spin.setRange(0, 200)
+        self.col_spacing_spin.setSuffix(" px")
+        self.col_spacing_spin.valueChanged.connect(self._on_param_changed)
+        layout_form.addRow("列间距 (Column Spacing):", self.col_spacing_spin)
+
+        self.char_spacing_spin = MinimalSpinBox()
+        self.char_spacing_spin.setRange(-200, 200)
+        self.char_spacing_spin.setSuffix(" px")
+        self.char_spacing_spin.valueChanged.connect(self._on_param_changed)
+        layout_form.addRow("字间距 (Character Spacing):", self.char_spacing_spin)
+
+        root.addWidget(layout_group)
+
+        # ── 3. 预设效果预览区 ──────────────────────────────────────────
+        preview_group = QGroupBox("预设效果示例")
+        preview_vbox = QVBoxLayout(preview_group)
+        self.preview_label = QLabel("天地玄黄 宇宙洪荒 123")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(56)
+        preview_vbox.addWidget(self.preview_label)
+        self.summary_label = QLabel()
+        self.summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.summary_label.setStyleSheet("color: #57606a; font-size: 11.5px;")
+        preview_vbox.addWidget(self.summary_label)
+        root.addWidget(preview_group)
+
+        # ── 4. 底部同步应用选项与确定/取消按钮 ──────────────────────────
+        self.chk_apply_to_selected = QCheckBox(
+            f"保存后同时应用到当前选中的 {len(self.target_items)} 个文本框（支持画布实时预览）"
+            if self.target_items else "当前画布未选中文本框（仅保存对预设本身的修改）"
+        )
+        self.chk_apply_to_selected.setEnabled(bool(self.target_items))
+        self.chk_apply_to_selected.setChecked(bool(self.target_items))
+        self.chk_apply_to_selected.toggled.connect(self._on_apply_toggle_changed)
+        root.addWidget(self.chk_apply_to_selected)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.addStretch()
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("保存预设修改")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self._on_reject)
+        bottom_row.addWidget(btns)
+        root.addLayout(bottom_row)
+
+    def _save_ui_to_preset_Memory(self, index):
+        if index < 0 or index >= len(self.presets):
+            return
+        new_name = self.name_edit.text().strip()
+        if new_name:
+            self.presets[index]['name'] = new_name
+            self.preset_selector.blockSignals(True)
+            self.preset_selector.setItemText(index, new_name)
+            self.preset_selector.setItemData(index, new_name)
+            self.preset_selector.blockSignals(False)
+        self.presets[index]['format'] = self.current_format_dict()
+
+    def _on_preset_selection_changed(self, new_index):
+        if self._loading_preset or new_index < 0 or new_index >= len(self.presets):
+            return
+        self._save_ui_to_preset_Memory(self._current_index)
+        self._current_index = new_index
+        self._load_preset_at_index(new_index)
+
+    def _load_preset_at_index(self, index):
+        if index < 0 or index >= len(self.presets):
+            return
+        self._loading_preset = True
+        preset = self.presets[index]
+        fmt = preset.get('format', {})
+        self.name_edit.setText(preset.get('name', ''))
+
+        font_family = str(fmt.get('font_family', DEFAULT_FONT))
+        idx = self.font_combo.findText(font_family)
+        if idx >= 0:
+            self.font_combo.setCurrentIndex(idx)
+        else:
+            self.font_combo.setCurrentText(font_family)
+
+        self.size_spin.setValue(int(fmt.get('font_size', DEFAULT_FONT_SIZE)))
+        c = QColor(fmt.get('text_color', '#000000'))
+        self._text_color = c if c.isValid() else QColor('#000000')
+        self._update_color_btn()
+
+        self.col_spacing_spin.setValue(int(fmt.get('column_spacing', COLUMN_SPACING)))
+        self.char_spacing_spin.setValue(int(fmt.get('character_spacing', 0)))
+        self._loading_preset = False
+        self._update_preview_and_canvas()
+
+    def current_format_dict(self):
+        return {
+            'font_family': self.font_combo.currentText().strip() or DEFAULT_FONT,
+            'font_size': self.size_spin.value(),
+            'text_color': self._text_color.name(),
+            'chars_per_column': 9999,
+            'column_spacing': self.col_spacing_spin.value(),
+            'character_spacing': self.char_spacing_spin.value(),
+            'manual_line_break': True,
+        }
+
+    def _update_color_btn(self):
+        c = self._text_color
+        text_fg = "white" if c.lightness() < 128 else "#24292f"
+        self.btn_color.setText(c.name().upper())
+        self.btn_color.setStyleSheet(
+            f"QPushButton {{ background-color: {c.name()}; color: {text_fg}; "
+            f"border: 1px solid #8c959f; border-radius: 4px; padding: 3px 8px; font-weight: 600; min-height: 20px; }}"
+            f"QPushButton:hover {{ border: 1px solid #0969da; }}"
+        )
+
+    def _open_font_picker(self):
+        cur_font = QFont(self.font_combo.currentText().strip() or DEFAULT_FONT)
+        cur_font.setPointSize(self.size_spin.value())
+        font, ok = FontPickerDialog.get_font(cur_font, self.config_manager, self, "选择预设字体与字号")
+        if ok:
+            self._loading_preset = True
+            idx = self.font_combo.findText(font.family())
+            if idx >= 0:
+                self.font_combo.setCurrentIndex(idx)
+            else:
+                self.font_combo.setCurrentText(font.family())
+            self.size_spin.setValue(font.pointSize())
+            self._loading_preset = False
+            self._update_preview_and_canvas()
+
+    def _pick_color(self):
+        color = QColorDialog.getColor(self._text_color, self, "选择预设文字颜色")
+        if color.isValid():
+            self._text_color = color
+            self._update_color_btn()
+            self._update_preview_and_canvas()
+
+    def _set_quick_color(self, hex_code):
+        color = QColor(hex_code)
+        if color.isValid():
+            self._text_color = color
+            self._update_color_btn()
+            self._update_preview_and_canvas()
+
+    def _on_param_changed(self, *_args):
+        if self._loading_preset:
+            return
+        self._update_preview_and_canvas()
+
+    def _on_apply_toggle_changed(self, checked):
+        if checked:
+            self._apply_preview_to_targets()
+        else:
+            self.restore_original_states()
+
+    def _update_preview_and_canvas(self):
+        fmt = self.current_format_dict()
+        preview_sz = min(fmt['font_size'], 42)
+        f = QFont(fmt['font_family'], preview_sz)
+        self.preview_label.setFont(f)
+        self.preview_label.setStyleSheet(
+            f"color: {fmt['text_color']}; background: #fafaf7; border: 1px solid #e1e4e8; border-radius: 4px; padding: 6px;"
+        )
+        self.summary_label.setText(
+            f"字体: {fmt['font_family']}  |  字号: {fmt['font_size']}pt  |  "
+            f"列间距: {fmt['column_spacing']}px  |  字间距: {fmt['character_spacing']}px"
+        )
+        if self.chk_apply_to_selected.isChecked() and self.target_items:
+            self._apply_preview_to_targets()
+
+    def _apply_preview_to_targets(self):
+        fmt = self.current_format_dict()
+        for item in self.target_items:
+            item.font_family = fmt['font_family']
+            item.font_size = fmt['font_size']
+            item.text_color = QColor(fmt['text_color'])
+            item.chars_per_column = fmt['chars_per_column']
+            item.column_spacing = fmt['column_spacing']
+            item.character_spacing = fmt['character_spacing']
+            item.manual_line_break = fmt['manual_line_break']
+            item.rebuild()
+            if item.scene():
+                item.scene().update_connectors(item)
+                item.scene().update_image_text_connectors(item)
+
+    def restore_original_states(self):
+        for state in self._original_states:
+            item = state['item']
+            item.font_family = state['font_family']
+            item.font_size = state['font_size']
+            item.text_color = QColor(state['text_color'])
+            item.chars_per_column = state['chars_per_column']
+            item.column_spacing = state['column_spacing']
+            item.character_spacing = state['character_spacing']
+            item.manual_line_break = state['manual_line_break']
+            item.rebuild()
+            if item.parentItem():
+                item.setPos(item.parentItem().mapFromScene(state['scene_pos']))
+            else:
+                item.setPos(state['scene_pos'])
+            if item.scene():
+                item.scene().update_connectors(item)
+                item.scene().update_image_text_connectors(item)
+
+    def selected_preset_name(self):
+        if 0 <= self._current_index < len(self.presets):
+            return self.presets[self._current_index].get('name', '')
+        return ''
+
+    def should_apply_to_selected(self):
+        return bool(self.target_items and self.chk_apply_to_selected.isChecked())
+
+    def _on_accept(self):
+        new_name = self.name_edit.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, "提示", "预设名称不能为空")
+            return
+        # 检查重名冲突
+        for idx, p in enumerate(self.presets):
+            if idx != self._current_index and p.get('name') == new_name:
+                QMessageBox.warning(self, "提示", f"已存在同名预设“{new_name}”，请使用其他名称")
+                return
+        self._save_ui_to_preset_Memory(self._current_index)
+        # 先还原画布上预览态，交由主窗口通过带撤销的命令统一应用
+        self.restore_original_states()
         self.accept()
 
     def _on_reject(self):
@@ -1517,9 +2261,10 @@ class AssetLibraryDockWidget(QDockWidget):
         layout.addWidget(self.tabs)
 
         # 标签页1：组合素材
-        group_tab = QWidget()
-        gl = QVBoxLayout(group_tab)
-        gl.setContentsMargins(4, 4, 4, 4)
+        self.group_tab_widget = QWidget()
+        gl = QVBoxLayout(self.group_tab_widget)
+        gl.setContentsMargins(6, 6, 6, 6)
+        gl.setSpacing(6)
         self.group_list = QListWidget()
         self.group_list.setDragEnabled(True)
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
@@ -1539,6 +2284,7 @@ class AssetLibraryDockWidget(QDockWidget):
         self._preview_asset = None
         gl.addWidget(self.group_list)
         gb = QHBoxLayout()
+        gb.setSpacing(4)
         btn_use = QPushButton("使用"); btn_use.setMaximumHeight(30); btn_use.setProperty("class", "primary")
         btn_use.clicked.connect(self.use_group_asset_selected); gb.addWidget(btn_use)
         btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(30)
@@ -1549,12 +2295,13 @@ class AssetLibraryDockWidget(QDockWidget):
         btn_del.setProperty("class", "danger")
         btn_del.clicked.connect(self.delete_group_asset); gb.addWidget(btn_del)
         gl.addLayout(gb)
-        self.tabs.addTab(group_tab, "组合素材")
+        self.tabs.addTab(self.group_tab_widget, "组合素材")
 
         # 标签页2：常用文字
-        text_tab = QWidget()
-        tl = QVBoxLayout(text_tab)
-        tl.setContentsMargins(4, 4, 4, 4)
+        self.text_tab_widget = QWidget()
+        tl = QVBoxLayout(self.text_tab_widget)
+        tl.setContentsMargins(6, 6, 6, 6)
+        tl.setSpacing(6)
         tl.addWidget(QLabel("单击插入到光标处:"))
         self.snippet_list = QListWidget()
         # 设置不抢焦点，避免编辑器失焦
@@ -1562,6 +2309,7 @@ class AssetLibraryDockWidget(QDockWidget):
         self.snippet_list.itemClicked.connect(self._insert_snippet)
         tl.addWidget(self.snippet_list)
         tb = QHBoxLayout()
+        tb.setSpacing(4)
         btn_add = QPushButton("添加"); btn_add.setMaximumHeight(30); btn_add.setProperty("class", "primary")
         btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_add.clicked.connect(self._add_snippet); tb.addWidget(btn_add)
@@ -1573,7 +2321,7 @@ class AssetLibraryDockWidget(QDockWidget):
         btn_sdel.setProperty("class", "danger")
         btn_sdel.clicked.connect(self._delete_snippet); tb.addWidget(btn_sdel)
         tl.addLayout(tb)
-        self.tabs.addTab(text_tab, "常用文字")
+        self.tabs.addTab(self.text_tab_widget, "常用文字")
         self._refresh_snippets()
 
     def _get_snippets(self):
@@ -2755,20 +3503,40 @@ class MoveItemCommand(UndoCommand):
         self.new_scene_pos = new_pos
 
     def execute(self):
-        """redo：移到新位置"""
-        if self.item.parentItem():
-            self.item.setPos(self.item.parentItem().mapFromScene(self.new_scene_pos))
-        else:
-            self.item.setPos(self.new_scene_pos)
+        """redo：移到新位置（程序化移动不触发拖拽吸附或残留提示线）"""
+        sc = self.item.scene() or self.scene
+        if sc:
+            sc._programmatic_moving = True
+        try:
+            if self.item.parentItem():
+                self.item.setPos(self.item.parentItem().mapFromScene(self.new_scene_pos))
+            else:
+                self.item.setPos(self.new_scene_pos)
+        finally:
+            if sc:
+                sc._programmatic_moving = False
+                sc._image_top_edge_snap_indicator = None
+                sc._image_right_edge_snap_indicator = None
+                sc.clear_snap_guides()
         self._update_connectors()
 
     def undo(self):
         # 只需移动父级，子元素作为子项会自动跟随
-        if self.item.parentItem():
-            local_pos = self.item.parentItem().mapFromScene(self.old_scene_pos)
-            self.item.setPos(local_pos)
-        else:
-            self.item.setPos(self.old_scene_pos)
+        sc = self.item.scene() or self.scene
+        if sc:
+            sc._programmatic_moving = True
+        try:
+            if self.item.parentItem():
+                local_pos = self.item.parentItem().mapFromScene(self.old_scene_pos)
+                self.item.setPos(local_pos)
+            else:
+                self.item.setPos(self.old_scene_pos)
+        finally:
+            if sc:
+                sc._programmatic_moving = False
+                sc._image_top_edge_snap_indicator = None
+                sc._image_right_edge_snap_indicator = None
+                sc.clear_snap_guides()
 
         # 更新所有相关连线
         if self.item.scene():
@@ -2819,6 +3587,58 @@ class EditTextCommand(UndoCommand):
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
+
+
+class ApplyTextFormatCommand(UndoCommand):
+    """批量应用文字格式预设的撤销/重做命令"""
+    def __init__(self, scene, items, new_format):
+        super().__init__(scene)
+        self.new_format = copy.deepcopy(new_format)
+        self.saved_states = []
+        for item in items:
+            if isinstance(item, VTextItem):
+                self.saved_states.append({
+                    'item': item,
+                    'old_format': {
+                        'font_family': item.font_family,
+                        'font_size': item.font_size,
+                        'text_color': item.text_color.name(),
+                        'chars_per_column': item.chars_per_column,
+                        'column_spacing': item.column_spacing,
+                        'character_spacing': item.character_spacing,
+                        'manual_line_break': item.manual_line_break,
+                    },
+                    'old_scene_pos': item.scenePos(),
+                })
+
+    @staticmethod
+    def _apply_dict_to_item(item, fmt, restore_scene_pos=None):
+        item.font_family = str(fmt.get('font_family', item.font_family))
+        item.font_size = max(1, int(fmt.get('font_size', item.font_size)))
+        c = QColor(fmt.get('text_color', item.text_color.name()))
+        if c.isValid():
+            item.text_color = c
+        item.chars_per_column = max(1, int(fmt.get('chars_per_column', item.chars_per_column)))
+        item.column_spacing = int(fmt.get('column_spacing', item.column_spacing))
+        item.character_spacing = int(fmt.get('character_spacing', item.character_spacing))
+        item.manual_line_break = bool(fmt.get('manual_line_break', item.manual_line_break))
+        item.rebuild()
+        if restore_scene_pos is not None:
+            if item.parentItem():
+                item.setPos(item.parentItem().mapFromScene(restore_scene_pos))
+            else:
+                item.setPos(restore_scene_pos)
+        if item.scene():
+            item.scene().update_connectors(item)
+            item.scene().update_image_text_connectors(item)
+
+    def execute(self):
+        for entry in self.saved_states:
+            self._apply_dict_to_item(entry['item'], self.new_format)
+
+    def undo(self):
+        for entry in self.saved_states:
+            self._apply_dict_to_item(entry['item'], entry['old_format'], entry['old_scene_pos'])
 
 
 class SplitTextItemCommand(UndoCommand):
@@ -3001,6 +3821,185 @@ class MacroCommand(UndoCommand):
     def undo(self):
         for cmd in reversed(self.commands):
             cmd.undo()
+
+
+class ClearCanvasCommand(UndoCommand):
+    """清空当前画布命令（支持 Ctrl+Z 完整撤销恢复所有元素、连线、连接点与辅助线）"""
+    def __init__(self, scene, keep_locked_images=False, clear_guides=False):
+        super().__init__(scene)
+        self.keep_locked_images = bool(keep_locked_images)
+        self.clear_guides = bool(clear_guides)
+
+        excluded_items = (
+            {
+                item for item in scene.items()
+                if isinstance(item, VImageItem) and getattr(item, 'locked', False)
+            }
+            if self.keep_locked_images else set()
+        )
+
+        self.all_removed_elements = [
+            item for item in scene.items()
+            if isinstance(item, BaseElement) and item not in excluded_items
+        ]
+        # 记录所有需要从场景或锁定父级下移除的顶层根元素 (item, parent_item, local_pos)
+        self.removed_roots = []
+        for item in self.all_removed_elements:
+            parent = item.parentItem()
+            if not isinstance(parent, BaseElement) or parent in excluded_items:
+                self.removed_roots.append((item, parent if isinstance(parent, BaseElement) else None, QPointF(item.pos())))
+
+        self.removed_connectors = [
+            conn for conn in list(scene.connectors)
+            if getattr(conn, 'parent_element', None) not in excluded_items
+            or getattr(conn, 'child_element', None) not in excluded_items
+        ]
+
+        self.removed_image_text_connectors = []
+        for conn in list(scene.image_text_connectors):
+            item1, item2 = scene._image_text_connector_items(conn)
+            if excluded_items and item1 in excluded_items and item2 in excluded_items:
+                continue
+            self.removed_image_text_connectors.append(
+                (conn, getattr(conn, 'point1', None), getattr(conn, 'point2', None))
+            )
+
+        self.removed_free_points = [
+            pt for pt in list(getattr(scene, 'free_connection_points', []))
+            if pt.scene() is scene
+        ]
+        self.removed_guides = list(scene.guides) if self.clear_guides else []
+        self.was_editing_group_id = getattr(scene, '_editing_group_asset_id', None)
+        self.was_editing_group_items = list(getattr(scene, '_editing_group_items', []))
+
+    def has_changes(self):
+        return bool(
+            self.removed_roots
+            or self.removed_connectors
+            or self.removed_image_text_connectors
+            or self.removed_free_points
+            or self.removed_guides
+        )
+
+    def execute(self):
+        # 结束正在编辑的文本框
+        for item in self.all_removed_elements:
+            if isinstance(item, VTextItem) and getattr(item, 'is_editing', False) and item.inline_editor:
+                item.inline_editor.finish_editing()
+
+        # 退出当前可能激活的交互模式
+        if self.scene.connection_mode:
+            self.scene.cancel_connection_mode()
+        if getattr(self.scene, 'avatar_connect_mode', False):
+            self.scene.set_avatar_connect_mode(False)
+        if getattr(self.scene, 'align_reference_mode', None):
+            self.scene._cancel_align_reference_mode(silent=True)
+        self.scene.image_text_binding_mode = False
+        self.scene.image_text_source = None
+        self.scene.avatar_connect_source = None
+        self.scene.binding_source = None
+        self.scene.stamping_session = None
+        self.scene._editing_group_asset_id = None
+        self.scene._editing_group_items = []
+
+        self.scene.clearSelection()
+        self.scene.selection_order.clear()
+
+        # 1. 移除父子连接线
+        for conn in self.removed_connectors:
+            if conn in self.scene.connectors:
+                self.scene.connectors.remove(conn)
+            if conn.scene() is self.scene:
+                self.scene.removeItem(conn)
+
+        # 2. 移除图文连接线与通用连接线
+        for conn, pt1, pt2 in self.removed_image_text_connectors:
+            for pt in (pt1, pt2):
+                if pt is not None and conn in getattr(pt, 'connected_lines', []):
+                    pt.connected_lines.remove(conn)
+            if conn in self.scene.image_text_connectors:
+                self.scene.image_text_connectors.remove(conn)
+            if conn.scene() is self.scene:
+                self.scene.removeItem(conn)
+
+        # 3. 移除独立连接点
+        for pt in self.removed_free_points:
+            if pt in self.scene.free_connection_points:
+                self.scene.free_connection_points.remove(pt)
+            if pt.scene() is self.scene:
+                self.scene.removeItem(pt)
+
+        # 4. 移除所有根元素（子元素会随根元素一起脱离场景并保持层级引用）
+        for item, parent_item, _local_pos in self.removed_roots:
+            if parent_item is not None:
+                item.setParentItem(None)
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+
+        # 5. 可选清除所有辅助线
+        if self.clear_guides:
+            for guide in list(self.removed_guides):
+                self.scene.remove_guide(guide)
+
+        self.scene.hide_temp_alignment_guide()
+        self.scene.clear_snap_guides()
+        self.scene._image_right_edge_snap_indicator = None
+        self.scene._image_top_edge_snap_indicator = None
+        self.scene._hover_perp_guide = None
+        self.scene.update()
+
+    def undo(self):
+        # 1. 恢复所有根元素及其子元素
+        for item, parent_item, local_pos in self.removed_roots:
+            if parent_item is not None and parent_item.scene() is self.scene:
+                item.setParentItem(parent_item)
+                item.setPos(local_pos)
+            else:
+                item.setParentItem(None)
+                if item.scene() is not self.scene:
+                    self.scene.addItem(item)
+                item.setPos(local_pos)
+
+        # 2. 恢复独立连接点
+        for pt in self.removed_free_points:
+            if pt.scene() is not self.scene:
+                self.scene.addItem(pt)
+            if pt not in self.scene.free_connection_points:
+                self.scene.free_connection_points.append(pt)
+            pt.setVisible(self.scene.show_connection_points)
+
+        # 3. 恢复父子连接线
+        for conn in self.removed_connectors:
+            if conn.scene() is not self.scene:
+                self.scene.addItem(conn)
+            if conn not in self.scene.connectors:
+                self.scene.connectors.append(conn)
+            conn.update_path()
+
+        # 4. 恢复图文连接线与通用连接线
+        for conn, pt1, pt2 in self.removed_image_text_connectors:
+            if conn.scene() is not self.scene:
+                self.scene.addItem(conn)
+            if conn not in self.scene.image_text_connectors:
+                self.scene.image_text_connectors.append(conn)
+            for pt in (pt1, pt2):
+                if pt is not None and conn not in getattr(pt, 'connected_lines', []):
+                    pt.connected_lines.append(conn)
+            conn.update_path()
+
+        # 5. 恢复辅助线
+        if self.clear_guides:
+            for guide in self.removed_guides:
+                if guide.scene() is not self.scene:
+                    self.scene.addItem(guide)
+                if guide not in self.scene.guides:
+                    self.scene.guides.append(guide)
+                guide.setVisible(self.scene.show_guides)
+
+        self.scene._editing_group_asset_id = self.was_editing_group_id
+        self.scene._editing_group_items = list(self.was_editing_group_items)
+        self.scene.sync_connectors_visibility()
+        self.scene.update()
 
 
 class UndoStack:
@@ -3465,7 +4464,7 @@ class VGenericConnector(QGraphicsPathItem):
         elif action == width_8:
             self.set_line_width(8)
         elif action == width_custom:
-            width, ok = QInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
+            width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
             if ok:
                 self.set_line_width(width)
         elif action == delete_action:
@@ -3659,7 +4658,7 @@ class VImageTextConnector(QGraphicsPathItem):
         elif action == width_8:
             self.set_line_width(8)
         elif action == width_custom:
-            width, ok = QInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
+            width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
             if ok:
                 self.set_line_width(width)
         elif action == delete_action:
@@ -3775,30 +4774,38 @@ class BaseElement(QGraphicsItem):
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
-            # 吸附到辅助线
-            if self.scene() and self.scene().guides:
-                value = self._snap_to_guides(value)
-            
-            # 水平移动模式：锁定Y + 右边缘X吸附
-            horizontal_lock = getattr(self.scene(), '_horizontal_move_lock_y', {}) if self.scene() else {}
-            if self in horizontal_lock:
-                parent = self.parentItem()
-                new_scene_pos = parent.mapToScene(value) if parent else value
-                snap_dx = self._horizontal_right_edge_snap_offset(new_scene_pos, horizontal_lock)
-                locked_scene_pos = QPointF(
-                    new_scene_pos.x() + snap_dx,
-                    horizontal_lock[self]
-                )
-                value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
-            else:
-                # 非水平移动模式：顶部Y吸附（如果开启）
-                if isinstance(self, VImageItem):
+            sc = self.scene()
+            is_interactive_drag = (
+                sc is not None
+                and not getattr(sc, '_batch_importing', False)
+                and not getattr(sc, '_programmatic_moving', False)
+                and bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
+            )
+            if is_interactive_drag:
+                # 吸附到辅助线
+                if sc.guides:
+                    value = self._snap_to_guides(value)
+                
+                # 水平移动模式：锁定Y + 右边缘X吸附
+                horizontal_lock = getattr(sc, '_horizontal_move_lock_y', {})
+                if self in horizontal_lock:
                     parent = self.parentItem()
                     new_scene_pos = parent.mapToScene(value) if parent else value
-                    snap_dy = self._calc_top_edge_snap(new_scene_pos)
-                    if abs(snap_dy) > 0.01:
-                        snapped_scene_pos = QPointF(new_scene_pos.x(), new_scene_pos.y() + snap_dy)
-                        value = parent.mapFromScene(snapped_scene_pos) if parent else snapped_scene_pos
+                    snap_dx = self._horizontal_right_edge_snap_offset(new_scene_pos, horizontal_lock)
+                    locked_scene_pos = QPointF(
+                        new_scene_pos.x() + snap_dx,
+                        horizontal_lock[self]
+                    )
+                    value = parent.mapFromScene(locked_scene_pos) if parent else locked_scene_pos
+                else:
+                    # 非水平移动模式：图片/文字顶部Y吸附（仅在鼠标左键拖拽时触发）
+                    if isinstance(self, (VImageItem, VTextItem)):
+                        parent = self.parentItem()
+                        new_scene_pos = parent.mapToScene(value) if parent else value
+                        snap_dy = self._calc_top_edge_snap(new_scene_pos)
+                        if abs(snap_dy) > 0.01:
+                            snapped_scene_pos = QPointF(new_scene_pos.x(), new_scene_pos.y() + snap_dy)
+                            value = parent.mapFromScene(snapped_scene_pos) if parent else snapped_scene_pos
 
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             # 先更新连接点位置，再更新连线，确保连线使用最新的连接点坐标
@@ -3898,17 +4905,28 @@ class BaseElement(QGraphicsItem):
         return best_offset
 
     def _calc_top_edge_snap(self, new_scene_pos):
-        """计算顶部Y吸附偏移量，行为与右边缘X吸附保持一致。"""
+        """计算图片或文字的顶部Y吸附偏移量，行为与右边缘X吸附保持一致。"""
         scene = self.scene()
         def set_indicator(indicator):
             if scene and getattr(scene, '_image_top_edge_snap_indicator', None) != indicator:
                 scene._image_top_edge_snap_indicator = indicator
                 scene.update()
 
-        if (not scene
-                or getattr(scene, '_batch_importing', False)
-                or not scene.config_manager.get('image_top_edge_snap_enabled', False)
-                or not isinstance(self, VImageItem)):
+        if not scene or getattr(scene, '_batch_importing', False):
+            set_indicator(None)
+            return 0.0
+
+        if isinstance(self, VTextItem):
+            snap_enabled = scene.config_manager.get('text_top_edge_snap_enabled', False)
+            item_type = VTextItem
+        elif isinstance(self, VImageItem):
+            snap_enabled = scene.config_manager.get('image_top_edge_snap_enabled', False)
+            item_type = VImageItem
+        else:
+            set_indicator(None)
+            return 0.0
+
+        if not snap_enabled:
             set_indicator(None)
             return 0.0
 
@@ -3945,7 +4963,7 @@ class BaseElement(QGraphicsItem):
         best_candidate = None
 
         for candidate in scene.items():
-            if (not isinstance(candidate, VImageItem)
+            if (not isinstance(candidate, item_type)
                     or not candidate.isVisible()
                     or getattr(candidate, '_was_hidden', False)
                     or belongs_to_moving_group(candidate)):
@@ -3963,17 +4981,24 @@ class BaseElement(QGraphicsItem):
 
         owner_rect = self.sceneBoundingRect()
         candidate_rect = best_candidate.sceneBoundingRect()
-        # Y 顶部吸附提示线的端点使用两张图片的顶部连接点。
         aligned_y = candidate_rect.top()
-        owner_connection = getattr(self, 'connection_point', None)
-        candidate_connection = getattr(best_candidate, 'connection_point', None)
         move_delta = new_scene_pos - current_scene_pos
-        owner_point = (owner_connection.get_scene_center() + move_delta
-                       if owner_connection else owner_rect.topLeft() + move_delta)
-        candidate_point = (candidate_connection.get_scene_center()
-                          if candidate_connection else candidate_rect.topLeft())
-        owner_anchor = QPointF(owner_point.x(), aligned_y)
-        candidate_anchor = QPointF(candidate_point.x(), aligned_y)
+
+        if isinstance(self, VTextItem):
+            # 竖排文字以右上角作为顶部对齐提示线的端点
+            owner_anchor = QPointF(owner_rect.right() + move_delta.x(), aligned_y)
+            candidate_anchor = QPointF(candidate_rect.right(), aligned_y)
+        else:
+            # 图片使用顶部连接点（或左上角）作为提示线的端点
+            owner_connection = getattr(self, 'connection_point', None)
+            candidate_connection = getattr(best_candidate, 'connection_point', None)
+            owner_point = (owner_connection.get_scene_center() + move_delta
+                           if owner_connection else owner_rect.topLeft() + move_delta)
+            candidate_point = (candidate_connection.get_scene_center()
+                              if candidate_connection else candidate_rect.topLeft())
+            owner_anchor = QPointF(owner_point.x(), aligned_y)
+            candidate_anchor = QPointF(candidate_point.x(), aligned_y)
+
         set_indicator((
             owner_anchor,
             candidate_anchor,
@@ -4825,12 +5850,8 @@ class VTextItem(BaseElement):
         # 列宽依然以主字号为准
         col_step = self.font_size + self.column_spacing
         
-        # 换行高度限制
-        if self.auto_height:
-            char_step_main = max(1.0, char_h_main * LINE_HEIGHT_RATIO + self.character_spacing)
-            effective_height = char_h_main + (self.chars_per_column - 1) * char_step_main
-        else:
-            effective_height = self.box_height
+        # 换行高度限制（默认仅按回车符手动换列，不再按每列字数强行截断）
+        effective_height = float('inf') if self.auto_height else self.box_height
         
         cursor_y = 0
         col_idx = 0
@@ -4844,11 +5865,10 @@ class VTextItem(BaseElement):
         while i < len(text_content):
             char = text_content[i]
             
-            # 处理换行
+            # 处理换行（按回车直接换到左侧下一列）
             if char == '\n':
-                if self.manual_line_break:
-                    cursor_y = 0
-                    col_idx += 1
+                cursor_y = 0
+                col_idx += 1
                 i += 1
                 continue
 
@@ -4867,8 +5887,8 @@ class VTextItem(BaseElement):
                 current_font = main_font
                 current_h = char_h_main
 
-            # 换列判断
-            if cursor_y + current_h > effective_height:
+            # 换列判断（仅当非 auto_height 定高框时才按高度换列）
+            if not self.auto_height and cursor_y + current_h > effective_height:
                 cursor_y = 0
                 col_idx += 1
             
@@ -5015,6 +6035,20 @@ class VTextItem(BaseElement):
         menu.addSeparator()
         
         action_text_style = menu.addAction("文字样式与排版设置 (字体/颜色/字数/间距)...")
+        preset_submenu = menu.addMenu("文字格式预设 (Presets)")
+        preset_apply_actions = {}
+        sc_for_preset = self.scene()
+        mw_for_preset = sc_for_preset.views()[0].window() if (sc_for_preset and sc_for_preset.views()) else None
+        presets_list = mw_for_preset._text_format_presets() if (mw_for_preset and hasattr(mw_for_preset, '_text_format_presets')) else []
+        if presets_list:
+            for p_entry in presets_list:
+                p_name = p_entry.get('name', '')
+                if p_name:
+                    p_act = preset_submenu.addAction(f"应用预设：{p_name}")
+                    preset_apply_actions[p_act] = p_name
+            preset_submenu.addSeparator()
+        action_edit_preset = preset_submenu.addAction("修改已有文字格式预设...")
+        action_add_preset = preset_submenu.addAction("将当前文字保存为新预设...")
         menu.addSeparator()
         
         # 添加隐藏/显示/删除连接点选项
@@ -5116,6 +6150,17 @@ class VTextItem(BaseElement):
             self.reset_editing_state()
         elif action == action_text_style:
             self.open_text_style_dialog()
+        elif action in preset_apply_actions:
+            if mw_for_preset and hasattr(mw_for_preset, 'apply_text_preset_by_name'):
+                sel_texts = mw_for_preset._get_target_text_items_for_property()
+                targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
+                mw_for_preset.apply_text_preset_by_name(preset_apply_actions[action], target_items=targets)
+        elif action == action_edit_preset:
+            if mw_for_preset and hasattr(mw_for_preset, 'edit_selected_text_preset'):
+                mw_for_preset.edit_selected_text_preset()
+        elif action == action_add_preset:
+            if mw_for_preset and hasattr(mw_for_preset, 'add_current_text_format_preset'):
+                mw_for_preset.add_current_text_format_preset()
         elif action == toggle_connection_point_action:
             self.toggle_connection_point()
         elif delete_cp_action and action == delete_cp_action:
@@ -5196,7 +6241,7 @@ class VTextItem(BaseElement):
     
     def change_chars_per_column_settings(self):
         """设置每列字符数"""
-        chars_count, ok = QInputDialog.getInt(None, "设置每列字符数", "每列字符数", self.chars_per_column, 5, 50)
+        chars_count, ok = MinimalInputDialog.getInt(None, "设置每列字符数", "每列字符数", self.chars_per_column, 5, 50)
         if ok:
             self.chars_per_column = chars_count
             self.rebuild()
@@ -5206,7 +6251,7 @@ class VTextItem(BaseElement):
     
     def change_column_spacing_settings(self):
         """设置列间距"""
-        spacing, ok = QInputDialog.getInt(None, "设置列间距", "列间距 (像素):", self.column_spacing, 0, 200)
+        spacing, ok = MinimalInputDialog.getInt(None, "设置列间距", "列间距 (像素):", self.column_spacing, 0, 200)
         if ok:
             self.column_spacing = spacing
             self.rebuild()
@@ -5217,7 +6262,7 @@ class VTextItem(BaseElement):
 
     def change_character_spacing_settings(self):
         """设置同一竖列中相邻字符之间的额外间距。"""
-        spacing, ok = QInputDialog.getInt(
+        spacing, ok = MinimalInputDialog.getInt(
             None, "设置字间距", "字间距 (像素):", self.character_spacing, -200, 200
         )
         if ok:
@@ -5462,10 +6507,7 @@ class VTextItem(BaseElement):
         char_h = main_fm.height()
         col_step = self.font_size + self.column_spacing
         char_step = max(1.0, char_h * LINE_HEIGHT_RATIO + self.character_spacing)
-        effective_height = (
-            char_h + (self.chars_per_column - 1) * char_step
-            if self.auto_height else self.box_height
-        )
+        effective_height = float('inf') if self.auto_height else self.box_height
         # 去掉 rebuild 里 adjusted(-2,-2,2,2) 带来的 2px 右边偏移，保持与非编辑状态对齐
         right_edge = self._rect.right() - 2
         cursor_y = 0
@@ -5483,12 +6525,11 @@ class VTextItem(BaseElement):
                     'col_idx': col_idx,
                     'x': col_x_left,
                 })
-                if self.manual_line_break:
-                    cursor_y = 0
-                    col_idx += 1
+                cursor_y = 0
+                col_idx += 1
                 continue
 
-            if cursor_y + char_h > effective_height:
+            if not self.auto_height and cursor_y + char_h > effective_height:
                 cursor_y = 0
                 col_idx += 1
 
@@ -5813,6 +6854,87 @@ class ResizeHandle(QGraphicsItem):
         event.accept()
 
 
+class SmoothPixmapItem(QGraphicsPixmapItem):
+    """支持多级区域平均重采样（Mipmap/Area-Averaging）的高清图片图元：
+    解决高分辨率底图/文字图在画布缩小（如 15%~50%）时因双线性/最近邻抽样导致的文字断笔、模糊发虚问题。
+    """
+    def __init__(self, source_pixmap: QPixmap, target_width: float, target_height: float, parent=None):
+        super().__init__(parent)
+        self._source_pixmap = source_pixmap
+        self._target_rect = QRectF(0, 0, max(1.0, float(target_width)), max(1.0, float(target_height)))
+        self._lod_cache_key = None
+        self._lod_cache_pixmap = None
+        self.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
+        if not source_pixmap.isNull():
+            super().setPixmap(source_pixmap.scaled(
+                max(1, int(round(self._target_rect.width()))),
+                max(1, int(round(self._target_rect.height()))),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+
+    def set_target_size(self, width: float, height: float, new_source_pixmap: QPixmap = None):
+        if new_source_pixmap is not None and not new_source_pixmap.isNull():
+            self._source_pixmap = new_source_pixmap
+        self.prepareGeometryChange()
+        self._target_rect = QRectF(0, 0, max(1.0, float(width)), max(1.0, float(height)))
+        self._lod_cache_key = None
+        self._lod_cache_pixmap = None
+        if not self._source_pixmap.isNull():
+            super().setPixmap(self._source_pixmap.scaled(
+                max(1, int(round(self._target_rect.width()))),
+                max(1, int(round(self._target_rect.height()))),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        self.update()
+
+    def boundingRect(self) -> QRectF:
+        return self._target_rect
+
+    def paint(self, painter: QPainter, option, widget=None):
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            super().paint(painter, option, widget)
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        sc = self.scene()
+        is_pdf = getattr(sc, '_rendering_pdf', False) if sc else False
+
+        world_tx = painter.worldTransform()
+        dpr = 1.0
+        if painter.device() is not None and hasattr(painter.device(), 'devicePixelRatioF'):
+            dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+
+        scale_x = math.hypot(world_tx.m11(), world_tx.m12()) * dpr
+        scale_y = math.hypot(world_tx.m21(), world_tx.m22()) * dpr
+
+        # 打印/导出PDF或放大查看时直接绘制原图精度的图元；缩小时按屏幕实际物理像素做 SmoothTransformation 盒式滤波缓存
+        if is_pdf or (scale_x >= 0.85 and scale_y >= 0.85):
+            src_to_draw = self._source_pixmap
+            painter.drawPixmap(self._target_rect, src_to_draw, QRectF(src_to_draw.rect()))
+        else:
+            dev_w = max(1, int(round(self._target_rect.width() * scale_x)))
+            dev_h = max(1, int(round(self._target_rect.height() * scale_y)))
+            cache_key = (self._source_pixmap.cacheKey(), dev_w, dev_h)
+            if self._lod_cache_key != cache_key or self._lod_cache_pixmap is None:
+                self._lod_cache_pixmap = self._source_pixmap.scaled(
+                    dev_w, dev_h,
+                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self._lod_cache_key = cache_key
+            painter.drawPixmap(
+                self._target_rect,
+                self._lod_cache_pixmap,
+                QRectF(self._lod_cache_pixmap.rect())
+            )
+        painter.restore()
+
+
 class VImageItem(BaseElement):
     """Image Item that fits into columns"""
     def __init__(self, path, target_width=DEFAULT_FONT_SIZE, target_height=0):
@@ -5829,19 +6951,10 @@ class VImageItem(BaseElement):
         if not pix.isNull():
             self._orig_ratio = pix.height() / pix.width()
             if target_height and target_height > 0:
-                # 强制指定宽高
                 target_h = target_height
-                self.p_item = QGraphicsPixmapItem(pix.scaled(
-                    int(target_width), int(target_h),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation))
             else:
                 target_h = target_width * self._orig_ratio
-                self.p_item = QGraphicsPixmapItem(pix.scaled(
-                    int(target_width), int(target_h),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation))
-            self.p_item.setParentItem(self)
+            self.p_item = SmoothPixmapItem(pix, target_width, target_h, self)
             self._rect = QRectF(0, 0, target_width, target_h)
         else:
             self._rect = QRectF(0, 0, target_width, target_height if (target_height and target_height > 0) else target_width)
@@ -5947,10 +7060,13 @@ class VImageItem(BaseElement):
 
         pix = QPixmap(self.file_path)
         if not pix.isNull():
-            scaled = pix.scaled(int(w), int(h),
-                                Qt.AspectRatioMode.IgnoreAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation)
-            self.p_item.setPixmap(scaled)
+            if isinstance(self.p_item, SmoothPixmapItem):
+                self.p_item.set_target_size(w, h, pix)
+            else:
+                scaled = pix.scaled(int(w), int(h),
+                                    Qt.AspectRatioMode.IgnoreAspectRatio,
+                                    Qt.TransformationMode.SmoothTransformation)
+                self.p_item.setPixmap(scaled)
 
         # 位置补偿：拖左/上边时，元素需要移动以保持右/下边不动
         # new_rect 的 topLeft 是相对于原始 (0,0) 的偏移
@@ -6125,7 +7241,7 @@ class VImageItem(BaseElement):
         sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
         target_imgs = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
         title = f"批量设置图片透明度 (共 {len(target_imgs)} 张)" if len(target_imgs) > 1 else "设置透明度"
-        val, ok = QInputDialog.getInt(
+        val, ok = MinimalInputDialog.getInt(
             None, title, "透明度 (0-100)%:",
             int(self.image_opacity * 100), 0, 100
         )
@@ -7066,6 +8182,8 @@ class LayoutScene(QGraphicsScene):
 
     def load_background_image(self):
         """加载背景图片"""
+        self._bg_lod_cache_key = None
+        self._bg_lod_cache_pixmap = None
         bg_path = self.config_manager.get('default_background_image', '')
         if bg_path and os.path.exists(bg_path):
             self.background_pixmap = QPixmap(bg_path)
@@ -7486,52 +8604,55 @@ class LayoutScene(QGraphicsScene):
                     painter.drawPath(conn.path())
                     painter.restore()
 
-        # 绘制背景图片（在网格之上，元素之下）
+        # 绘制背景图片（在网格之上，元素之下；支持按当前视图缩放率做盒式平滑滤波缓存，防止缩小时细字断笔）
         if self.background_pixmap and not self.background_pixmap.isNull():
             opacity = self.config_manager.get('background_opacity', 0.3)
             scale_mode = self.config_manager.get('background_scale_mode', 'fit')
             
-            # 保存当前透明度
             old_opacity = painter.opacity()
             painter.setOpacity(opacity)
-            
-            if scale_mode == 'fit':
-                # 适应画布，保持宽高比
-                scaled_pixmap = self.background_pixmap.scaled(
-                    canvas_rect.size().toSize(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                # 居中绘制
-                x = canvas_rect.x() + (canvas_rect.width() - scaled_pixmap.width()) / 2
-                y = canvas_rect.y() + (canvas_rect.height() - scaled_pixmap.height()) / 2
-                painter.drawPixmap(int(x), int(y), scaled_pixmap)
-            
-            elif scale_mode == 'fill':
-                # 填充画布，保持宽高比，可能裁剪
-                scaled_pixmap = self.background_pixmap.scaled(
-                    canvas_rect.size().toSize(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                x = canvas_rect.x() + (canvas_rect.width() - scaled_pixmap.width()) / 2
-                y = canvas_rect.y() + (canvas_rect.height() - scaled_pixmap.height()) / 2
-                painter.drawPixmap(int(x), int(y), scaled_pixmap)
-            
-            elif scale_mode == 'stretch':
-                # 拉伸填充，不保持宽高比
-                scaled_pixmap = self.background_pixmap.scaled(
-                    canvas_rect.size().toSize(),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                painter.drawPixmap(canvas_rect.toRect(), scaled_pixmap)
-            
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+            world_tx = painter.worldTransform()
+            dpr = 1.0
+            if painter.device() is not None and hasattr(painter.device(), 'devicePixelRatioF'):
+                dpr = max(1.0, float(painter.device().devicePixelRatioF()))
+            scale_x = math.hypot(world_tx.m11(), world_tx.m12()) * dpr
+            scale_y = math.hypot(world_tx.m21(), world_tx.m22()) * dpr
+
+            if scale_mode in ('fit', 'fill', 'stretch'):
+                bw = self.background_pixmap.width()
+                bh = self.background_pixmap.height()
+                if scale_mode == 'stretch' or bw <= 0 or bh <= 0:
+                    target_rect = QRectF(canvas_rect)
+                else:
+                    ratio = (min(canvas_rect.width() / bw, canvas_rect.height() / bh)
+                             if scale_mode == 'fit'
+                             else max(canvas_rect.width() / bw, canvas_rect.height() / bh))
+                    draw_w = bw * ratio
+                    draw_h = bh * ratio
+                    x = canvas_rect.x() + (canvas_rect.width() - draw_w) / 2.0
+                    y = canvas_rect.y() + (canvas_rect.height() - draw_h) / 2.0
+                    target_rect = QRectF(x, y, draw_w, draw_h)
+
+                if scale_x >= 0.85 and scale_y >= 0.85:
+                    painter.drawPixmap(target_rect, self.background_pixmap, QRectF(self.background_pixmap.rect()))
+                else:
+                    dev_w = max(1, int(round(target_rect.width() * scale_x)))
+                    dev_h = max(1, int(round(target_rect.height() * scale_y)))
+                    cache_key = (self.background_pixmap.cacheKey(), dev_w, dev_h)
+                    if getattr(self, '_bg_lod_cache_key', None) != cache_key or getattr(self, '_bg_lod_cache_pixmap', None) is None:
+                        self._bg_lod_cache_pixmap = self.background_pixmap.scaled(
+                            dev_w, dev_h,
+                            Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        self._bg_lod_cache_key = cache_key
+                    cached_pix = self._bg_lod_cache_pixmap
+                    painter.drawPixmap(target_rect, cached_pix, QRectF(cached_pix.rect()))
             elif scale_mode == 'tile':
-                # 平铺
                 painter.drawTiledPixmap(canvas_rect.toRect(), self.background_pixmap)
             
-            # 恢复透明度
             painter.setOpacity(old_opacity)
         
         # 绘制画布边框（最后绘制）
@@ -9549,6 +10670,18 @@ class LayoutScene(QGraphicsScene):
     def delete_item(self, item):
         self.undo_stack.push_and_execute(DeleteItemCommand(self, item))
 
+    def clear_canvas_with_undo(self, keep_locked_images=False, clear_guides=False):
+        """清空当前画布上的所有元素、连线与连接点，并推入撤销栈"""
+        cmd = ClearCanvasCommand(
+            self,
+            keep_locked_images=keep_locked_images,
+            clear_guides=clear_guides
+        )
+        if not cmd.has_changes():
+            return False
+        self.undo_stack.push_and_execute(cmd)
+        return True
+
     # 全角与半角字符一对一归一化映射表（保证归一化前后字符串长度严格一致）
     _FULL_HALF_TRANSLATION_TABLE = str.maketrans({
         **{chr(0xFF01 + i): chr(0x21 + i) for i in range(94)},  # 全角 ！..～ -> 半角 !..~（含 ｜->|, ，->,, ；->;, ：->:, ／->/, ＃-># 等）
@@ -10124,6 +11257,12 @@ class LayoutScene(QGraphicsScene):
             macro_cmd = MacroCommand(self, move_commands)
             self.undo_stack.push(macro_cmd)
 
+        # 确保对齐完成后清除任何残留的边缘吸附指示线
+        self._image_top_edge_snap_indicator = None
+        self._image_right_edge_snap_indicator = None
+        self.clear_snap_guides()
+        self.update()
+
         align_label = self.ALIGN_TYPE_LABELS.get(align_mode, '对齐')
         ref_desc = mode_hint or type(ref).__name__
         msg = f"已完成{align_label}（基准：{ref_desc}，可按 Ctrl+Z 撤销，Alt+A 切换对齐基准模式）"
@@ -10233,8 +11372,9 @@ class LayoutView(QGraphicsView):
         super().__init__(scene)
         # --- 在这里插入/确保这两行存在 ---
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAcceptDrops(True)
@@ -11905,13 +13045,13 @@ class FamilyTreeImportDialog(QDialog):
         self.combo_unit.currentIndexChanged.connect(self._on_unit_changed)
         lg.addRow("尺寸单位:", self.combo_unit)
 
-        self.spin_start_x = QDoubleSpinBox()
+        self.spin_start_x = MinimalDoubleSpinBox()
         self.spin_start_x.setRange(-99999, 99999)
         self.spin_start_x.setValue(500)
         self.spin_start_x.setSuffix(" px")
         lg.addRow("起始 X（第1人右侧）:", self.spin_start_x)
 
-        self.spin_spacing = QDoubleSpinBox()
+        self.spin_spacing = MinimalDoubleSpinBox()
         self.spin_spacing.setRange(1, 9999)
         self.spin_spacing.setValue(200)
         self.spin_spacing.setSuffix(" px")
@@ -11926,7 +13066,7 @@ class FamilyTreeImportDialog(QDialog):
         self.y_spins = []
         defaults = [500, 1000, 1500, 2000, 2500]
         for i in range(5):
-            sp = QDoubleSpinBox()
+            sp = MinimalDoubleSpinBox()
             sp.setRange(-99999, 99999)
             sp.setValue(defaults[i])
             sp.setSuffix(" px")
@@ -12441,9 +13581,10 @@ class MainWindow(QMainWindow):
         self._documents.append(DocumentState("文档 1", self.scene, self.view))
         
         # 创建停靠面板
-        # 右侧：层级 & 属性面板
-        self.sidebar_dock = QDockWidget("层级 & 属性", self)
+        # 右侧：层级 / 属性 / 组合素材 / 常用文字 四合一面板
+        self.sidebar_dock = QDockWidget("层级 / 属性 / 素材", self)
         self.sidebar_dock.setObjectName("dock_hierarchy")
+        self.sidebar_dock.setMinimumWidth(280)
         self.sidebar_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self._eye_visible_icon = self._make_eye_icon(True)
         self._eye_hidden_icon = self._make_eye_icon(False)
@@ -12459,18 +13600,19 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs.addTab(self.tree_widget, "层级")
         self.property_panel = self.create_property_panel()
         self.sidebar_tabs.addTab(self.property_panel, "属性")
+
+        # 实例化素材控制器并将「组合素材」和「常用文字」标签页直接放入右侧标签栏（层级和属性后面）
+        self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
+        self.asset_library_dock.setObjectName("dock_assets_Legacy")
+        self.sidebar_tabs.addTab(self.asset_library_dock.group_tab_widget, "组合素材")
+        self.sidebar_tabs.addTab(self.asset_library_dock.text_tab_widget, "常用文字")
+        self.asset_library_dock.hide()  # 隐藏旧独立壳容器，仅保留其控制器逻辑与内部组件
+
         self.sidebar_dock.setWidget(self.sidebar_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar_dock)
         self._tree_item_counter = 0  # 全局编号计数器
         self._tree_updating = False   # 防止 itemChanged 递归触发
         self._tree_nodes_by_item = {}
-        
-        # 左侧：素材库面板
-        self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
-        self.asset_library_dock.setObjectName("dock_assets")
-        self.asset_library_dock.setMinimumWidth(250)  # 设置最小宽度
-        self.asset_library_dock.setMaximumWidth(400)  # 设置最大宽度
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.asset_library_dock)
         
         # 保持对旧版本素材库的引用（用于兼容性）
         self.asset_library = None
@@ -12645,6 +13787,18 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('text_right_edge_snap_enabled', False)
             )
             self.text_right_edge_snap_action.blockSignals(False)
+        if hasattr(self, 'image_top_edge_snap_action'):
+            self.image_top_edge_snap_action.blockSignals(True)
+            self.image_top_edge_snap_action.setChecked(
+                self.scene.config_manager.get('image_top_edge_snap_enabled', False)
+            )
+            self.image_top_edge_snap_action.blockSignals(False)
+        if hasattr(self, 'text_top_edge_snap_action'):
+            self.text_top_edge_snap_action.blockSignals(True)
+            self.text_top_edge_snap_action.setChecked(
+                self.scene.config_manager.get('text_top_edge_snap_enabled', False)
+            )
+            self.text_top_edge_snap_action.blockSignals(False)
         if hasattr(self, 'text_preset_combo'):
             self._refresh_text_preset_combo()
         if hasattr(self, 'btn_avatar_connect'):
@@ -12874,32 +14028,44 @@ class MainWindow(QMainWindow):
         return restored_geometry
 
     def _migrate_navigator_to_bottom_right(self):
-        """将已有用户的导航器布局迁移到右侧底部一次。"""
+        """将工具栏拆分为顶部快捷与排版栏 + 左侧工具箱，并将右侧面板与底部导航器布局迁移到位。"""
         settings = QSettings("VertiLayout", "VertiLayoutPro")
         try:
             layout_version = int(settings.value("navigator_dock_layout_version", 0))
         except (TypeError, ValueError):
             layout_version = 0
-        if layout_version >= 2:
-            return
 
-        def place_navigator():
-            was_visible = self.navigator_dock.isVisible()
-            self.navigator_dock.setFloating(False)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
-            self.splitDockWidget(
-                self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
-            )
-            self.resizeDocks(
-                [self.sidebar_dock, self.navigator_dock],
-                [600, self.navigator.NAV_H + 30],
-                Qt.Orientation.Vertical
-            )
-            self.navigator_dock.setVisible(was_visible)
-            settings.setValue("navigator_dock_layout_version", 2)
+        def enforce_ps_layout():
+            # 始终确保顶部快捷栏在顶部、左侧工具箱在左侧，且旧独立素材dock隐藏
+            if hasattr(self, 'top_toolbar') and self.top_toolbar:
+                self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.top_toolbar)
+                self.top_toolbar.setVisible(True)
+            if hasattr(self, 'main_toolbar') and self.main_toolbar:
+                self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.main_toolbar)
+                self.main_toolbar.setVisible(True)
+            if hasattr(self, 'asset_library_dock') and self.asset_library_dock:
+                self.asset_library_dock.hide()
 
-        # 等窗口状态恢复完成后再调整，避免旧的停靠布局覆盖新位置。
-        QTimer.singleShot(0, place_navigator)
+            if layout_version < 4:
+                was_visible = self.navigator_dock.isVisible()
+                self.sidebar_dock.setFloating(False)
+                self.navigator_dock.setFloating(False)
+                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar_dock)
+                self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
+                self.splitDockWidget(
+                    self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
+                )
+                self.resizeDocks(
+                    [self.sidebar_dock, self.navigator_dock],
+                    [620, self.navigator.NAV_H + 30],
+                    Qt.Orientation.Vertical
+                )
+                self.sidebar_dock.setVisible(True)
+                self.navigator_dock.setVisible(was_visible)
+                settings.setValue("navigator_dock_layout_version", 4)
+
+        # 等窗口状态恢复完成后再调整，确保顶部工具栏与左侧工具箱固定到位
+        QTimer.singleShot(0, enforce_ps_layout)
 
     def closeEvent(self, event):
         """窗口关闭时提示保存，停止定时器，保存窗口状态"""
@@ -12960,7 +14126,7 @@ class MainWindow(QMainWindow):
         )
         text_layout.addRow("字体", self.font_combo)
 
-        self.font_size_spin = QSpinBox()
+        self.font_size_spin = MinimalSpinBox()
         self.font_size_spin.setRange(8, 200)
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
         self.font_size_spin.setValue(default_font_size)
@@ -12982,33 +14148,20 @@ class MainWindow(QMainWindow):
         layout_form.setHorizontalSpacing(8)
         layout_form.setVerticalSpacing(8)
 
-        self.chars_per_column_spin = QSpinBox()
-        self.chars_per_column_spin.setRange(5, 50)
-        self.chars_per_column_spin.setValue(15)
-        self.chars_per_column_spin.setSuffix("字")
-        self.chars_per_column_spin.valueChanged.connect(self.change_chars_per_column)
-        layout_form.addRow("每列字数", self.chars_per_column_spin)
-
-        self.column_spacing_spin = QSpinBox()
+        self.column_spacing_spin = MinimalSpinBox()
         self.column_spacing_spin.setRange(0, 200)
         self.column_spacing_spin.setValue(COLUMN_SPACING)
         self.column_spacing_spin.setSuffix("px")
         self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
         layout_form.addRow("列间距", self.column_spacing_spin)
 
-        self.character_spacing_spin = QSpinBox()
+        self.character_spacing_spin = MinimalSpinBox()
         self.character_spacing_spin.setRange(-200, 200)
         self.character_spacing_spin.setValue(0)
         self.character_spacing_spin.setSuffix("px")
         self.character_spacing_spin.valueChanged.connect(self.change_character_spacing)
         layout_form.addRow("字间距", self.character_spacing_spin)
 
-        self.manual_line_break_btn = QPushButton("手动换行")
-        self.manual_line_break_btn.setCheckable(True)
-        self.manual_line_break_btn.setChecked(True)
-        self.manual_line_break_btn.setProperty("class", "toggle")
-        self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
-        layout_form.addRow("", self.manual_line_break_btn)
         layout.addWidget(layout_group)
 
         preset_group = QGroupBox("文字格式预设")
@@ -13017,26 +14170,35 @@ class MainWindow(QMainWindow):
         preset_layout.setSpacing(8)
 
         self.text_preset_combo = QComboBox()
-        self.text_preset_combo.setToolTip("选择后应用到当前选中的文字")
+        self.text_preset_combo.setToolTip("选择预设后可一键应用到选中的多个文本框，或点击「修改预设...」调整其参数")
         self.text_preset_combo.activated.connect(lambda _index: self.apply_selected_text_preset())
         preset_layout.addWidget(self.text_preset_combo)
 
         preset_actions = QHBoxLayout()
-        apply_preset_btn = QPushButton("应用")
+        apply_preset_btn = QPushButton("应用到选中")
+        apply_preset_btn.setToolTip("将当前所选预设批量应用到画布上选中的一个或多个文本框（支持 Ctrl+Z 撤销）")
         apply_preset_btn.clicked.connect(self.apply_selected_text_preset)
-        add_preset_btn = QPushButton("新增预设")
-        add_preset_btn.clicked.connect(self.add_current_text_format_preset)
+        edit_preset_btn = QPushButton("修改预设...")
+        edit_preset_btn.setToolTip("在原预设基础上直接修改字体、字号、颜色、每列字数、列间距与字间距")
+        edit_preset_btn.clicked.connect(self.edit_selected_text_preset)
         preset_actions.addWidget(apply_preset_btn)
-        preset_actions.addWidget(add_preset_btn)
+        preset_actions.addWidget(edit_preset_btn)
         preset_layout.addLayout(preset_actions)
+
+        manage_actions = QHBoxLayout()
+        add_preset_btn = QPushButton("新增预设")
+        add_preset_btn.setToolTip("将当前选中文字的格式保存为新的预设")
+        add_preset_btn.clicked.connect(self.add_current_text_format_preset)
+        delete_preset_btn = QPushButton("删除预设")
+        delete_preset_btn.clicked.connect(self.delete_selected_text_preset)
+        manage_actions.addWidget(add_preset_btn)
+        manage_actions.addWidget(delete_preset_btn)
+        preset_layout.addLayout(manage_actions)
 
         default_actions = QHBoxLayout()
         set_default_btn = QPushButton("当前格式设为默认")
         set_default_btn.clicked.connect(self.set_current_text_format_as_default)
-        delete_preset_btn = QPushButton("删除预设")
-        delete_preset_btn.clicked.connect(self.delete_selected_text_preset)
         default_actions.addWidget(set_default_btn)
-        default_actions.addWidget(delete_preset_btn)
         preset_layout.addLayout(default_actions)
         layout.addWidget(preset_group)
         self._refresh_text_preset_combo()
@@ -13143,12 +14305,9 @@ class MainWindow(QMainWindow):
         self.text_preset_combo.blockSignals(False)
 
     def _selected_text_format_source(self):
-        selected = [
-            item for item in self.scene.selectedItems()
-            if isinstance(item, VTextItem)
-        ]
+        selected = self._get_target_text_items_for_property()
         if not selected:
-            self.status_bar.showMessage("请先选中一个文字对象", 3000)
+            self.status_bar.showMessage("请先选中一个文字对象（或包含子文字的图片）", 3000)
             return None
         return selected[0]
 
@@ -13201,25 +14360,66 @@ class MainWindow(QMainWindow):
         self._refresh_text_preset_combo(name)
         self.status_bar.showMessage(f"已保存文字预设：{name}", 3000)
 
-    def apply_selected_text_preset(self):
-        name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
+    def edit_selected_text_preset(self):
+        """打开修改文字格式预设对话框，在原有预设数值基础上调整字体、字号、颜色、列间距、字间距等"""
+        presets = self._text_format_presets()
+        if not presets:
+            QMessageBox.information(
+                self, "暂无预设",
+                "当前还没有已保存的文字格式预设。\n请先选中一个文字对象，点击「新增预设」创建预设后再修改。"
+            )
+            return
+        current_name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
+        target_items = self._get_target_text_items_for_property()
+        dlg = TextPresetEditDialog(
+            presets=presets,
+            initial_name=current_name,
+            target_items=target_items,
+            config_manager=self.scene.config_manager if self.scene else None,
+            parent=self
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            updated_presets = dlg.presets
+            selected_name = dlg.selected_preset_name()
+            self._set_shared_config('text_format_presets', updated_presets)
+            self._refresh_text_preset_combo(selected_name)
+            if dlg.should_apply_to_selected() and target_items:
+                preset_obj = next((p for p in updated_presets if p.get('name') == selected_name), None)
+                if preset_obj:
+                    cmd = ApplyTextFormatCommand(self.scene, target_items, preset_obj['format'])
+                    cmd.execute()
+                    self.scene.undo_stack.push(cmd)
+                    self.update_font_controls()
+                    self.status_bar.showMessage(
+                        f"已保存预设“{selected_name}”的修改，并同步应用到 {len(target_items)} 个文本框（可按 Ctrl+Z 撤销）",
+                        4000
+                    )
+                    return
+            self.status_bar.showMessage(f"已保存文字格式预设“{selected_name}”的修改", 3500)
+
+    def apply_text_preset_by_name(self, name, target_items=None):
+        """将指定名称的文字格式预设批量应用到多个文本框（支持直接选中文字或选中父级图片下的子文字，并支持 Ctrl+Z 撤销）"""
         if not name:
             return
         preset = next((preset for preset in self._text_format_presets() if preset['name'] == name), None)
         if preset is None:
             self._refresh_text_preset_combo()
             return
-        selected = [
-            item for item in self.scene.selectedItems()
-            if isinstance(item, VTextItem)
-        ]
+        selected = list(target_items) if target_items is not None else self._get_target_text_items_for_property()
         if not selected:
-            self.status_bar.showMessage("请先选中要应用预设的文字对象", 3000)
+            self.status_bar.showMessage(f"已选择预设“{name}”（可点击「修改预设...」编辑其数值，或先选中文本框再点「应用到选中」）", 3500)
             return
-        for item in selected:
-            self._apply_text_format(item, preset['format'])
+        cmd = ApplyTextFormatCommand(self.scene, selected, preset['format'])
+        cmd.execute()
+        self.scene.undo_stack.push(cmd)
         self.update_font_controls()
-        self.status_bar.showMessage(f"已将预设“{name}”应用到 {len(selected)} 个文字对象", 3000)
+        self.status_bar.showMessage(f"已将预设“{name}”批量应用到 {len(selected)} 个文本框（可按 Ctrl+Z 撤销）", 3500)
+
+    def apply_selected_text_preset(self):
+        name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
+        if not name:
+            return
+        self.apply_text_preset_by_name(name)
 
     def delete_selected_text_preset(self):
         name = self.text_preset_combo.currentData() if hasattr(self, 'text_preset_combo') else None
@@ -13267,6 +14467,11 @@ class MainWindow(QMainWindow):
         btn_undo.setShortcut("Ctrl+Z")
         btn_undo.triggered.connect(self.undo)
         main_toolbar.addAction(btn_undo)
+
+        btn_clear_canvas = QAction("清空画布", self)
+        btn_clear_canvas.setToolTip("清空当前画布上的所有元素（支持 Ctrl+Z 撤销）")
+        btn_clear_canvas.triggered.connect(self.clear_current_canvas)
+        main_toolbar.addAction(btn_clear_canvas)
         
         btn_align_right = QAction("右对齐", self)
         btn_align_right.triggered.connect(self.align_right)
@@ -13309,7 +14514,7 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.font_combo)
         
         main_toolbar.addWidget(QLabel("大小:"))
-        self.font_size_spin = QSpinBox()
+        self.font_size_spin = MinimalSpinBox()
         self.font_size_spin.setRange(8, 200)
         # 从配置加载默认字体大小
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
@@ -13340,7 +14545,7 @@ class MainWindow(QMainWindow):
         
         # === 竖排布局设置 ===
         main_toolbar.addWidget(QLabel("每列字数:"))
-        self.chars_per_column_spin = QSpinBox()
+        self.chars_per_column_spin = MinimalSpinBox()
         self.chars_per_column_spin.setRange(5, 50)
         self.chars_per_column_spin.setValue(15)
         self.chars_per_column_spin.setSuffix("字")
@@ -13348,7 +14553,7 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.chars_per_column_spin)
         
         main_toolbar.addWidget(QLabel("列间距:"))
-        self.column_spacing_spin = QSpinBox()
+        self.column_spacing_spin = MinimalSpinBox()
         self.column_spacing_spin.setRange(0, 200)
         self.column_spacing_spin.setValue(COLUMN_SPACING)
         self.column_spacing_spin.setSuffix("px")
@@ -13356,7 +14561,7 @@ class MainWindow(QMainWindow):
         main_toolbar.addWidget(self.column_spacing_spin)
 
         main_toolbar.addWidget(QLabel("字间距:"))
-        self.character_spacing_spin = QSpinBox()
+        self.character_spacing_spin = MinimalSpinBox()
         self.character_spacing_spin.setRange(-200, 200)
         self.character_spacing_spin.setValue(0)
         self.character_spacing_spin.setSuffix("px")
@@ -13428,14 +14633,119 @@ class MainWindow(QMainWindow):
         return action
 
     def create_toolbars(self):
-        main_toolbar = QToolBar("主要操作")
+        # ══════════════════════════════════════════════════════════════════
+        # 1. 顶部快捷与排版工具栏（放置全局操作、对齐排布、常驻约束开关与数值参数）
+        # ══════════════════════════════════════════════════════════════════
+        top_toolbar = QToolBar("顶部快捷与排版栏")
+        top_toolbar.setObjectName("toolbar_top")
+        top_toolbar.setMovable(False)
+        top_toolbar.setFloatable(False)
+        top_toolbar.setAllowedAreas(Qt.ToolBarArea.TopToolBarArea)
+        top_toolbar.setOrientation(Qt.Orientation.Horizontal)
+        top_toolbar.setIconSize(QSize(16, 16))
+        top_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.top_toolbar = top_toolbar
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, top_toolbar)
+
+        # [顶部组1] 历史与画布操作（防误触隔离）
+        self._add_toolbar_action(top_toolbar, "↩撤销", self.undo, "撤销上一步操作 (Ctrl+Z)", "Ctrl+Z")
+        self._add_toolbar_action(
+            top_toolbar,
+            "🗑清空",
+            self.clear_current_canvas,
+            "清空当前画布上的所有内容（支持 Ctrl+Z 撤销）"
+        )
+
+        # [顶部组2] 对齐与基准模式组（横向展开，符合视线直觉）
+        top_toolbar.addSeparator()
+        align_toolbar_menu = QMenu(self)
+        align_toolbar_menu.addAction("顶部对齐", self.align_top)
+        align_toolbar_menu.addAction("右对齐", self.align_right)
+        align_toolbar_menu.addAction("水平居中对齐", self.align_center_horizontal)
+        align_toolbar_menu.addAction("垂直居中对齐", self.align_center_vertical)
+        align_toolbar_menu.addSeparator()
+        align_toolbar_menu.addAction("切换对齐基准模式 (Alt+A)", self.cycle_align_mode)
+        align_btn = QToolButton()
+        align_btn.setText("📐对齐 ▾")
+        align_btn.setMenu(align_toolbar_menu)
+        align_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        align_btn.setToolTip("多选对象对齐（顶部 / 右边缘 / 水平居中 / 垂直居中）")
+        align_act = top_toolbar.addWidget(align_btn)
+        align_act.setText("对齐")
+        align_act.setMenu(align_toolbar_menu)
+
+        self._add_toolbar_action(top_toolbar, "⤒顶对齐", self.align_top, "按顶部边缘对齐选中对象")
+        self._add_toolbar_action(top_toolbar, "⇥右对齐", self.align_right, "按右边缘对齐选中对象")
+        self.btn_align_mode = self._add_toolbar_action(
+            top_toolbar,
+            "🎯基准:首",
+            self.on_align_mode_button_toggled,
+            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
+            checkable=True
+        )
+
+        # [顶部组3] 全局移动与视图约束开关（像仪表盘指示灯一样一目了然）
+        top_toolbar.addSeparator()
+        self.btn_horizontal_move = self._add_toolbar_action(
+            top_toolbar,
+            "🔒横移",
+            lambda checked: self.toggle_horizontal_move_only(checked),
+            "锁定垂直移动，只允许水平方向移动选中对象 (Ctrl+H)",
+            checkable=True
+        )
+        self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+
+        self.btn_select_parent = self._add_toolbar_action(
+            top_toolbar,
+            "🔗选父",
+            self.toggle_select_child_selects_parent,
+            "开启后，点击或框选集合中的子集（如图片下方的子文字）会自动选中并整体移动其父级 (Alt+G)；双击文字仍可直接编辑",
+            checkable=True
+        )
+        self.btn_select_parent.blockSignals(True)
+        self.btn_select_parent.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
+        self.btn_select_parent.blockSignals(False)
+
+        self.btn_show_cp = self._add_toolbar_action(
+            top_toolbar,
+            "👁连接点",
+            self.set_all_connection_points_visible,
+            "一键显示/隐藏画布上所有连接点 (Alt+P) — 隐藏连接点后不影响点图片连线、Shift接龙与智能连接",
+            checkable=True
+        )
+        self.btn_show_cp.blockSignals(True)
+        self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
+        self.btn_show_cp.blockSignals(False)
+
+        # [顶部组4] 工具参数微调区（数值输入框放在横向工具栏更自然）
+        top_toolbar.addSeparator()
+        brush_lbl = QLabel(" 🖌笔刷半径:")
+        brush_lbl.setObjectName("toolbarHint")
+        top_toolbar.addWidget(brush_lbl)
+        self.smart_brush_size_spin = MinimalSpinBox()
+        self.smart_brush_size_spin.setRange(4, 120)
+        self.smart_brush_size_spin.setValue(self.view._smart_brush_radius)
+        self.smart_brush_size_spin.setSuffix("px")
+        self.smart_brush_size_spin.setFixedWidth(78)
+        self.smart_brush_size_spin.setToolTip("智能笔刷半径大小（快捷键 [ 缩小 / ] 放大）")
+        self.smart_brush_size_spin.valueChanged.connect(self.view.set_smart_brush_radius)
+        top_toolbar.addWidget(self.smart_brush_size_spin)
+
+        # ══════════════════════════════════════════════════════════════════
+        # 2. 左侧画布工具箱（仅保留高频创建、选区变形与族谱连线工具，手不离画布）
+        # ══════════════════════════════════════════════════════════════════
+        main_toolbar = QToolBar("左侧工具箱")
         main_toolbar.setObjectName("toolbar_main")
         main_toolbar.setMovable(False)
-        main_toolbar.setIconSize(QSize(18, 18))
+        main_toolbar.setFloatable(False)
+        main_toolbar.setAllowedAreas(Qt.ToolBarArea.LeftToolBarArea | Qt.ToolBarArea.RightToolBarArea)
+        main_toolbar.setOrientation(Qt.Orientation.Vertical)
+        main_toolbar.setIconSize(QSize(16, 16))
         main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
+        self.main_toolbar = main_toolbar
+        self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, main_toolbar)
 
-        # 1. 插入与拆分下拉组
+        # [左侧组1] 插入与拆分下拉组
         insert_menu = QMenu(self)
         insert_menu.addAction("添加竖排文本 (Ctrl+T)", self.add_text)
         insert_menu.addAction("插入图片... (Ctrl+Shift+I)", self.add_image)
@@ -13445,123 +14755,78 @@ class MainWindow(QMainWindow):
         insert_menu.addAction("按默认符号直接拆分 (Alt+X)", self.split_selected_text_by_default_symbol)
         insert_menu.addAction("按指定符号拆分文字... (Ctrl+Shift+X)", self.split_selected_text_by_symbol)
         insert_menu.addAction("设置默认拆分符号...", self.set_default_split_symbol)
-        
+
         insert_btn = QToolButton()
-        insert_btn.setText("插入 ▼")
+        insert_btn.setText("➕插入 ▾")
+        insert_btn.setFixedWidth(76)
         insert_btn.setMenu(insert_menu)
         insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         insert_btn.setToolTip("添加文本、插入图片、导入 Excel 与拆分文字")
-        main_toolbar.addWidget(insert_btn)
+        insert_act = main_toolbar.addWidget(insert_btn)
+        insert_act.setText("插入")
+        insert_act.setMenu(insert_menu)
 
+        # [左侧组2] 画布选区与变形工具
         main_toolbar.addSeparator()
-        self._add_toolbar_action(main_toolbar, "撤销", self.undo, "撤销上一步操作", "Ctrl+Z")
-        
-        # 2. 移动与选区模式组
-        self.btn_horizontal_move = self._add_toolbar_action(
-            main_toolbar,
-            "🔒水平移动",
-            lambda checked: self.toggle_horizontal_move_only(checked),
-            "锁定垂直移动，只允许水平方向移动选中对象 (Ctrl+H)",
-            checkable=True
-        )
-        self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
-
-        self.btn_select_parent = self._add_toolbar_action(
-            main_toolbar,
-            "🔗选子即选父",
-            self.toggle_select_child_selects_parent,
-            "开启后，点击或框选集合中的子集（如图片下方的子文字）会自动选中并整体移动其父级 (Alt+G)；双击文字仍可直接编辑",
-            checkable=True
-        )
-        self.btn_select_parent.blockSignals(True)
-        self.btn_select_parent.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
-        self.btn_select_parent.blockSignals(False)
-
         self.btn_marquee_mode = self._add_toolbar_action(
             main_toolbar,
-            "框选: 仅图片",
+            "▭仅图片",
             self.on_marquee_button_toggled,
             "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
             checkable=True
         )
-
+        self.btn_smart_brush = self._add_toolbar_action(
+            main_toolbar,
+            "🖌笔刷",
+            self.toggle_smart_brush,
+            "智能笔刷 (快捷键 B)：涂抹对象加入选区；按住 Alt 涂抹从选区中减去",
+            None,
+            checkable=True
+        )
         self.btn_resize = self._add_toolbar_action(
             main_toolbar,
-            "调整图片",
+            "⤢调图片",
             self.toggle_resize_mode,
             "选中图片后显示缩放控制点",
             checkable=True
         )
-        self.btn_smart_brush = self._add_toolbar_action(
-            main_toolbar,
-            "智能笔刷",
-            self.toggle_smart_brush,
-            "涂抹对象加入选区；按住 Alt 涂抹从选区中减去",
-            None,
-            checkable=True
-        )
-        main_toolbar.addWidget(QLabel("笔刷:"))
-        self.smart_brush_size_spin = QSpinBox()
-        self.smart_brush_size_spin.setRange(4, 120)
-        self.smart_brush_size_spin.setValue(self.view._smart_brush_radius)
-        self.smart_brush_size_spin.setSuffix("px")
-        self.smart_brush_size_spin.setFixedWidth(72)
-        self.smart_brush_size_spin.setToolTip("智能笔刷大小（快捷键 [ / ]）")
-        self.smart_brush_size_spin.valueChanged.connect(self.view.set_smart_brush_radius)
-        main_toolbar.addWidget(self.smart_brush_size_spin)
 
-        # 3. 对齐与基准模式组（收纳 4 种对齐方式 + 基准一键切换）
-        main_toolbar.addSeparator()
-        align_toolbar_menu = QMenu(self)
-        align_toolbar_menu.addAction("顶部对齐", self.align_top)
-        align_toolbar_menu.addAction("右对齐", self.align_right)
-        align_toolbar_menu.addAction("水平居中对齐", self.align_center_horizontal)
-        align_toolbar_menu.addAction("垂直居中对齐", self.align_center_vertical)
-        align_toolbar_menu.addSeparator()
-        align_toolbar_menu.addAction("切换对齐基准模式 (Alt+A)", self.cycle_align_mode)
-        align_btn = QToolButton()
-        align_btn.setText("对齐 ▼")
-        align_btn.setMenu(align_toolbar_menu)
-        align_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        align_btn.setToolTip("多选对象对齐（顶部 / 右边缘 / 水平居中 / 垂直居中）")
-        main_toolbar.addWidget(align_btn)
-
-        self._add_toolbar_action(main_toolbar, "顶部对齐", self.align_top, "按顶部边缘对齐选中对象")
-        self._add_toolbar_action(main_toolbar, "右对齐", self.align_right, "按右边缘对齐选中对象")
-        self.btn_align_mode = self._add_toolbar_action(
-            main_toolbar,
-            "对齐: 首选对象",
-            self.on_align_mode_button_toggled,
-            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
-            checkable=True
-        )
-
-        # 4. 连线与连接点组
+        # [左侧组3] 族谱连线核心工具
         main_toolbar.addSeparator()
         self.btn_avatar_connect = self._add_toolbar_action(
             main_toolbar,
-            "点图片连线",
+            "⚡点图连",
             self.toggle_avatar_connect_mode,
             "开启后直接点击人物头像即可连续接龙连线，自动按横向(a↔a)/纵向(b→a)选点（右键/点空白断开当前链条，按住Ctrl固定起点一对多）",
             checkable=True
         )
-        self._add_toolbar_action(main_toolbar, "垂直连接", lambda: self.scene.group_chain_connect(), "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
         self._add_toolbar_action(
             main_toolbar,
-            "水平连接",
+            "↕垂连",
+            lambda: self.scene.group_chain_connect(),
+            "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点"
+        )
+        self._add_toolbar_action(
+            main_toolbar,
+            "↔平连",
             lambda: self.scene.connect_image_points_right_to_left(),
             "按从右到左顺序连接选中图片的连接点"
         )
-        self.btn_show_cp = self._add_toolbar_action(
-            main_toolbar,
-            "👁连接点",
-            self.set_all_connection_points_visible,
-            "一键显示/隐藏画布上所有连接点 (Alt+P) — 隐藏连接点后不影响点图片连线、Shift接龙与智能连接",
-            checkable=True
-        )
-        self.btn_show_cp.blockSignals(True)
-        self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
-        self.btn_show_cp.blockSignals(False)
+
+        # 统一设置左侧工具箱所有动作按钮宽度为 76px，呈整齐紧凑的 PS 工具箱列
+        for act in main_toolbar.actions():
+            w = main_toolbar.widgetForAction(act)
+            if isinstance(w, QToolButton):
+                w.setFixedWidth(76)
+
+        # 修复工具栏溢出折叠按钮（qt_toolbar_ext_button）：显示清晰的 "▾" 符号与提示
+        for tb in (top_toolbar, main_toolbar):
+            ext_btn = tb.findChild(QToolButton, "qt_toolbar_ext_button")
+            if ext_btn is not None:
+                ext_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+                ext_btn.setText("▾")
+                ext_btn.setToolTip("展开更多工具栏按钮")
+                ext_btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def create_menu_bar(self):
         """构建顶部级联菜单栏：遵循「用户思维分类、视觉减负（每层5~8项）、搜索优先」三大原则"""
@@ -13637,6 +14902,11 @@ class MainWindow(QMainWindow):
         close_document_action.setShortcut('Ctrl+W')
         close_document_action.triggered.connect(self.close_document)
         doc_print_submenu.addAction(close_document_action)
+
+        clear_canvas_doc_action = QAction('清空当前画布...', self)
+        clear_canvas_doc_action.setShortcut('Ctrl+Shift+Delete')
+        clear_canvas_doc_action.triggered.connect(self.clear_current_canvas)
+        doc_print_submenu.addAction(clear_canvas_doc_action)
 
         doc_print_submenu.addSeparator()
 
@@ -13728,6 +14998,10 @@ class MainWindow(QMainWindow):
         add_text_preset_action = QAction('将选中文字格式新增为预设...', self)
         add_text_preset_action.triggered.connect(self.add_current_text_format_preset)
         text_submenu.addAction(add_text_preset_action)
+
+        edit_text_preset_action = QAction('修改已有文字格式预设...', self)
+        edit_text_preset_action.triggered.connect(self.edit_selected_text_preset)
+        text_submenu.addAction(edit_text_preset_action)
 
         eye_role_from_selection_menu = text_submenu.addMenu('设置选中文字眼睛颜色')
         for color_key, color_label in [
@@ -13913,6 +15187,14 @@ class MainWindow(QMainWindow):
         self.image_top_edge_snap_action.toggled.connect(self.toggle_image_top_edge_snap)
         snap_submenu.addAction(self.image_top_edge_snap_action)
 
+        self.text_top_edge_snap_action = QAction('文字顶部 Y 自动吸附', self)
+        self.text_top_edge_snap_action.setCheckable(True)
+        self.text_top_edge_snap_action.setChecked(
+            self.scene.config_manager.get('text_top_edge_snap_enabled', False)
+        )
+        self.text_top_edge_snap_action.toggled.connect(self.toggle_text_top_edge_snap)
+        snap_submenu.addAction(self.text_top_edge_snap_action)
+
         snap_submenu.addSeparator()
         snap_threshold_action = QAction('设置吸附触发距离...', self)
         snap_threshold_action.triggered.connect(self.set_snap_threshold)
@@ -14084,6 +15366,10 @@ class MainWindow(QMainWindow):
         canvas_size_action.triggered.connect(self.set_canvas_size)
         canvas_bg_submenu.addAction(canvas_size_action)
 
+        clear_canvas_view_action = QAction('清空当前画布...', self)
+        clear_canvas_view_action.triggered.connect(self.clear_current_canvas)
+        canvas_bg_submenu.addAction(clear_canvas_view_action)
+
         canvas_bg_submenu.addSeparator()
         set_background_action = QAction('设置默认背景图片...', self)
         set_background_action.triggered.connect(self.set_background_image)
@@ -14241,6 +15527,16 @@ class MainWindow(QMainWindow):
             else:
                 self.status_bar.showMessage('已关闭：图片顶部Y自动吸附', 3000)
 
+    def toggle_text_top_edge_snap(self, enabled):
+        """切换移动文字时的顶部Y吸附。"""
+        for document in self._documents:
+            document.scene.config_manager.set('text_top_edge_snap_enabled', enabled)
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：文字顶部Y自动吸附（阈值20px）', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：文字顶部Y自动吸附', 3000)
+
     def on_marquee_button_toggled(self, checked):
         """工具栏框选按钮切换：未按下=仅图片（默认），按下=全选"""
         self.set_marquee_mode('all' if checked else 'images')
@@ -14297,7 +15593,7 @@ class MainWindow(QMainWindow):
             is_all = (current == 'all')
             self.btn_marquee_mode.blockSignals(True)
             self.btn_marquee_mode.setChecked(is_all)
-            self.btn_marquee_mode.setText("框选: 全选" if is_all else "框选: 仅图片")
+            self.btn_marquee_mode.setText("▭全选" if is_all else "▭仅图片")
             self.btn_marquee_mode.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             idx = self.marquee_mode_combo.findData(current)
@@ -14356,7 +15652,7 @@ class MainWindow(QMainWindow):
             is_pick = (current == 'pick_reference')
             self.btn_align_mode.blockSignals(True)
             self.btn_align_mode.setChecked(is_pick)
-            self.btn_align_mode.setText("对齐: 点选指定" if is_pick else "对齐: 首选对象")
+            self.btn_align_mode.setText("🎯点选" if is_pick else "🎯基准:首")
             self.btn_align_mode.blockSignals(False)
 
     def toggle_insert_image_to_bottom(self, enabled):
@@ -14498,7 +15794,7 @@ class MainWindow(QMainWindow):
     def set_nudge_large_step(self):
         """设置Shift+方向键大步长"""
         current = self.scene.config_manager.get('nudge_large_step', 10)
-        val, ok = QInputDialog.getInt(self, "Shift+方向键步长", "步长（像素）:", current, 1, 1000)
+        val, ok = MinimalInputDialog.getInt(self, "Shift+方向键步长", "步长（像素）:", current, 1, 1000)
         if ok:
             self.scene.config_manager.set('nudge_large_step', val)
             self.status_bar.showMessage(f'Shift+方向键步长已设置为 {val}px', 3000)
@@ -14506,7 +15802,7 @@ class MainWindow(QMainWindow):
     def set_default_brush_size(self):
         """设置智能笔刷默认大小"""
         current = self.scene.config_manager.get('smart_brush_radius', 18)
-        val, ok = QInputDialog.getInt(self, "笔刷默认大小", "笔刷半径（像素）:", current, 4, 120)
+        val, ok = MinimalInputDialog.getInt(self, "笔刷默认大小", "笔刷半径（像素）:", current, 4, 120)
         if ok:
             self.scene.config_manager.set('smart_brush_radius', val)
             self.view._smart_brush_radius = val
@@ -14538,6 +15834,7 @@ class MainWindow(QMainWindow):
             menu.addAction("❌ 取消编辑组合", self.cancel_edit_group_asset)
             menu.addSeparator()
         menu.addAction("显示所有隐藏图片", self.show_all_hidden_images)
+        menu.addAction("🗑 清空当前画布...", self.clear_current_canvas)
         menu.addSeparator()
         menu.addAction("打开工程\tCtrl+O", self.load_proj)
         menu.addAction("保存工程\tCtrl+S", self.save_proj)
@@ -14773,9 +16070,102 @@ class MainWindow(QMainWindow):
     
     def undo(self):
         self.scene.undo()
+        self.refresh_ui()
+        if hasattr(self, 'navigator'):
+            self.navigator.force_refresh()
     
     def redo(self):
         self.scene.redo()
+        self.refresh_ui()
+        if hasattr(self, 'navigator'):
+            self.navigator.force_refresh()
+
+    def clear_current_canvas(self):
+        """清空当前画布上的所有元素（带确认弹窗，支持保留锁定图片/清除辅助线选项，支持 Ctrl+Z 撤销）"""
+        if not self.scene:
+            return
+
+        # 若处于图片管理模式，先退出以恢复正常状态
+        if getattr(self.scene, 'image_manage_mode', False):
+            self.scene.toggle_image_manage_mode()
+
+        all_elements = [item for item in self.scene.items() if isinstance(item, BaseElement)]
+        connectors = list(self.scene.connectors)
+        image_text_connectors = list(self.scene.image_text_connectors)
+        free_points = [
+            pt for pt in getattr(self.scene, 'free_connection_points', [])
+            if pt.scene() is self.scene
+        ]
+        guides = list(self.scene.guides)
+
+        if not all_elements and not connectors and not image_text_connectors and not free_points:
+            if guides:
+                reply = QMessageBox.question(
+                    self,
+                    "清空当前画布",
+                    f"当前画布上没有图文元素，但包含 {len(guides)} 条辅助线。\n是否清除这些辅助线？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.scene.clear_canvas_with_undo(clear_guides=True)
+                    self.refresh_ui()
+                    if hasattr(self, 'navigator'):
+                        self.navigator.force_refresh()
+                    self.status_bar.showMessage("已清除当前画布上的所有辅助线（可按 Ctrl+Z 撤销）", 3500)
+                return
+            self.status_bar.showMessage("当前画布已经是空的", 3000)
+            QMessageBox.information(self, "提示", "当前画布已经是空的。")
+            return
+
+        text_count = sum(1 for item in all_elements if isinstance(item, VTextItem))
+        image_count = sum(1 for item in all_elements if isinstance(item, VImageItem))
+        locked_images = [
+            item for item in all_elements
+            if isinstance(item, VImageItem) and getattr(item, 'locked', False)
+        ]
+        conn_count = len(image_text_connectors)
+
+        current_doc_name = "当前画布"
+        if hasattr(self, 'document_tabs') and hasattr(self, '_documents'):
+            idx = self.document_tabs.currentIndex()
+            if 0 <= idx < len(self._documents):
+                current_doc_name = f"「{self._documents[idx].name}」"
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("确认清空当前画布")
+        msg_box.setText(
+            f"确定要清空{current_doc_name}上的所有内容吗？\n\n"
+            f"当前包含：{text_count} 个文字、{image_count} 张图片、{conn_count} 条连线。\n"
+            f"（清空后可随时按 Ctrl+Z 撤销恢复）"
+        )
+        btn_clear = msg_box.addButton("清空画布", QMessageBox.ButtonRole.AcceptRole)
+        btn_cancel = msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        msg_box.setDefaultButton(btn_cancel)
+
+        chk_keep_locked = None
+        if locked_images:
+            chk_keep_locked = QCheckBox(f"保留已锁定的图片（共 {len(locked_images)} 张，如底图）", msg_box)
+            chk_keep_locked.setChecked(False)
+            msg_box.setCheckBox(chk_keep_locked)
+
+        msg_box.exec()
+        if msg_box.clickedButton() != btn_clear:
+            return
+
+        keep_locked = bool(chk_keep_locked and chk_keep_locked.isChecked())
+        cleared = self.scene.clear_canvas_with_undo(
+            keep_locked_images=keep_locked,
+            clear_guides=False
+        )
+        self.refresh_ui()
+        if hasattr(self, 'navigator'):
+            self.navigator.force_refresh()
+        if cleared:
+            self.status_bar.showMessage(f"已清空{current_doc_name}（按 Ctrl+Z 可撤销恢复）", 4000)
+        else:
+            self.status_bar.showMessage("没有需要清空的元素", 3000)
     
     def align_top(self):
         self.scene.align_top()
@@ -14876,13 +16266,13 @@ class MainWindow(QMainWindow):
         self.set_all_connection_points_visible(not self.scene.show_connection_points)
     
     def open_asset_library(self):
-        """切换素材库面板的显示/隐藏"""
-        if self.asset_library_dock.isVisible():
-            self.asset_library_dock.hide()
-        else:
-            self.asset_library_dock.show()
-            # 刷新素材库内容
-            self.asset_library_dock.refresh_assets()
+        """打开并切换到右侧面板中的「组合素材」标签页 (F9)"""
+        if not self.sidebar_dock.isVisible():
+            self.sidebar_dock.show()
+        self.asset_library_dock.refresh_assets()
+        idx = self.sidebar_tabs.indexOf(self.asset_library_dock.group_tab_widget)
+        if idx >= 0:
+            self.sidebar_tabs.setCurrentIndex(idx)
 
     def set_navigator_visible(self, visible):
         """响应“视图 → 显示导航器”菜单。"""
@@ -14940,6 +16330,7 @@ class MainWindow(QMainWindow):
         'Excel': '表格 批量导入 映射 世系表 数据表 xlsx',
         '导出': '保存图片 另存 pdf svg coreldraw cdr png',
         '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
+        '清空': '清空当前画布 清空画布 清除全部 删除全部 重置画布 清屏 clean clear ctrl+shift+delete',
     }
 
     def _setup_command_palette(self):
@@ -15090,6 +16481,7 @@ class MainWindow(QMainWindow):
                     walk_menu(top_menu, top_title)
 
         for tb in self.findChildren(QToolBar):
+            tb_category = '顶部快捷栏' if tb.objectName() == 'toolbar_top' else '左侧工具箱'
             for act in tb.actions():
                 if act.isSeparator() or not act.isVisible() or act in seen_actions:
                     continue
@@ -15102,10 +16494,10 @@ class MainWindow(QMainWindow):
                 results.append({
                     'action': act,
                     'title': clean_title,
-                    'category': '顶部工具栏',
+                    'category': tb_category,
                     'shortcut': shortcut_str,
                     'tooltip': tip_str,
-                    'synonyms': enrich_synonyms(clean_title, '顶部工具栏', tip_str),
+                    'synonyms': enrich_synonyms(clean_title, tb_category, tip_str),
                 })
 
         return results
@@ -15971,25 +17363,19 @@ class MainWindow(QMainWindow):
                 item = selected_items[0]
                 self.font_combo.blockSignals(True)
                 self.font_size_spin.blockSignals(True)
-                self.chars_per_column_spin.blockSignals(True)
                 self.column_spacing_spin.blockSignals(True)
                 self.character_spacing_spin.blockSignals(True)
-                self.manual_line_break_btn.blockSignals(True)
 
                 self.font_combo.setCurrentText(item.font_family)
                 self.font_size_spin.setValue(item.font_size)
-                self.chars_per_column_spin.setValue(item.chars_per_column)
                 self.column_spacing_spin.setValue(item.column_spacing)
                 self.character_spacing_spin.setValue(item.character_spacing)
-                self.manual_line_break_btn.setChecked(item.manual_line_break)
                 self._set_color_button_color(item.text_color)
                 
                 self.font_combo.blockSignals(False)
                 self.font_size_spin.blockSignals(False)
-                self.chars_per_column_spin.blockSignals(False)
                 self.column_spacing_spin.blockSignals(False)
                 self.character_spacing_spin.blockSignals(False)
-                self.manual_line_break_btn.blockSignals(False)
         except (RuntimeError, AttributeError):
             # 处理 C++ 对象已被删除的情况
             pass
@@ -16074,7 +17460,7 @@ class MainWindow(QMainWindow):
     def set_line_width(self):
         """设置连线粗细，同时更新默认值和所有现有连线"""
         current = self.scene.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)
-        width, ok = QInputDialog.getInt(self, "设置连线粗细", "连线粗细 (像素):", current, 1, 20)
+        width, ok = MinimalInputDialog.getInt(self, "设置连线粗细", "连线粗细 (像素):", current, 1, 20)
         if not ok:
             return
         self.scene.config_manager.set('default_line_width', width)
@@ -16087,8 +17473,8 @@ class MainWindow(QMainWindow):
     
     def set_canvas_size(self):
         current_rect = self.scene.sceneRect()
-        w, ok1 = QInputDialog.getInt(self, "画布宽度", "宽度:", int(current_rect.width()), 100, 10000)
-        h, ok2 = QInputDialog.getInt(self, "画布高度", "高度:", int(current_rect.height()), 100, 10000)
+        w, ok1 = MinimalInputDialog.getInt(self, "画布宽度", "宽度:", int(current_rect.width()), 100, 10000)
+        h, ok2 = MinimalInputDialog.getInt(self, "画布高度", "高度:", int(current_rect.height()), 100, 10000)
         if ok1 and ok2: self.scene.setSceneRect(0, 0, w, h)
 
     def _make_eye_icon(self, visible, color=None):
@@ -16867,7 +18253,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"项目已保存: {self._current_project_path}", 2000)
 
         # 第三步：指定第一个文档的页码，后续文档自动递增
-        first_page, ok = QInputDialog.getInt(
+        first_page, ok = MinimalInputDialog.getInt(
             self,
             "批量导出 PDF",
             "请输入第一个文档的页码：",
@@ -17052,7 +18438,7 @@ class MainWindow(QMainWindow):
 
     def set_snap_threshold(self):
         """设置辅助线吸附距离"""
-        val, ok = QInputDialog.getInt(
+        val, ok = MinimalInputDialog.getInt(
             self, "吸附距离", "吸附距离（场景像素）:",
             self.scene.snap_threshold, 1, 200
         )
@@ -17064,7 +18450,7 @@ class MainWindow(QMainWindow):
     def set_background_opacity(self):
         """设置背景透明度"""
         current_opacity = self.scene.config_manager.get('background_opacity', 0.3)
-        opacity, ok = QInputDialog.getDouble(
+        opacity, ok = MinimalInputDialog.getDouble(
             self,
             "设置背景透明度",
             "透明度 (0.0-1.0):",
@@ -17145,13 +18531,13 @@ class MainWindow(QMainWindow):
         chk_enable.setChecked(use_custom)
         layout.addRow(chk_enable)
 
-        spin_w = QSpinBox()
+        spin_w = MinimalSpinBox()
         spin_w.setRange(1, 20000)
         spin_w.setValue(cur_w if cur_w else canvas_w)
         spin_w.setSuffix(" px")
         layout.addRow(f"宽度（画布宽={canvas_w}px）:", spin_w)
 
-        spin_h = QSpinBox()
+        spin_h = MinimalSpinBox()
         spin_h.setRange(0, 20000)
         spin_h.setValue(cur_h if cur_h else canvas_h)
         spin_h.setSuffix(" px")
@@ -17225,11 +18611,13 @@ class MainWindow(QMainWindow):
             padding-right: 0px;
         }
 
-        QToolBar#toolbar_main QComboBox,
-        QToolBar#toolbar_main QSpinBox {
+        QToolBar#toolbar_main QComboBox {
             min-height: 22px;
             padding: 2px 6px;
             font-size: 12px;
+        }
+        QToolBar#toolbar_main QFrame#minimalSpinContainer {
+            min-height: 24px;
         }
         
         /* 按钮基础样式 - Fluent Design */
@@ -17380,7 +18768,7 @@ class MainWindow(QMainWindow):
         }
         
         /* 输入框样式 */
-        QSpinBox, QLineEdit, QTextEdit {
+        QLineEdit, QTextEdit {
             background: rgba(255, 255, 255, 0.9);
             border: 1px solid rgba(0, 0, 0, 0.2);
             border-radius: 4px;
@@ -17388,7 +18776,7 @@ class MainWindow(QMainWindow):
             color: #323130;
         }
         
-        QSpinBox:focus, QLineEdit:focus, QTextEdit:focus {
+        QLineEdit:focus, QTextEdit:focus {
             border: 2px solid rgba(0, 120, 215, 0.8);
         }
         
@@ -17505,18 +18893,45 @@ class MainWindow(QMainWindow):
             background-color: #f6f8fa;
         }
 
-        QToolBar {
+        QToolBar#toolbar_top {
             background: #ffffff;
             border: none;
             border-bottom: 1px solid #d8dee4;
             spacing: 6px;
-            padding: 6px 8px;
+            padding: 4px 10px;
         }
 
-        QToolBar::separator {
+        QToolBar#toolbar_top::separator {
             background-color: #d0d7de;
             width: 1px;
-            margin: 5px 4px;
+            height: 20px;
+            margin: 3px 6px;
+        }
+
+        QToolBar#toolbar_main {
+            background: #ffffff;
+            border: none;
+            border-right: 1px solid #d8dee4;
+            spacing: 5px;
+            padding: 6px 5px;
+        }
+
+        QToolBar#toolbar_main::separator {
+            background-color: #d0d7de;
+            height: 1px;
+            width: 64px;
+            margin: 4px 6px;
+        }
+
+        QToolBar#toolbar_top QToolButton {
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 5px;
+            color: #24292f;
+            padding: 3px 10px;
+            min-height: 24px;
+            font-size: 12px;
+            font-weight: 500;
         }
 
         QToolBar#toolbar_main QToolButton {
@@ -17524,17 +18939,41 @@ class MainWindow(QMainWindow):
             border: 1px solid #d0d7de;
             border-radius: 5px;
             color: #24292f;
-            padding: 5px 11px;
-            min-height: 24px;
+            padding: 4px 4px;
+            min-height: 25px;
             font-size: 12px;
             font-weight: 500;
         }
 
+        QTabWidget#sidebar_tabs QTabBar::tab {
+            padding: 7px 9px;
+            font-size: 12px;
+        }
+
+        QToolBar#toolbar_main QToolButton#qt_toolbar_ext_button {
+            background: #eef6ff;
+            border: 1px solid #69b1ff;
+            border-radius: 5px;
+            color: #0969da;
+            padding: 0px 2px;
+            min-width: 18px;
+            font-size: 15px;
+            font-weight: bold;
+        }
+
+        QToolBar#toolbar_main QToolButton#qt_toolbar_ext_button:hover {
+            background: #d0e8ff;
+            border-color: #0969da;
+        }
+
+        QToolBar#toolbar_top QToolButton:hover,
         QToolBar#toolbar_main QToolButton:hover {
             background: #f6f8fa;
             border-color: #0969da;
         }
 
+        QToolBar#toolbar_top QToolButton:pressed,
+        QToolBar#toolbar_top QToolButton:checked,
         QToolBar#toolbar_main QToolButton:pressed,
         QToolBar#toolbar_main QToolButton:checked {
             background: #0969da;
@@ -17685,7 +19124,7 @@ class MainWindow(QMainWindow):
             padding: 8px;
         }
 
-        QSpinBox, QLineEdit, QTextEdit, QComboBox {
+        QLineEdit, QTextEdit, QComboBox {
             background: #ffffff;
             border: 1px solid #d0d7de;
             border-radius: 5px;
@@ -17694,8 +19133,62 @@ class MainWindow(QMainWindow):
             min-height: 22px;
         }
 
-        QSpinBox:focus, QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
+        QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
             border: 1px solid #0969da;
+        }
+
+        /* 极简数值输入框全局样式（MinimalSpinBox / MinimalDoubleSpinBox） */
+        QFrame#minimalSpinContainer {
+            background-color: #f4f6f8;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            min-height: 26px;
+        }
+        QFrame#minimalSpinContainer:hover {
+            background-color: #f8f9fb;
+            border: 1px solid #d0d5dd;
+        }
+        QFrame#minimalSpinContainer[focused="true"] {
+            background-color: #ffffff;
+            border: 1px solid #69b1ff;
+        }
+        QFrame#minimalSpinContainer:disabled {
+            background-color: #eff1f4;
+            border: 1px solid transparent;
+        }
+        QAbstractSpinBox#minimalInnerSpin {
+            background: transparent;
+            border: none;
+            padding: 2px 2px 2px 6px;
+            margin: 0px;
+            min-height: 20px;
+            color: #1f2328;
+            font-size: 13px;
+            font-weight: 500;
+            selection-background-color: #bae0ff;
+            selection-color: #1f2328;
+        }
+        QAbstractSpinBox#minimalInnerSpin:disabled {
+            color: #9ca3af;
+        }
+        QAbstractSpinBox#minimalInnerSpin::up-button,
+        QAbstractSpinBox#minimalInnerSpin::down-button {
+            width: 0px;
+            height: 0px;
+            border: none;
+            background: transparent;
+        }
+        QLabel#minimalUnitLabel {
+            background: transparent;
+            border: none;
+            color: #8c959f;
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 0px 6px 0px 2px;
+            margin: 0px;
+        }
+        QLabel#minimalUnitLabel:disabled {
+            color: #b8bfc6;
         }
 
         QStatusBar {
