@@ -163,8 +163,9 @@ class ConfigManager:
                     config.get('image_right_edge_snap_enabled', False)
                 )
                 config.setdefault('text_top_edge_snap_enabled', False)
-                # 默认框选模式始终为仅图片
+                                # 默认框选模式始终为仅图片，且默认开启选父
                 config['marquee_mode'] = "images"
+                config['select_child_selects_parent'] = True
                 # 对齐基准模式：first_selected（对第一个选中对象对齐） / pick_reference（点选指定对象对齐）
                 if config.get('align_mode') not in ('first_selected', 'pick_reference'):
                     config['align_mode'] = 'first_selected'
@@ -6262,7 +6263,7 @@ class VTextItem(BaseElement):
         if selected_images_in_sel:
             cur_op = int(round(selected_images_in_sel[0].image_opacity * 100))
             batch_img_opacity_action = menu.addAction(f"设置选中图片透明度... (T) [{len(selected_images_in_sel)} 张, 当前 {cur_op}%]")
-            zero_lbl = "恢复选中图片不透明 (100%) (Shift+T)" if all(img.image_opacity <= 0.001 for img in selected_images_in_sel) else "⚡ 选中图片透明度快速归零 (0%) (Shift+T)"
+            zero_lbl = "恢复选中图片不透明 (100%) (Ctrl+T)" if all(img.image_opacity <= 0.001 for img in selected_images_in_sel) else "⚡ 选中图片透明度快速归零 (0%) (Ctrl+T)"
             batch_img_zero_opacity_action = menu.addAction(zero_lbl)
             menu.addSeparator()
         align_mode_first_action = None
@@ -7381,7 +7382,7 @@ class VImageItem(BaseElement):
             opacity_lbl = f"设置透明度... (T) [当前 {cur_op_pct}%]"
         menu.addAction(opacity_lbl).triggered.connect(self._change_opacity)
         all_zero = all(img.image_opacity <= 0.001 for img in target_imgs_for_op)
-        quick_zero_lbl = "恢复不透明 (100%) (Shift+T)" if all_zero else "⚡ 透明度快速归零 (0%) (Shift+T)"
+        quick_zero_lbl = "恢复不透明 (100%) (Ctrl+T)" if all_zero else "⚡ 透明度快速归零 (0%) (Ctrl+T)"
         menu.addAction(quick_zero_lbl).triggered.connect(self._zero_opacity)
         menu.addSeparator()
 
@@ -7472,7 +7473,7 @@ class VImageItem(BaseElement):
             cmd.execute()
             sc.undo_stack.push(cmd)
             if new_op == 0.0:
-                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度快速归零 (0%)（再按 Shift+T 可恢复 100%，Ctrl+Z 撤销）", 3500)
+                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度快速归零 (0%)（再按 Ctrl+T 可恢复 100%，Ctrl+Z 撤销）", 3500)
             else:
                 sc._show_status_message(f"已将 {len(target_imgs)} 张图片恢复为 100% 不透明（Ctrl+Z 撤销）", 3500)
         else:
@@ -12699,16 +12700,16 @@ class LayoutView(QGraphicsView):
             self._cdr_nav_popup.begin_hold_drag(anchor_global_pos)
 
     def keyPressEvent(self, event):
-        """按 T 键设置图片透明度（Shift+T 快速归零）；按 N 键弹出导航器；按住 F5 时独立连接点临时进入移动模式。"""
+        """按 T 键设置图片透明度（Ctrl+T 快速归零）；按 N 键弹出导航器；按住 F5 时独立连接点临时进入移动模式。"""
         if (event.key() == Qt.Key.Key_T
-                and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+                and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ControlModifier)
                 and self.scene()):
             editing_text = any(
                 isinstance(it, VTextItem) and getattr(it, 'is_editing', False)
                 for it in self.scene().items()
             )
             if not editing_text and self._main_window:
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
                     self._main_window.zero_selected_images_opacity()
                 else:
                     self._main_window.change_selected_images_opacity()
@@ -14223,6 +14224,18 @@ class MainWindow(QMainWindow):
             self.show_connection_points_action.blockSignals(True)
             self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
             self.show_connection_points_action.blockSignals(False)
+        if hasattr(self, 'btn_select_parent'):
+            self.btn_select_parent.blockSignals(True)
+            self.btn_select_parent.setChecked(
+                self.scene.config_manager.get('select_child_selects_parent', True)
+            )
+            self.btn_select_parent.blockSignals(False)
+        if hasattr(self, 'select_child_selects_parent_action'):
+            self.select_child_selects_parent_action.blockSignals(True)
+            self.select_child_selects_parent_action.setChecked(
+                self.scene.config_manager.get('select_child_selects_parent', True)
+            )
+            self.select_child_selects_parent_action.blockSignals(False)
         if hasattr(self, 'btn_marquee_mode') or hasattr(self, 'marquee_mode_combo'):
             self._sync_marquee_mode_ui()
         if hasattr(self, 'btn_align_mode') or hasattr(self, '_align_mode_actions'):
@@ -15153,7 +15166,7 @@ class MainWindow(QMainWindow):
 
         # [左侧组1] 插入与拆分下拉组
         insert_menu = QMenu(self)
-        insert_menu.addAction("添加竖排文本 (Ctrl+T)", self.add_text)
+        insert_menu.addAction("添加竖排文本", self.add_text)
         insert_menu.addAction("插入图片... (Ctrl+Shift+I)", self.add_image)
         insert_menu.addAction("从 Excel 批量导入族谱... (Ctrl+I)", self.open_family_tree_import_dialog)
         insert_menu.addSeparator()
@@ -15349,7 +15362,6 @@ class MainWindow(QMainWindow):
         layout_menu = menubar.addMenu('插入与排版')
 
         add_text_menu_action = QAction('添加竖排文本', self)
-        add_text_menu_action.setShortcut('Ctrl+T')
         add_text_menu_action.triggered.connect(self.add_text)
         layout_menu.addAction(add_text_menu_action)
 
@@ -15432,7 +15444,7 @@ class MainWindow(QMainWindow):
         img_submenu.addAction(selected_img_opacity_action)
 
         zero_img_opacity_action = QAction('选中图片透明度快速归零 (0%)', self)
-        zero_img_opacity_action.setShortcut('Shift+T')
+        zero_img_opacity_action.setShortcut('Ctrl+T')
         zero_img_opacity_action.triggered.connect(self.zero_selected_images_opacity)
         img_submenu.addAction(zero_img_opacity_action)
 
@@ -15959,8 +15971,16 @@ class MainWindow(QMainWindow):
             document.scene.config_manager.set('marquee_mode', mode)
         if self.scene:
             self.scene.config_manager.set('marquee_mode', mode)
+        if mode == 'all':
+            self.toggle_select_child_selects_parent(False)
+        elif mode == 'images':
+            self.toggle_select_child_selects_parent(True)
         self._sync_marquee_mode_ui()
-        labels = {'all': '全选', 'images': '仅图片', 'connected': '仅选有连接点的元素'}
+        labels = {
+            'all': '全选（已自动关闭「选父」）',
+            'images': '仅图片（已自动开启「选父」）',
+            'connected': '仅选有连接点的元素',
+        }
         if hasattr(self, 'status_bar') and self.status_bar:
             self.status_bar.showMessage(f'框选模式：{labels.get(mode, mode)}  (Alt+M 切换)', 3000)
 
@@ -16743,7 +16763,7 @@ class MainWindow(QMainWindow):
         sel_imgs[0]._change_opacity()
 
     def zero_selected_images_opacity(self):
-        """将当前选中图片的透明度快速归零 0%（若已为 0% 则恢复 100%，快捷键 Shift+T）"""
+        """将当前选中图片的透明度快速归零 0%（若已为 0% 则恢复 100%，快捷键 Ctrl+T）"""
         if not self.scene:
             return
         if any(isinstance(it, VTextItem) and getattr(it, 'is_editing', False) for it in self.scene.items()):
@@ -16751,7 +16771,7 @@ class MainWindow(QMainWindow):
         sel_imgs = self._get_target_images_for_opacity()
         if not sel_imgs:
             if hasattr(self, 'status_bar') and self.status_bar:
-                self.status_bar.showMessage("请先在画布上选中至少一张图片后再按 Shift+T 快速归零透明度", 3000)
+                self.status_bar.showMessage("请先在画布上选中至少一张图片后再按 Ctrl+T 快速归零透明度", 3000)
             return
         sel_imgs[0]._zero_opacity()
 
@@ -16767,7 +16787,7 @@ class MainWindow(QMainWindow):
         '框选': '拉框 选择模式 仅图片 全选 alt+m',
         '智能笔刷': '涂抹 刷子 画笔 选区 b',
         '背景': '底图 水印 画布底色 垫图',
-        '透明度': '不透明度 半透明 淡化 归零 透明 0% alpha t shift+t',
+        '透明度': '不透明度 半透明 淡化 归零 透明 0% alpha t ctrl+t',
         'Excel': '表格 批量导入 映射 世系表 数据表 xlsx',
         '导出': '保存图片 另存 pdf svg coreldraw cdr png',
         '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
