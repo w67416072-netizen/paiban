@@ -418,6 +418,7 @@ class AssetManager:
                         'path': asset_path,
                         'original_path': original_path,
                         'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
+                        'opacity': getattr(item, 'image_opacity', 1.0),
                         'connection_point_visible': connection_point_visible,
                         'connection_point_deleted': connection_point_deleted,
                         'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -2466,6 +2467,8 @@ class AssetLibraryDockWidget(QDockWidget):
                     image_path = os.path.join(APP_DIR, image_path)
                 if image_path and os.path.exists(image_path):
                     new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
+                    if 'opacity' in item_data:
+                        new_item.set_opacity(item_data['opacity'])
             if new_item:
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
@@ -2836,6 +2839,8 @@ class AssetLibraryWidget(QWidget):
                 elif item_data['type'] == 'VImageItem':
                     if os.path.exists(item_data['path']):
                         new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
+                        if 'opacity' in item_data:
+                            new_item.set_opacity(item_data['opacity'])
                 
                 if new_item:
                     # 计算相对于原始组合的偏移量，然后应用到新的基准位置
@@ -3371,6 +3376,8 @@ class DeleteItemCommand(UndoCommand):
                 self.item_data['width'],
                 self.item_data.get('height', 0)
             )
+            if 'opacity' in self.item_data:
+                new_item.set_opacity(self.item_data['opacity'])
         
         # 设置位置
         if self.parent_item and self.parent_item.scene():
@@ -3444,6 +3451,7 @@ class DeleteItemCommand(UndoCommand):
                 'type': 'VImageItem',
                 'path': self.item.file_path,
                 'width': self.item.target_width, 'height': getattr(self.item, 'target_height', self.item.boundingRect().height()),
+                'opacity': getattr(self.item, 'image_opacity', 1.0),
                 'pos': (self.item.x(), self.item.y()),
                 'scene_pos': (self.item.scenePos().x(), self.item.scenePos().y())
             }
@@ -3587,6 +3595,175 @@ class EditTextCommand(UndoCommand):
         if self.item.scene():
             self.item.scene().update_connectors(self.item)
             self.item.scene().update_image_text_connectors(self.item)
+
+
+class ChangeImageOpacityCommand(UndoCommand):
+    """修改图片透明度的撤销/重做命令"""
+    def __init__(self, scene, items, new_opacity, pre_saved_opacities=None):
+        super().__init__(scene)
+        self.new_opacity = max(0.0, min(1.0, float(new_opacity)))
+        self.saved_states = []
+        for item in items:
+            if isinstance(item, VImageItem):
+                old_op = (
+                    pre_saved_opacities[item]
+                    if (pre_saved_opacities and item in pre_saved_opacities)
+                    else item.image_opacity
+                )
+                self.saved_states.append((item, float(old_op)))
+
+    def execute(self):
+        for item, _old_op in self.saved_states:
+            item.set_opacity(self.new_opacity)
+        if self.scene:
+            self.scene.update()
+
+    def undo(self):
+        for item, old_op in self.saved_states:
+            item.set_opacity(old_op)
+        if self.scene:
+            self.scene.update()
+
+
+class ImageOpacityDialog(QDialog):
+    """图片透明度设置对话框 - 支持一键快速归零(0%)、快捷预设、滑块实时预览与撤销"""
+    def __init__(self, target_images, parent=None):
+        super().__init__(parent)
+        self.target_images = [img for img in target_images if isinstance(img, VImageItem)]
+        self.original_opacities = {img: float(img.image_opacity) for img in self.target_images}
+        first_op = int(round((self.target_images[0].image_opacity if self.target_images else 1.0) * 100))
+        self._current_val = max(0, min(100, first_op))
+
+        if len(self.target_images) > 1:
+            self.setWindowTitle(f"批量设置图片透明度 (共 {len(self.target_images)} 张)")
+        else:
+            self.setWindowTitle("设置图片透明度")
+        self.setMinimumWidth(360)
+
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        # 顶部：标签 + 极简数值输入框 + 一键快速归零按钮
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        lbl = QLabel("透明度 (0-100)%:", self)
+        lbl.setStyleSheet("color: #24292f; font-size: 13px; font-weight: 500;")
+        top_row.addWidget(lbl)
+
+        self.spin = MinimalSpinBox(self, suffix="%")
+        self.spin.setRange(0, 100)
+        self.spin.setSingleStep(5)
+        self.spin.setValue(self._current_val)
+        self.spin.selectAll()
+        top_row.addWidget(self.spin, 1)
+
+        self.btn_quick_zero = QPushButton("⚡ 快速归零 (0%)", self)
+        self.btn_quick_zero.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_quick_zero.setToolTip("一键将透明度设为 0% 并立即生效")
+        self.btn_quick_zero.setStyleSheet("""
+            QPushButton {
+                background-color: #fff1f0;
+                color: #cf1322;
+                border: 1px solid #ffa39e;
+                border-radius: 5px;
+                padding: 4px 10px;
+                font-size: 12.5px;
+                font-weight: 600;
+                min-height: 24px;
+            }
+            QPushButton:hover {
+                background-color: #ffccc7;
+                border-color: #ff4d4f;
+            }
+        """)
+        self.btn_quick_zero.clicked.connect(self._on_quick_zero_clicked)
+        top_row.addWidget(self.btn_quick_zero)
+        layout.addLayout(top_row)
+
+        # 中部：水平滑块
+        self.slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider.setRange(0, 100)
+        self.slider.setValue(self._current_val)
+        layout.addWidget(self.slider)
+
+        # 底部：实时预览复选框 + 确定/取消按钮
+        bottom_row = QHBoxLayout()
+        self.chk_preview = QCheckBox("画布实时预览", self)
+        self.chk_preview.setChecked(True)
+        self.chk_preview.toggled.connect(self._on_preview_toggled)
+        bottom_row.addWidget(self.chk_preview)
+        bottom_row.addStretch()
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(self._on_accept)
+        btns.rejected.connect(self._on_reject)
+        bottom_row.addWidget(btns)
+        layout.addLayout(bottom_row)
+
+        self.spin.valueChanged.connect(self._on_spin_changed)
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.spin.setFocus()
+
+    def _set_val(self, val):
+        self._current_val = max(0, min(100, int(val)))
+        self.spin.blockSignals(True)
+        self.slider.blockSignals(True)
+        self.spin.setValue(self._current_val)
+        self.slider.setValue(self._current_val)
+        self.spin.blockSignals(False)
+        self.slider.blockSignals(False)
+        self._apply_preview()
+
+    def _on_spin_changed(self, val):
+        self._current_val = val
+        self.slider.blockSignals(True)
+        self.slider.setValue(val)
+        self.slider.blockSignals(False)
+        self._apply_preview()
+
+    def _on_slider_changed(self, val):
+        self._current_val = val
+        self.spin.blockSignals(True)
+        self.spin.setValue(val)
+        self.spin.blockSignals(False)
+        self._apply_preview()
+
+    def _on_preview_toggled(self, checked):
+        if checked:
+            self._apply_preview()
+        else:
+            self.restore_original_opacities()
+
+    def _apply_preview(self):
+        if not self.chk_preview.isChecked():
+            return
+        op = self._current_val / 100.0
+        for img in self.target_images:
+            img.set_opacity(op)
+
+    def restore_original_opacities(self):
+        for img, orig_op in self.original_opacities.items():
+            img.set_opacity(orig_op)
+
+    def _on_quick_zero_clicked(self):
+        self._set_val(0)
+        self.accept()
+
+    def _on_accept(self):
+        self.accept()
+
+    def _on_reject(self):
+        self.restore_original_opacities()
+        self.reject()
+
+    def selected_opacity_percent(self):
+        return self._current_val
 
 
 class ApplyTextFormatCommand(UndoCommand):
@@ -6081,9 +6258,12 @@ class VTextItem(BaseElement):
         selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)] if self.scene() else []
         selected_images_in_sel = [item for item in selected_items if isinstance(item, VImageItem)]
         batch_img_opacity_action = None
+        batch_img_zero_opacity_action = None
         if selected_images_in_sel:
-            cur_op = int(selected_images_in_sel[0].image_opacity * 100)
-            batch_img_opacity_action = menu.addAction(f"设置选中图片透明度 ({len(selected_images_in_sel)} 张, 当前 {cur_op}%)")
+            cur_op = int(round(selected_images_in_sel[0].image_opacity * 100))
+            batch_img_opacity_action = menu.addAction(f"设置选中图片透明度... (T) [{len(selected_images_in_sel)} 张, 当前 {cur_op}%]")
+            zero_lbl = "恢复选中图片不透明 (100%) (Shift+T)" if all(img.image_opacity <= 0.001 for img in selected_images_in_sel) else "⚡ 选中图片透明度快速归零 (0%) (Shift+T)"
+            batch_img_zero_opacity_action = menu.addAction(zero_lbl)
             menu.addSeparator()
         align_mode_first_action = None
         align_mode_pick_action = None
@@ -6121,6 +6301,9 @@ class VTextItem(BaseElement):
         
         if batch_img_opacity_action and action == batch_img_opacity_action:
             selected_images_in_sel[0]._change_opacity()
+            return
+        if batch_img_zero_opacity_action and action == batch_img_zero_opacity_action:
+            selected_images_in_sel[0]._zero_opacity()
             return
         if update_group_asset_action and action == update_group_asset_action:
             main_window.finish_edit_group_asset()
@@ -6903,6 +7086,11 @@ class SmoothPixmapItem(QGraphicsPixmapItem):
 
         sc = self.scene()
         is_pdf = getattr(sc, '_rendering_pdf', False) if sc else False
+        is_export = getattr(sc, '_rendering_export', False) if sc else False
+        parent_img = self.parentItem()
+        if (is_pdf or is_export) and isinstance(parent_img, VImageItem) and getattr(parent_img, 'image_opacity', 1.0) <= 0.001:
+            painter.restore()
+            return
 
         world_tx = painter.worldTransform()
         dpr = 1.0
@@ -6932,6 +7120,8 @@ class SmoothPixmapItem(QGraphicsPixmapItem):
                 self._lod_cache_pixmap,
                 QRectF(self._lod_cache_pixmap.rect())
             )
+        if not (is_pdf or is_export) and isinstance(parent_img, VImageItem) and getattr(parent_img, 'image_opacity', 1.0) <= 0.001:
+            painter.fillRect(self._target_rect, QColor(0, 140, 255, 110))
         painter.restore()
 
 
@@ -6965,11 +7155,21 @@ class VImageItem(BaseElement):
         self._update_handles()
         self._show_handles(False)
 
+    CANVAS_ZERO_OPACITY_PREVIEW = 0.25  # 透明度为0的图片在画布上的预览不透明度（导出PDF/图片时完全不可见）
+
+    def _sync_pixmap_canvas_opacity(self):
+        """同步图片图元在画布上的可见度：透明度为0时在画布保留浅淡预览，导出时由 paint 拦截隐藏"""
+        if not hasattr(self, 'p_item') or self.p_item is None:
+            return
+        base_op = self.CANVAS_ZERO_OPACITY_PREVIEW if self.image_opacity <= 0.001 else self.image_opacity
+        if getattr(self, 'locked', False):
+            base_op *= 0.6
+        self.p_item.setOpacity(base_op)
+
     def set_opacity(self, opacity):
-        """设置图片透明度 0.0-1.0"""
+        """设置图片透明度 0.0-1.0（为0时画布可见并带特殊标记，导出PDF和图片时不可见）"""
         self.image_opacity = max(0.0, min(1.0, opacity))
-        if hasattr(self, 'p_item'):
-            self.p_item.setOpacity(self.image_opacity)
+        self._sync_pixmap_canvas_opacity()
         self.update()
 
     def set_locked(self, locked):
@@ -6991,8 +7191,7 @@ class VImageItem(BaseElement):
             show_cp = sc.show_connection_points if sc else True
             self.set_connection_points_visible(show_cp)
         # 锁定时显示半透明遮罩提示
-        if hasattr(self, 'p_item'):
-            self.p_item.setOpacity(self.image_opacity * (0.6 if locked else 1.0))
+        self._sync_pixmap_canvas_opacity()
         self.update()
 
     def set_image_visible(self, visible):
@@ -7172,13 +7371,18 @@ class VImageItem(BaseElement):
             menu.addAction("删除连接点（永久）").triggered.connect(self.delete_connection_point)
             menu.addSeparator()
 
-        # 图片透明度（若选中了多张图片，支持一键批量设置所有选中图片的透明度）
+        # 图片透明度（若选中了多张图片，支持一键批量设置所有选中图片的透明度与快速归零）
         sel_imgs = [i for i in self.scene().selectedItems() if isinstance(i, VImageItem)] if self.scene() else []
-        if self in sel_imgs and len(sel_imgs) > 1:
-            opacity_lbl = f"设置选中图片透明度 ({len(sel_imgs)} 张, 当前 {int(self.image_opacity*100)}%)"
+        target_imgs_for_op = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
+        cur_op_pct = int(round(self.image_opacity * 100))
+        if len(target_imgs_for_op) > 1:
+            opacity_lbl = f"设置选中图片透明度... (T) [{len(target_imgs_for_op)} 张, 当前 {cur_op_pct}%]"
         else:
-            opacity_lbl = f"设置透明度 (当前 {int(self.image_opacity*100)}%)"
+            opacity_lbl = f"设置透明度... (T) [当前 {cur_op_pct}%]"
         menu.addAction(opacity_lbl).triggered.connect(self._change_opacity)
+        all_zero = all(img.image_opacity <= 0.001 for img in target_imgs_for_op)
+        quick_zero_lbl = "恢复不透明 (100%) (Shift+T)" if all_zero else "⚡ 透明度快速归零 (0%) (Shift+T)"
+        menu.addAction(quick_zero_lbl).triggered.connect(self._zero_opacity)
         menu.addSeparator()
 
         menu.addAction("复制").triggered.connect(lambda: self.scene().copy_item(self) if self.scene() else None)
@@ -7236,21 +7440,44 @@ class VImageItem(BaseElement):
         menu.exec(global_pos)
 
     def _change_opacity(self):
-        """弹出对话框设置透明度（当选中多张图片时，批量应用到所有选中图片）"""
+        """弹出对话框设置透明度（支持一键快速归零、滑块实时预览、批量应用及 Ctrl+Z 撤销）"""
         sc = self.scene()
         sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
         target_imgs = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
-        title = f"批量设置图片透明度 (共 {len(target_imgs)} 张)" if len(target_imgs) > 1 else "设置透明度"
-        val, ok = MinimalInputDialog.getInt(
-            None, title, "透明度 (0-100)%:",
-            int(self.image_opacity * 100), 0, 100
-        )
-        if ok:
+        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
+        dlg = ImageOpacityDialog(target_imgs, parent=parent_win)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            val = dlg.selected_opacity_percent()
             new_op = val / 100.0
+            changed = any(abs(dlg.original_opacities.get(img, img.image_opacity) - new_op) > 1e-4 for img in target_imgs)
+            if sc and changed:
+                cmd = ChangeImageOpacityCommand(sc, target_imgs, new_op, pre_saved_opacities=dlg.original_opacities)
+                cmd.execute()
+                sc.undo_stack.push(cmd)
+            else:
+                for img in target_imgs:
+                    img.set_opacity(new_op)
+            if sc:
+                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度设为 {val}%（可按 Ctrl+Z 撤销）", 3500)
+
+    def _zero_opacity(self):
+        """将当前或选中图片的透明度快速归零 (0%)；若已归零则一键恢复为 100%（支持 Ctrl+Z 撤销）"""
+        sc = self.scene()
+        sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
+        target_imgs = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
+        all_zero = all(img.image_opacity <= 0.001 for img in target_imgs)
+        new_op = 1.0 if all_zero else 0.0
+        if sc:
+            cmd = ChangeImageOpacityCommand(sc, target_imgs, new_op)
+            cmd.execute()
+            sc.undo_stack.push(cmd)
+            if new_op == 0.0:
+                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度快速归零 (0%)（再按 Shift+T 可恢复 100%，Ctrl+Z 撤销）", 3500)
+            else:
+                sc._show_status_message(f"已将 {len(target_imgs)} 张图片恢复为 100% 不透明（Ctrl+Z 撤销）", 3500)
+        else:
             for img in target_imgs:
                 img.set_opacity(new_op)
-            if sc:
-                sc._show_status_message(f"已将 {len(target_imgs)} 张图片的透明度设为 {val}%", 3000)
 
     def _show_context_menu(self, global_pos):
         self._build_image_context_menu(global_pos)
@@ -7262,12 +7489,20 @@ class VImageItem(BaseElement):
         self._build_image_context_menu(event.screenPos())
 
     def paint(self, painter, option, widget):
-        """图片管理模式下，隐藏的图片显示为半透明虚框"""
+        """画布模式下为透明度 0% 的图片保留淡蓝色预览（导出 PDF、PNG、SVG 或打印时完全不可见）"""
         scene = self.scene()
-        if scene and getattr(scene, 'image_manage_mode', False) and not self.isVisible():
-            # 强制绘制半透明虚框（即使 isVisible() 为 False，paint 不会被调用）
-            # 这里通过 drawForeground 或直接在 scene 里绘制，见下方 drawForeground
-            pass
+        is_pdf = getattr(scene, '_rendering_pdf', False) if scene else False
+        is_export = getattr(scene, '_rendering_export', False) if scene else False
+        is_thumb = getattr(scene, '_rendering_thumb', False) if scene else False
+
+        if (is_pdf or is_export) and self.image_opacity <= 0.001:
+            return
+
+        if self.image_opacity <= 0.001 and not (is_pdf or is_export or is_thumb):
+            painter.save()
+            painter.fillRect(self.boundingRect(), QColor(0, 140, 255, 45))
+            painter.restore()
+
         super().paint(painter, option, widget)
 
     def boundingRect(self):
@@ -7449,6 +7684,8 @@ class CorelSvgExporter:
             for value in (m11, m12, m21, m22, dx, dy)
         )
         opacity = getattr(item, 'image_opacity', 1.0)
+        if opacity <= 0.001:
+            return []
         attrs = [
             f'width="{CorelSvgExporter._num(rect.width())}"',
             f'height="{CorelSvgExporter._num(rect.height())}"',
@@ -8445,8 +8682,7 @@ class LayoutScene(QGraphicsScene):
                     # 退出管理模式：恢复原始状态
                     was_hidden = getattr(item, '_was_hidden', False)
                     item.setVisible(not was_hidden)
-                    if hasattr(item, 'p_item') and item.p_item:
-                        item.p_item.setOpacity(item.image_opacity)
+                    item._sync_pixmap_canvas_opacity()
                     item._was_hidden = False
                     # 恢复交互标志
                     item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not item.locked)
@@ -8730,8 +8966,7 @@ class LayoutScene(QGraphicsScene):
                 if getattr(clicked_img, '_was_hidden', False):
                     # 原来是隐藏的，现在显示它
                     clicked_img._was_hidden = False
-                    if hasattr(clicked_img, 'p_item') and clicked_img.p_item:
-                        clicked_img.p_item.setOpacity(clicked_img.image_opacity)
+                    clicked_img._sync_pixmap_canvas_opacity()
                 else:
                     # 原来是显示的，现在隐藏它
                     clicked_img._was_hidden = True
@@ -10471,6 +10706,7 @@ class LayoutScene(QGraphicsScene):
                     'type': 'VImageItem',
                     'path': item.file_path,
                     'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
+                    'opacity': getattr(item, 'image_opacity', 1.0),
                     'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -10528,6 +10764,8 @@ class LayoutScene(QGraphicsScene):
                 new_item.rebuild()
             elif item_data['type'] == 'VImageItem':
                 new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
+                if 'opacity' in item_data:
+                    new_item.set_opacity(item_data['opacity'])
 
             if new_item:
                 offset_x = item_data['scene_pos'][0] - min_x
@@ -12307,7 +12545,21 @@ class LayoutView(QGraphicsView):
             self._cdr_nav_popup.begin_hold_drag(anchor_global_pos)
 
     def keyPressEvent(self, event):
-        """按 N 键弹出 CorelDRAW 风格小方框导航器；按住 F5 时独立连接点临时进入移动模式。"""
+        """按 T 键设置图片透明度（Shift+T 快速归零）；按 N 键弹出导航器；按住 F5 时独立连接点临时进入移动模式。"""
+        if (event.key() == Qt.Key.Key_T
+                and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ShiftModifier)
+                and self.scene()):
+            editing_text = any(
+                isinstance(it, VTextItem) and getattr(it, 'is_editing', False)
+                for it in self.scene().items()
+            )
+            if not editing_text and self._main_window:
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self._main_window.zero_selected_images_opacity()
+                else:
+                    self._main_window.change_selected_images_opacity()
+                event.accept()
+                return
         if (event.key() == Qt.Key.Key_N
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier
                 and self.scene()):
@@ -15021,8 +15273,14 @@ class MainWindow(QMainWindow):
         # 二级：图片属性与默认尺寸
         img_submenu = layout_menu.addMenu('图片属性与尺寸')
         selected_img_opacity_action = QAction('设置选中图片透明度...', self)
+        selected_img_opacity_action.setShortcut('T')
         selected_img_opacity_action.triggered.connect(self.change_selected_images_opacity)
         img_submenu.addAction(selected_img_opacity_action)
+
+        zero_img_opacity_action = QAction('选中图片透明度快速归零 (0%)', self)
+        zero_img_opacity_action.setShortcut('Shift+T')
+        zero_img_opacity_action.triggered.connect(self.zero_selected_images_opacity)
+        img_submenu.addAction(zero_img_opacity_action)
 
         image_manage_action = QAction('图片管理模式（显示/隐藏切换）', self)
         image_manage_action.setShortcut('Alt+,')
@@ -16304,15 +16562,44 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.scene.batch_copy(dlg.get_params())
 
-    def change_selected_images_opacity(self):
-        """批量设置当前选中图片的透明度"""
+    def _get_target_images_for_opacity(self):
+        """获取当前选中的图片列表（若选中了图片下的子文字，自动关联其父级图片）"""
         if not self.scene:
-            return
+            return []
         sel_imgs = [i for i in self.scene.selectedItems() if isinstance(i, VImageItem)]
         if not sel_imgs:
-            QMessageBox.information(self, "设置图片透明度", "请先在画布上选中至少一张图片")
+            for item in self.scene.selectedItems():
+                if isinstance(item, VTextItem) and isinstance(item.parentItem(), VImageItem):
+                    parent_img = item.parentItem()
+                    if parent_img not in sel_imgs and not getattr(parent_img, 'locked', False):
+                        sel_imgs.append(parent_img)
+        return sel_imgs
+
+    def change_selected_images_opacity(self):
+        """批量设置当前选中图片的透明度 (快捷键 T)"""
+        if not self.scene:
+            return
+        if any(isinstance(it, VTextItem) and getattr(it, 'is_editing', False) for it in self.scene.items()):
+            return
+        sel_imgs = self._get_target_images_for_opacity()
+        if not sel_imgs:
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.showMessage("请先在画布上选中至少一张图片后再按 T 设置透明度", 3000)
             return
         sel_imgs[0]._change_opacity()
+
+    def zero_selected_images_opacity(self):
+        """将当前选中图片的透明度快速归零 0%（若已为 0% 则恢复 100%，快捷键 Shift+T）"""
+        if not self.scene:
+            return
+        if any(isinstance(it, VTextItem) and getattr(it, 'is_editing', False) for it in self.scene.items()):
+            return
+        sel_imgs = self._get_target_images_for_opacity()
+        if not sel_imgs:
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.showMessage("请先在画布上选中至少一张图片后再按 Shift+T 快速归零透明度", 3000)
+            return
+        sel_imgs[0]._zero_opacity()
 
     # 用户思维搜索同义词词典：用自然口语或任务意图词即可搜到对应功能
     _USER_INTENT_SYNONYMS = {
@@ -16326,7 +16613,7 @@ class MainWindow(QMainWindow):
         '框选': '拉框 选择模式 仅图片 全选 alt+m',
         '智能笔刷': '涂抹 刷子 画笔 选区 b',
         '背景': '底图 水印 画布底色 垫图',
-        '透明度': '不透明度 半透明 淡化 alpha',
+        '透明度': '不透明度 半透明 淡化 归零 透明 0% alpha t shift+t',
         'Excel': '表格 批量导入 映射 世系表 数据表 xlsx',
         '导出': '保存图片 另存 pdf svg coreldraw cdr png',
         '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
@@ -16915,12 +17202,16 @@ class MainWindow(QMainWindow):
                     new_item.rebuild()
                 elif item_data['type'] == 'VImageItem' and os.path.exists(item_data['path']):
                     new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
+                    if 'opacity' in item_data:
+                        new_item.set_opacity(item_data['opacity'])
                 elif item_data['type'] == 'VImageItem':
                     image_path = item_data.get('path', '')
                     if image_path and not os.path.isabs(image_path):
                         image_path = os.path.join(APP_DIR, image_path)
                     if image_path and os.path.exists(image_path):
                         new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
+                        if 'opacity' in item_data:
+                            new_item.set_opacity(item_data['opacity'])
 
                 if new_item:
                     off_x = item_data['scene_pos'][0] - min_x
@@ -17751,9 +18042,21 @@ class MainWindow(QMainWindow):
                 rect = self.scene.sceneRect()
                 img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32)
                 img.fill(Qt.GlobalColor.white)
-                p = QPainter(img)
-                self.scene.render(p)
-                p.end()
+                self.scene._rendering_export = True
+                zero_op_p_items = [
+                    it.p_item for it in self.scene.items()
+                    if isinstance(it, VImageItem) and getattr(it, 'image_opacity', 1.0) <= 0.001 and hasattr(it, 'p_item') and it.p_item is not None
+                ]
+                for p_it in zero_op_p_items:
+                    p_it.setVisible(False)
+                try:
+                    p = QPainter(img)
+                    self.scene.render(p)
+                    p.end()
+                finally:
+                    for p_it in zero_op_p_items:
+                        p_it.setVisible(True)
+                    self.scene._rendering_export = False
                 img.save(path)
                 print(f"图片已导出到: {path}")
                 
@@ -17762,6 +18065,7 @@ class MainWindow(QMainWindow):
                     item.setSelected(True)
             finally:
                 # 恢复原始设置
+                self.scene._rendering_export = False
                 self.scene.show_grid = original_show_grid
                 self.scene.set_connectors_visible(original_show_connectors)
                 self.scene.set_connection_points_visible(original_show_connection_points)
@@ -18140,11 +18444,23 @@ class MainWindow(QMainWindow):
             scale = min(target_rect.width() / rect.width(), target_rect.height() / rect.height())
             painter.scale(scale, scale)
 
-            # 设置PDF导出标志：跳过灰色背景/阴影，保留背景图片
+            # 设置PDF导出标志：跳过灰色背景/阴影，保留背景图片，隐藏0%透明度图片图元
             scene._rendering_pdf = True
-            painter.fillRect(QRectF(0, 0, rect.width(), rect.height()), QColor(255, 255, 255))
-            scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
-            scene._rendering_pdf = False
+            scene._rendering_export = True
+            zero_op_p_items = [
+                it.p_item for it in scene.items()
+                if isinstance(it, VImageItem) and getattr(it, 'image_opacity', 1.0) <= 0.001 and hasattr(it, 'p_item') and it.p_item is not None
+            ]
+            for p_it in zero_op_p_items:
+                p_it.setVisible(False)
+            try:
+                painter.fillRect(QRectF(0, 0, rect.width(), rect.height()), QColor(255, 255, 255))
+                scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+            finally:
+                for p_it in zero_op_p_items:
+                    p_it.setVisible(True)
+                scene._rendering_pdf = False
+                scene._rendering_export = False
 
             painter.end()
 
