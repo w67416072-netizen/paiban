@@ -7830,20 +7830,38 @@ class GuideItem(QGraphicsItem):
         self._snap_active = False
         self._update_pos()
 
+    def format_coord_text(self, detailed=True):
+        """格式化辅助线的 X 或 Y 坐标文本（同时支持 px 与 mm 显示）"""
+        axis = "Y" if self.orientation == Qt.Orientation.Horizontal else "X"
+        px_val = float(self.pos_value)
+        mm_val = px_val * 25.4 / CORELDRAW_EXPORT_DPI
+        unit = 'mm'
+        if self.scene() and hasattr(self.scene(), 'config_manager'):
+            unit = self.scene().config_manager.get('display_unit', 'mm')
+        px_str = f"{int(round(px_val))}" if abs(px_val - round(px_val)) < 0.05 else f"{px_val:.1f}"
+        mm_str = f"{mm_val:.2f}".rstrip('0').rstrip('.')
+        if not detailed:
+            return f"{axis}: {mm_str} mm" if unit == 'mm' else f"{axis}: {px_str} px"
+        if unit == 'mm':
+            return f"{axis}: {mm_str} mm ({px_str} px)"
+        return f"{axis}: {px_str} px ({mm_str} mm)"
+
     def _update_pos(self):
         r = self.scene_rect
         if self.orientation == Qt.Orientation.Horizontal:
             self.setPos(r.left(), self.pos_value)
         else:
             self.setPos(self.pos_value, r.top())
+        if not getattr(self, '_is_temp', False):
+            self.setToolTip(f"{'横向' if self.orientation == Qt.Orientation.Horizontal else '竖向'}辅助线  {self.format_coord_text(True)}\n右键可精确输入坐标，双击删除")
 
     def _hit_half_width(self):
         """根据当前视图缩放动态计算感应半宽，保证画布缩小时也至少有 8 屏幕像素的点击/双击范围"""
         if self.scene() and self.scene().views():
             scale = abs(self.scene().views()[0].transform().m11())
             if scale > 0:
-                return max(6.0, 8.0 / scale)
-        return 12.0
+                return max(6.0, 26.0 / scale)
+        return 24.0
 
     def boundingRect(self):
         r = self.scene_rect
@@ -7855,13 +7873,26 @@ class GuideItem(QGraphicsItem):
 
     def shape(self):
         path = QPainterPath()
-        path.addRect(self.boundingRect())
+        r = self.scene_rect
+        scale = 1.0
+        if self.scene() and self.scene().views():
+            scale = max(0.001, abs(self.scene().views()[0].transform().m11()))
+        hit_hw = max(6.0, 8.0 / scale)
+        if self.orientation == Qt.Orientation.Horizontal:
+            path.addRect(QRectF(0, -hit_hw, r.width(), hit_hw * 2))
+        else:
+            path.addRect(QRectF(-hit_hw, 0, hit_hw * 2, r.height()))
         return path
 
     def paint(self, painter, option, widget):
-        if getattr(self, "_selected_for_edit", False):
-            color = QColor(255, 165, 0, 255)
-        elif getattr(self, "_snap_active", False):
+        sc = self.scene()
+        if sc and (getattr(sc, '_rendering_pdf', False) or getattr(sc, '_rendering_export', False) or getattr(sc, '_rendering_thumb', False)):
+            return
+        is_selected = getattr(self, "_selected_for_edit", False)
+        is_snap = getattr(self, "_snap_active", False)
+        if is_selected:
+            color = QColor(255, 140, 0, 255)
+        elif is_snap:
             color = QColor(255, 70, 70, 255)
         else:
             color = QColor(0, 210, 255, 255) if self._hovered else QColor(0, 180, 255, 220)
@@ -7873,12 +7904,49 @@ class GuideItem(QGraphicsItem):
         else:
             painter.drawLine(QPointF(0, 0), QPointF(0, r.height()))
 
+        # 当悬停、选中、拖拽辅助线或吸附触发时，在画布视口内直接绘制清晰坐标胶囊标签
+        if not getattr(self, '_is_temp', False) and (self._hovered or is_selected or self._dragging or is_snap):
+            coord_text = self.format_coord_text(detailed=True)
+            painter.save()
+            painter.resetTransform()
+            if sc and sc.views():
+                view = sc.views()[0]
+                vp_rect = view.viewport().rect()
+                font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
+                painter.setFont(font)
+                fm = QFontMetrics(font)
+                tw = fm.horizontalAdvance(coord_text) + 14
+                th = fm.height() + 6
+                if self.orientation == Qt.Orientation.Horizontal:
+                    vy = view.mapFromScene(QPointF(r.left(), self.pos_value)).y()
+                    bx = max(view.RULER_SIZE + 8, 28)
+                    by = vy - th - 5 if vy - th - 5 >= view.RULER_SIZE + 2 else vy + 5
+                else:
+                    vx = view.mapFromScene(QPointF(self.pos_value, r.top())).x()
+                    bx = vx + 6 if vx + tw + 6 <= vp_rect.width() - 4 else vx - tw - 6
+                    by = max(view.RULER_SIZE + 8, 28)
+                badge_rect = QRectF(bx, by, tw, th)
+                bg_color = QColor(230, 115, 0, 230) if is_selected else QColor(0, 120, 200, 225)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(bg_color))
+                painter.drawRoundedRect(badge_rect, 4, 4)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, coord_text)
+            painter.restore()
+
     def hoverEnterEvent(self, event):
         self._hovered = True
         if self.orientation == Qt.Orientation.Horizontal:
             self.setCursor(Qt.CursorShape.SizeVerCursor)
         else:
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self._update_pos()
+        if self.scene() and not getattr(self, '_is_temp', False):
+            orient_lbl = "横向辅助线" if self.orientation == Qt.Orientation.Horizontal else "竖向辅助线"
+            self.scene()._show_status_message(
+                f"{orient_lbl}  {self.format_coord_text(True)}  |  左键拖动调整，右键可精确输入坐标，双击删除",
+                4000
+            )
         self.update()
         super().hoverEnterEvent(event)
 
@@ -7894,9 +7962,30 @@ class GuideItem(QGraphicsItem):
             self._dragging = True
             self._drag_start = event.scenePos()
             self._start_value = self.pos_value
+            self.update()
             event.accept()
         else:
             super().mousePressEvent(event)
+
+    def _sync_perp_points_and_update(self):
+        self._update_pos()
+        if self.scene():
+            for pt in getattr(self.scene(), 'free_connection_points', []):
+                if getattr(pt, '_guide_ref', None) is self and pt.scene() is self.scene():
+                    src_pt = getattr(pt, '_perp_source_point', None)
+                    src_c = src_pt.get_scene_center() if (src_pt and src_pt.scene()) else pt.get_scene_center()
+                    new_pos = QPointF(src_c.x(), self.pos_value) if self.orientation == Qt.Orientation.Horizontal else QPointF(self.pos_value, src_c.y())
+                    pt._updating_perp_pos = True
+                    pt.setPos(new_pos)
+                    pt._updating_perp_pos = False
+                    for conn in list(getattr(pt, 'connected_lines', [])):
+                        if conn.scene():
+                            conn.update_path()
+            orient_lbl = "横向辅助线" if self.orientation == Qt.Orientation.Horizontal else "竖向辅助线"
+            self.scene()._show_status_message(f"{orient_lbl}  {self.format_coord_text(True)}", 3000)
+            if self.scene().views():
+                self.scene().views()[0].viewport().update()
+        self.update()
 
     def mouseMoveEvent(self, event):
         if self._dragging:
@@ -7905,20 +7994,7 @@ class GuideItem(QGraphicsItem):
                 self.pos_value = self._start_value + delta.y()
             else:
                 self.pos_value = self._start_value + delta.x()
-            self._update_pos()
-            if self.scene():
-                for pt in getattr(self.scene(), 'free_connection_points', []):
-                    if getattr(pt, '_guide_ref', None) is self and pt.scene() is self.scene():
-                        src_pt = getattr(pt, '_perp_source_point', None)
-                        src_c = src_pt.get_scene_center() if (src_pt and src_pt.scene()) else pt.get_scene_center()
-                        new_pos = QPointF(src_c.x(), self.pos_value) if self.orientation == Qt.Orientation.Horizontal else QPointF(self.pos_value, src_c.y())
-                        pt._updating_perp_pos = True
-                        pt.setPos(new_pos)
-                        pt._updating_perp_pos = False
-                        for conn in list(getattr(pt, 'connected_lines', [])):
-                            if conn.scene():
-                                conn.update_path()
-            self.update()
+            self._sync_perp_points_and_update()
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -7927,6 +8003,9 @@ class GuideItem(QGraphicsItem):
         self._dragging = False
         if self.scene():
             self.scene().clear_snap_guides()
+            if self.scene().views():
+                self.scene().views()[0].viewport().update()
+        self.update()
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
@@ -7935,10 +8014,73 @@ class GuideItem(QGraphicsItem):
             self.scene().remove_guide(self)
         event.accept()
 
+    def _edit_pos_value_dialog(self):
+        """弹出对话框精确查看和修改辅助线的 X 或 Y 坐标（支持 px 与 mm 切换）"""
+        sc = self.scene()
+        if not sc:
+            return
+        axis = "Y" if self.orientation == Qt.Orientation.Horizontal else "X"
+        orient_lbl = "横向辅助线" if self.orientation == Qt.Orientation.Horizontal else "竖向辅助线"
+        unit = sc.config_manager.get('display_unit', 'mm') if hasattr(sc, 'config_manager') else 'mm'
+        parent_win = sc.views()[0].window() if sc.views() else None
+
+        dlg = QDialog(parent_win)
+        dlg.setWindowTitle(f"设置{orient_lbl} {axis} 坐标")
+        dlg.setMinimumWidth(320)
+        form = QFormLayout(dlg)
+        form.setContentsMargins(16, 14, 16, 14)
+        form.setSpacing(10)
+
+        unit_combo = QComboBox(dlg)
+        unit_combo.addItem("像素 (px)", "px")
+        unit_combo.addItem("毫米 (mm)", "mm")
+        unit_combo.setCurrentIndex(1 if unit == 'mm' else 0)
+
+        spin = MinimalDoubleSpinBox(dlg, suffix=unit)
+        spin.setDecimals(2 if unit == 'mm' else 1)
+        spin.setRange(-99999.0, 99999.0)
+        init_val = self.pos_value * 25.4 / CORELDRAW_EXPORT_DPI if unit == 'mm' else float(self.pos_value)
+        spin.setValue(init_val)
+        spin.selectAll()
+
+        info_lbl = QLabel(f"当前坐标：{self.format_coord_text(True)}", dlg)
+        info_lbl.setStyleSheet("color: #57606a; font-size: 12px;")
+
+        def on_unit_changed():
+            cur_u = unit_combo.currentData()
+            spin.setSuffix(cur_u)
+            spin.setDecimals(2 if cur_u == 'mm' else 1)
+            if cur_u == 'mm':
+                spin.setValue(self.pos_value * 25.4 / CORELDRAW_EXPORT_DPI)
+            else:
+                spin.setValue(float(self.pos_value))
+
+        unit_combo.currentIndexChanged.connect(on_unit_changed)
+        form.addRow(info_lbl)
+        form.addRow("坐标单位：", unit_combo)
+        form.addRow(f"{axis} 坐标数值：", spin)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+
+        spin.setFocus()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            chosen_u = unit_combo.currentData()
+            val = spin.value()
+            self.pos_value = val * CORELDRAW_EXPORT_DPI / 25.4 if chosen_u == 'mm' else val
+            self._sync_perp_points_and_update()
+
     def _show_context_menu(self, global_pos):
         if self.scene():
             self.scene().select_guide(self)
         menu = QMenu()
+        edit_act = menu.addAction(f"📏 精确设置位置... ({self.format_coord_text(True)})")
+        edit_act.triggered.connect(self._edit_pos_value_dialog)
+        menu.addSeparator()
         menu.addAction("删除此辅助线 (双击或按 Delete)").triggered.connect(
             lambda: self.scene().remove_guide(self) if self.scene() else None
         )
@@ -8529,7 +8671,9 @@ class LayoutScene(QGraphicsScene):
 
         main_window = self.parent()
         if main_window and hasattr(main_window, "status_bar"):
-            main_window.status_bar.showMessage("已选中辅助线，双击删除这条辅助线")
+            orient_lbl = "横向辅助线" if guide.orientation == Qt.Orientation.Horizontal else "竖向辅助线"
+            coord_info = guide.format_coord_text(True) if hasattr(guide, "format_coord_text") else ""
+            main_window.status_bar.showMessage(f"已选中{orient_lbl}  {coord_info}  |  右键可精确设置坐标，双击或按 Delete 删除")
 
     def clear_guide_selection(self):
         """取消辅助线高亮和删除提示。"""
@@ -12299,9 +12443,14 @@ class LayoutView(QGraphicsView):
                 self._guide_preview.pos_value = scene_pos.y()
             else:
                 self._guide_preview.pos_value = scene_pos.x()
+            self._guide_preview._dragging = True
             self._guide_preview._update_pos()
             self._guide_preview.update()
-            self.update() 
+            if self.scene() and hasattr(self._guide_preview, 'format_coord_text'):
+                orient_lbl = "横向辅助线" if self._guide_orientation == Qt.Orientation.Horizontal else "竖向辅助线"
+                self.scene()._show_status_message(f"正在拖出{orient_lbl}  {self._guide_preview.format_coord_text(True)}", 2000)
+            self.viewport().update()
+            self.update()
             event.accept()
             return
 
@@ -12449,9 +12598,14 @@ class LayoutView(QGraphicsView):
 
         # 结束辅助线拖拽
         if self._guide_dragging:
+            if self._guide_preview:
+                self._guide_preview._dragging = False
+                if self.scene():
+                    self.scene().select_guide(self._guide_preview)
             self._guide_dragging = False
             self._guide_preview = None
             self._guide_orientation = None
+            self.viewport().update()
             event.accept()
             return
 
