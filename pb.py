@@ -5,6 +5,8 @@ import math
 import copy
 import os
 import hashlib
+import re
+import zlib
 from xml.sax.saxutils import escape as xml_escape
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import *
@@ -3085,28 +3087,22 @@ class ProjectData:
             json.dump(project_data, f, indent=2, ensure_ascii=False)
 
     @staticmethod
-    def save_documents(documents, filepath):
-        """保存一个工程文件中的多个文档。"""
-        project_data = {
+    def build_documents_payload(documents):
+        """将多个文档（或单文档）序列化为标准 3.0 工程字典。"""
+        return {
             'version': '3.0',
             'documents': [
                 {
-                    'name': document.name,
+                    'name': getattr(document, 'name', None) or f'文档 {idx + 1}',
                     'data': ProjectData.scene_to_dict(document.scene)
                 }
-                for document in documents
+                for idx, document in enumerate(documents)
             ]
         }
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(project_data, f, indent=2, ensure_ascii=False)
-        print(f"多文档工程已保存: {len(project_data['documents'])} 个文档")
 
     @staticmethod
-    def read_documents(filepath):
-        """读取多文档工程；旧单文档格式会自动包装成一个文档。"""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            project_data = json.load(f)
-
+    def _parse_documents_payload(project_data, fallback_name='文档 1'):
+        """将工程字典规范化为文档列表。"""
         if isinstance(project_data, dict) and isinstance(project_data.get('documents'), list):
             documents = []
             for index, document in enumerate(project_data['documents']):
@@ -3120,9 +3116,123 @@ class ProjectData:
                     'data': data
                 })
             return documents or [{'name': '文档 1', 'data': {}}]
+        return [{'name': fallback_name, 'data': project_data}]
+
+    @staticmethod
+    def save_documents(documents, filepath):
+        """保存一个工程文件中的多个文档。"""
+        project_data = ProjectData.build_documents_payload(documents)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(project_data, f, indent=2, ensure_ascii=False)
+        print(f"多文档工程已保存: {len(project_data['documents'])} 个文档")
+
+    @staticmethod
+    def embed_project_into_pdf(pdf_path, documents):
+        """通过标准 PDF 增量更新将压缩后的 .vlayout 工程数据无损内嵌到 PDF 文件中。"""
+        if not pdf_path or not os.path.isfile(pdf_path) or not documents:
+            return False
+        payload = ProjectData.build_documents_payload(documents)
+        json_bytes = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        compressed = zlib.compress(json_bytes, level=9)
+
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+
+        startxref_matches = list(re.finditer(rb'startxref\s+(\d+)\s*%%EOF', pdf_bytes))
+        trailer_matches = list(re.finditer(rb'trailer\s*<<(.*?)>>', pdf_bytes, re.DOTALL))
+        if not startxref_matches or not trailer_matches:
+            return False
+
+        prev_xref = int(startxref_matches[-1].group(1))
+        trailer_body = trailer_matches[-1].group(1)
+
+        size_m = re.search(rb'/Size\s+(\d+)', trailer_body)
+        root_m = re.search(rb'/Root\s+(\d+\s+\d+\s+R)', trailer_body)
+        if not size_m or not root_m:
+            return False
+
+        obj_num = int(size_m.group(1))
+        root_ref = root_m.group(1)
+        info_m = re.search(rb'/Info\s+(\d+\s+\d+\s+R)', trailer_body)
+
+        chunks = []
+        if not pdf_bytes.endswith((b'\n', b'\r')):
+            chunks.append(b'\n')
+
+        obj_offset = len(pdf_bytes) + sum(len(c) for c in chunks)
+        obj_header = (
+            f"{obj_num} 0 obj\n"
+            f"<< /Type /VLayoutProject /Filter /FlateDecode /Length {len(compressed)} >>\n"
+            f"stream\n"
+        ).encode('ascii')
+        chunks.append(obj_header)
+        chunks.append(compressed)
+        chunks.append(b"\nendstream\nendobj\n")
+
+        new_xref_offset = len(pdf_bytes) + sum(len(c) for c in chunks)
+        xref_block = (
+            f"xref\n"
+            f"{obj_num} 1\n"
+            f"{obj_offset:010d} 00000 n \n"
+            f"trailer\n"
+            f"<<\n"
+            f"/Size {obj_num + 1}\n"
+            f"/Root {root_ref.decode('ascii')}\n"
+        )
+        if info_m:
+            xref_block += f"/Info {info_m.group(1).decode('ascii')}\n"
+        xref_block += (
+            f"/Prev {prev_xref}\n"
+            f"/VLayoutObj {obj_num} 0 R\n"
+            f">>\n"
+            f"startxref\n"
+            f"{new_xref_offset}\n"
+            f"%%EOF\n"
+        )
+        chunks.append(xref_block.encode('ascii'))
+
+        with open(pdf_path, 'ab') as f:
+            for c in chunks:
+                f.write(c)
+        return True
+
+    @staticmethod
+    def extract_project_from_pdf(pdf_path):
+        """从内嵌工程数据的 PDF 中提取并还原文档列表；若未包含则返回 None。"""
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+
+        pattern = re.compile(
+            rb'\d+\s+0\s+obj\s*<<[^>]*?/Type\s*/VLayoutProject[^>]*?/Length\s+(\d+)[^>]*?>>\s*stream\r?\n',
+            re.DOTALL
+        )
+        matches = list(pattern.finditer(pdf_bytes))
+        if not matches:
+            return None
+
+        last_m = matches[-1]
+        stream_len = int(last_m.group(1))
+        start_pos = last_m.end()
+        compressed = pdf_bytes[start_pos:start_pos + stream_len]
+        raw_json = zlib.decompress(compressed).decode('utf-8')
+        project_data = json.loads(raw_json)
+        fallback_name = os.path.splitext(os.path.basename(pdf_path))[0] or '文档 1'
+        return ProjectData._parse_documents_payload(project_data, fallback_name=fallback_name)
+
+    @staticmethod
+    def read_documents(filepath):
+        """读取多文档工程（支持 .vlayout 及内嵌工程数据的 .pdf）；旧单文档格式会自动包装成一个文档。"""
+        if str(filepath).lower().endswith('.pdf'):
+            docs = ProjectData.extract_project_from_pdf(filepath)
+            if docs is None:
+                raise ValueError("该 PDF 文件未包含 VertiLayout 内嵌工程数据")
+            return docs
+
+        with open(filepath, 'r', encoding='utf-8') as f:
+            project_data = json.load(f)
 
         name = os.path.splitext(os.path.basename(filepath))[0] or '文档 1'
-        return [{'name': name, 'data': project_data}]
+        return ProjectData._parse_documents_payload(project_data, fallback_name=name)
 
     @staticmethod
     def load(scene, filepath):
@@ -12925,13 +13035,15 @@ class LayoutView(QGraphicsView):
             for url in event.mimeData().urls():
                 path = url.toLocalFile()
                 
-                # 处理工程文件
-                if path.lower().endswith('.vlayout'):
+                # 处理工程文件及内嵌工程数据的 PDF
+                if path.lower().endswith(('.vlayout', '.pdf')):
                     # 使用主窗口的统一打开流程：会处理未保存提示、读取错误和标题更新。
-                    mw = self._main_window
+                    mw = getattr(self, '_main_window', None) or self.window()
+                    while mw and not hasattr(mw, 'open_project_file'):
+                        mw = mw.parent()
                     if mw and hasattr(mw, 'open_project_file'):
                         # 延迟调用，避免在拖放事件处理中销毁当前视图。
-                        QTimer.singleShot(100, lambda p=path: mw.open_project_file(p))
+                        QTimer.singleShot(100, lambda p=path, m=mw: m.open_project_file(p))
                     event.acceptProposedAction()
                     return
                 
@@ -18838,6 +18950,13 @@ class MainWindow(QMainWindow):
             if painter.isActive():
                 painter.end()
 
+        target_doc = next((d for d in getattr(self, '_documents', []) if d.scene is scene), None)
+        if target_doc is not None:
+            try:
+                ProjectData.embed_project_into_pdf(path, [target_doc])
+            except Exception as e:
+                print(f"内嵌工程数据到PDF失败: {e}")
+
         scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"PDF已导出: {path}")
         if show_dialog:
@@ -18884,6 +19003,11 @@ class MainWindow(QMainWindow):
             if painter.isActive():
                 painter.end()
 
+        try:
+            ProjectData.embed_project_into_pdf(path, documents)
+        except Exception as e:
+            print(f"内嵌多页工程数据到PDF失败: {e}")
+
         self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"多页合并PDF已导出: {path} (共 {len(documents)} 页)")
         if show_dialog:
@@ -18929,7 +19053,7 @@ class MainWindow(QMainWindow):
             return None
         for url in mime_data.urls():
             path = url.toLocalFile()
-            if path and path.lower().endswith('.vlayout'):
+            if path and path.lower().endswith(('.vlayout', '.pdf')):
                 return os.path.abspath(path)
         return None
 
@@ -19118,8 +19242,9 @@ class MainWindow(QMainWindow):
         if not os.path.isfile(path):
             QMessageBox.warning(self, "打开工程失败", f"找不到工程文件：\n{path}")
             return False
-        if not path.lower().endswith('.vlayout'):
-            QMessageBox.warning(self, "打开工程失败", "请选择 .vlayout 工程文件。")
+        is_pdf = path.lower().endswith('.pdf')
+        if not path.lower().endswith(('.vlayout', '.pdf')):
+            QMessageBox.warning(self, "打开工程失败", "请选择 .vlayout 工程文件或本软件导出的 PDF 文件。")
             return False
         if not self._ask_save_before_action("打开工程"):
             return False
@@ -19130,7 +19255,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._replace_documents(document_data)
-        self._current_project_path = path
+        self._current_project_path = None if is_pdf else path
         for document in self._documents:
             document.dirty = False
             self._update_document_tab_title(document)
@@ -19146,7 +19271,7 @@ class MainWindow(QMainWindow):
     def load_proj(self):
         default_dir = self.scene.config_manager.get('default_save_dir', '') or \
                       (os.path.dirname(self._current_project_path) if self._current_project_path else '')
-        path, _ = QFileDialog.getOpenFileName(self, "打开工程", default_dir, "VLayout (*.vlayout)")
+        path, _ = QFileDialog.getOpenFileName(self, "打开工程", default_dir, "工程与可编辑PDF (*.vlayout *.pdf);;VLayout (*.vlayout);;PDF (*.pdf)")
         if path:
             self.open_project_file(path)
     
