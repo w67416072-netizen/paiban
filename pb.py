@@ -229,6 +229,8 @@ class ConfigManager:
             'last_split_keep_mode': 'remove',
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
+            'sidebar_tab_order': ['层级', '属性', '组合素材', '常用文字'],
+            'multi_pdf_export_mode': 'merged',  # 多文档PDF导出方式：'merged'（合并为一个多页PDF，按文档先后次序一文档一页） / 'separate'（按页码拆分为多个独立PDF）
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
             'license_expiry_date': '',
             'last_login_time': '',
@@ -2125,6 +2127,15 @@ class ToastNotification(QWidget):
         """点击立即关闭"""
         self._timer.stop()
         self._fade_out()
+
+    _shared_instance = None
+
+    @classmethod
+    def notify(cls, message, icon="✅", duration=3500):
+        """全局右下角弹出通知入口（无需模态确认，自动淡出消失）"""
+        if cls._shared_instance is None:
+            cls._shared_instance = cls()
+        cls._shared_instance.show_message(message, icon=icon, duration=duration)
 
 
 class GroupAssetPreviewPopup(QWidget):
@@ -10391,6 +10402,7 @@ class LayoutScene(QGraphicsScene):
         if asset:
             print(f"组合素材已保存 {asset['name']} (包含 {len(items)} 个元素)")
             self.refresh_asset_library()
+            ToastNotification.notify(f"组合素材已保存：{asset['name']}（共 {len(items)} 个元素）", "✅", 3500)
         else:
             print("保存组合素材失败")
     
@@ -13184,7 +13196,7 @@ class ExcelPreviewDialog(QDialog):
                         ws.append([generation, d_item, 'd'])
             
             wb.save(save_path)
-            QMessageBox.information(self, "保存成功", f"数据已保存到：\n{save_path}")
+            ToastNotification.notify(f"保存成功\n数据已保存到：{save_path}", "✅", 4000)
             
         except Exception as e:
             QMessageBox.critical(self, "保存失败", f"保存Excel文件失败：\n{e}")
@@ -13980,6 +13992,7 @@ class MainWindow(QMainWindow):
         self.scene.selectionChanged.connect(self.on_selection_changed)
         self._asset_manager = self.scene.asset_manager
         self._toast = ToastNotification()
+        ToastNotification._shared_instance = self._toast
         self._last_selected_images = []  # 缓存最后一次选中的图片列表
         self.view = LayoutView(self.scene)
         self.view.set_main_window(self)
@@ -14004,16 +14017,33 @@ class MainWindow(QMainWindow):
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
         self.sidebar_tabs = QTabWidget()
         self.sidebar_tabs.setObjectName("sidebar_tabs")
-        self.sidebar_tabs.addTab(self.tree_widget, "层级")
+        self.sidebar_tabs.setMovable(True)  # 允许用户直接用鼠标左右拖动调整 4 个标签的先后顺序
         self.property_panel = self.create_property_panel()
-        self.sidebar_tabs.addTab(self.property_panel, "属性")
 
-        # 实例化素材控制器并将「组合素材」和「常用文字」标签页直接放入右侧标签栏（层级和属性后面）
+        # 实例化素材控制器并将「层级 / 属性 / 组合素材 / 常用文字」按用户保存的顺序放入右侧标签栏
         self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
         self.asset_library_dock.setObjectName("dock_assets_Legacy")
-        self.sidebar_tabs.addTab(self.asset_library_dock.group_tab_widget, "组合素材")
-        self.sidebar_tabs.addTab(self.asset_library_dock.text_tab_widget, "常用文字")
         self.asset_library_dock.hide()  # 隐藏旧独立壳容器，仅保留其控制器逻辑与内部组件
+
+        self._sidebar_tab_map = {
+            "层级": self.tree_widget,
+            "属性": self.property_panel,
+            "组合素材": self.asset_library_dock.group_tab_widget,
+            "常用文字": self.asset_library_dock.text_tab_widget,
+        }
+        saved_order = self.scene.config_manager.get('sidebar_tab_order', ["层级", "属性", "组合素材", "常用文字"])
+        if not isinstance(saved_order, list):
+            saved_order = ["层级", "属性", "组合素材", "常用文字"]
+        added_names = []
+        for tab_name in saved_order:
+            if tab_name in self._sidebar_tab_map and tab_name not in added_names:
+                self.sidebar_tabs.addTab(self._sidebar_tab_map[tab_name], tab_name)
+                added_names.append(tab_name)
+        for tab_name, widget in self._sidebar_tab_map.items():
+            if tab_name not in added_names:
+                self.sidebar_tabs.addTab(widget, tab_name)
+                added_names.append(tab_name)
+        self.sidebar_tabs.tabBar().tabMoved.connect(self._on_sidebar_tab_moved)
 
         self.sidebar_dock.setWidget(self.sidebar_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar_dock)
@@ -14025,13 +14055,15 @@ class MainWindow(QMainWindow):
         self.asset_library = None
         
         self.document_tabs = QTabWidget()
-        self.document_tabs.setMovable(False)
         self.document_tabs.setDocumentMode(False)
         # 使用自定义标签栏，+ 按钮紧跟在标签后面
         plus_tab_bar = PlusTabBar()
         plus_tab_bar.addTabRequested.connect(self.new_document)
         plus_tab_bar.setTabsClosable(True)
+        plus_tab_bar.setMovable(True)
+        plus_tab_bar.tabMoved.connect(self._on_document_tab_moved)
         self.document_tabs.setTabBar(plus_tab_bar)
+        self.document_tabs.setMovable(True)
         self.document_tabs.setTabsClosable(True)
         self.document_tabs.tabCloseRequested.connect(self.close_document)
         self.document_tabs.tabBarDoubleClicked.connect(self.rename_document)
@@ -14102,6 +14134,37 @@ class MainWindow(QMainWindow):
         
         # 延迟触发加号按钮显示
         QTimer.singleShot(100, lambda: self.document_tabs.tabBar()._move_plus_btn())
+
+    def show_toast(self, message, icon="✅", duration=3500):
+        """在屏幕右下角弹出操作成功/提示通知，并同步状态栏消息"""
+        if hasattr(self, '_toast') and self._toast:
+            self._toast.show_message(message, icon=icon, duration=duration)
+        else:
+            ToastNotification.notify(message, icon=icon, duration=duration)
+        if hasattr(self, 'status_bar') and self.status_bar:
+            first_line = str(message).splitlines()[0] if message else ""
+            self.status_bar.showMessage(first_line, duration)
+
+    def _on_sidebar_tab_moved(self, from_index, to_index):
+        """当用户拖动右侧面板标签改变顺序时，自动将最新顺序保存到 config.json"""
+        current_order = [
+            self.sidebar_tabs.tabText(i)
+            for i in range(self.sidebar_tabs.count())
+        ]
+        self._set_shared_config('sidebar_tab_order', current_order)
+
+    def _on_document_tab_moved(self, from_index, to_index):
+        """当用户拖动顶部文档标签调整先后次序时，同步更新 self._documents 列表顺序（决定多页PDF的页码先后次序）"""
+        if self._loading_documents:
+            return
+        if 0 <= from_index < len(self._documents) and 0 <= to_index < len(self._documents):
+            doc = self._documents.pop(from_index)
+            self._documents.insert(to_index, doc)
+            for d in self._documents:
+                d.dirty = True
+            self._update_document_tab_title(doc)
+        if hasattr(self, 'document_tabs') and hasattr(self.document_tabs.tabBar(), '_move_plus_btn'):
+            self.document_tabs.tabBar()._move_plus_btn()
 
     def _create_document(self, name):
         """创建一个独立的场景和视图。"""
@@ -15285,10 +15348,37 @@ class MainWindow(QMainWindow):
         export_pdf_action.triggered.connect(self.export_pdf)
         export_submenu.addAction(export_pdf_action)
 
+        export_merged_pdf_action = QAction('导出全部文档为单个多页 PDF（按文档先后次序一档一页）...', self)
+        export_merged_pdf_action.triggered.connect(self.export_all_documents_merged_pdf)
+        export_submenu.addAction(export_merged_pdf_action)
+
         save_and_pdf_action = QAction('保存项目并导出全部文档 PDF', self)
         save_and_pdf_action.setShortcut('Ctrl+Shift+P')
         save_and_pdf_action.triggered.connect(self.save_proj_and_pdf)
         export_submenu.addAction(save_and_pdf_action)
+
+        # 多文档 PDF 导出方式切换子菜单
+        pdf_mode_menu = export_submenu.addMenu('多文档 PDF 导出方式切换')
+        self.pdf_export_mode_group = QActionGroup(self)
+        self.pdf_export_mode_group.setExclusive(True)
+        self.pdf_mode_merged_action = QAction('合并为一个多页 PDF（一文档一页，按文档先后次序排页码）', self)
+        self.pdf_mode_merged_action.setCheckable(True)
+        self.pdf_mode_merged_action.setData('merged')
+        self.pdf_mode_separate_action = QAction('拆分为多个独立 PDF（按起始页码导出 1.pdf, 2.pdf...）', self)
+        self.pdf_mode_separate_action.setCheckable(True)
+        self.pdf_mode_separate_action.setData('separate')
+        self.pdf_export_mode_group.addAction(self.pdf_mode_merged_action)
+        self.pdf_export_mode_group.addAction(self.pdf_mode_separate_action)
+        pdf_mode_menu.addAction(self.pdf_mode_merged_action)
+        pdf_mode_menu.addAction(self.pdf_mode_separate_action)
+        current_pdf_mode = self.scene.config_manager.get('multi_pdf_export_mode', 'merged')
+        if current_pdf_mode == 'separate':
+            self.pdf_mode_separate_action.setChecked(True)
+        else:
+            self.pdf_mode_merged_action.setChecked(True)
+        self.pdf_export_mode_group.triggered.connect(
+            lambda act: self.set_multi_pdf_export_mode(act.data())
+        )
 
         export_submenu.addSeparator()
 
@@ -16182,11 +16272,7 @@ class MainWindow(QMainWindow):
         expiry_text = expiry_edit.dateTime().toString(LICENSE_EXPIRY_DATETIME_FORMAT)
         config.set("license_expiry_date", expiry_text)
         self.update_license_expiry_display()
-        QMessageBox.information(
-            self,
-            "授权设置",
-            f"软件到期时间已设置为：{expiry_text}"
-        )
+        self.show_toast(f"授权设置成功\n软件到期时间已设置为：{expiry_text}", "✅", 4000)
 
     def change_license_password(self):
         """修改管理员授权密码。"""
@@ -16221,7 +16307,7 @@ class MainWindow(QMainWindow):
             "license_password_hash",
             hash_license_password(new_password)
         )
-        QMessageBox.information(self, "修改授权密码", "授权密码已修改。")
+        self.show_toast("授权密码已修改", "✅", 3500)
 
     def set_nudge_large_step(self):
         """设置Shift+方向键大步长"""
@@ -16310,8 +16396,7 @@ class MainWindow(QMainWindow):
             self.scene._editing_group_asset_id = None
             self.scene._editing_group_items = []
             self.asset_library_dock.refresh_assets()
-            self.status_bar.showMessage(f"组合「{result['name']}」已更新到素材库", 4000)
-            QMessageBox.information(self, "更新成功", f"组合「{result['name']}」已成功更新到素材库")
+            self.show_toast(f"更新成功\n组合「{result['name']}」已成功更新到素材库", "✅", 4000)
         else:
             QMessageBox.warning(self, "更新失败", "更新素材库失败，请重试")
 
@@ -17736,13 +17821,10 @@ class MainWindow(QMainWindow):
             self.view.fitInView(imported_rect.adjusted(-100, -100, 100, 100), Qt.AspectRatioMode.KeepAspectRatio)
             self.view.transformChanged.emit()
         self.scene.update()
-        self.status_bar.showMessage(f"已导入 {len(imported_items)} 个元素", 4000)
-        QMessageBox.information(
-            self, "导入完成",
-            f"已导入 {len(imported_items)} 个元素。\n"
-            f"A组（主记录）：{count_a} 条\n"
-            f"D组（附加文字）：{count_d} 条\n"
-            f"跳过 {skipped} 行/项。"
+        self.show_toast(
+            f"导入完成：共导入 {len(imported_items)} 个元素\n"
+            f"A组（主记录）：{count_a} 条  |  D组（附加文字）：{count_d} 条  |  跳过：{skipped} 项",
+            "✅", 4500
         )
     
     def _open_font_dialog(self):
@@ -18233,6 +18315,7 @@ class MainWindow(QMainWindow):
                     self.scene._rendering_export = False
                 img.save(path)
                 print(f"图片已导出到: {path}")
+                self.show_toast(f"图片导出完成\n{path}", "✅", 4000)
                 
                 # 恢复选中状态
                 for item in selected_items:
@@ -18420,13 +18503,11 @@ class MainWindow(QMainWindow):
         try:
             wb.save(path)
             self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.status_bar.showMessage(f"Excel 已导出: {path}", 4000)
-            QMessageBox.information(self, "导出完成",
-                f"已导出到：\n{path}\n\n"
-                f"图片：{ws_img.max_row - 1} 条  "
-                f"文字：{ws_txt.max_row - 1} 条  "
-                f"连线：{ws_conn.max_row - 1} 条\n\n"
-                f"坐标已转换为 CorelDRAW 坐标系（单位：mm，Y轴向上，DPI={DPI}）")
+            self.show_toast(
+                f"Excel 导出完成：{os.path.basename(path)}\n"
+                f"图片：{ws_img.max_row - 1} 条  文字：{ws_txt.max_row - 1} 条  连线：{ws_conn.max_row - 1} 条",
+                "✅", 4500
+            )
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"写入 Excel 失败：\n{e}")
 
@@ -18447,11 +18528,9 @@ class MainWindow(QMainWindow):
         try:
             CorelSvgExporter.export(self.scene, path)
             self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.status_bar.showMessage(f"SVG已导出: {path}", 3000)
-            QMessageBox.information(
-                self,
-                "导出完成",
-                "SVG已导出。文字、线条和图片会以可选对象保存，适合在CorelDRAW中继续编辑。"
+            self.show_toast(
+                f"SVG 导出完成：{os.path.basename(path)}\n文字、线条和图片已按可编辑对象保存",
+                "✅", 4000
             )
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出SVG失败:\n{e}")
@@ -18575,9 +18654,27 @@ class MainWindow(QMainWindow):
             path += '.pdf'
         self._do_export_pdf(path, show_dialog=True)
 
-    def _do_export_pdf(self, path, show_dialog=False, scene=None):
-        """实际执行PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
-        scene = scene or self.scene
+    def set_multi_pdf_export_mode(self, mode):
+        """切换多文档 PDF 导出方式：'merged'（合并为一个多页PDF） / 'separate'（拆分为多个独立PDF）"""
+        if mode not in ('merged', 'separate'):
+            mode = 'merged'
+        self._set_shared_config('multi_pdf_export_mode', mode)
+        if hasattr(self, 'pdf_mode_merged_action') and hasattr(self, 'pdf_mode_separate_action'):
+            self.pdf_mode_merged_action.blockSignals(True)
+            self.pdf_mode_separate_action.blockSignals(True)
+            self.pdf_mode_merged_action.setChecked(mode == 'merged')
+            self.pdf_mode_separate_action.setChecked(mode == 'separate')
+            self.pdf_mode_merged_action.blockSignals(False)
+            self.pdf_mode_separate_action.blockSignals(False)
+        mode_desc = (
+            "合并为一个多页 PDF（按文档先后次序一文档一页）"
+            if mode == 'merged'
+            else "拆分为多个独立 PDF（按页码导出 1.pdf, 2.pdf...）"
+        )
+        self.show_toast(f"多文档 PDF 导出方式已切换为：\n{mode_desc}", "✅", 3500)
+
+    def _render_single_scene_to_pdf_page(self, painter, printer, scene):
+        """将单个文档 scene 渲染到当前 PDF 页面（供单页导出与多页合并导出共用）"""
         original_show_grid = scene.show_grid
         original_show_connectors = scene.show_connectors
         original_show_image_text_connectors = scene.show_image_text_connectors
@@ -18586,7 +18683,6 @@ class MainWindow(QMainWindow):
         selected_items = scene.selectedItems()
 
         try:
-            # 隐藏所有辅助元素，只保留图文连线
             scene.show_grid = False
             scene.set_connectors_visible(False)
             scene.set_image_text_connectors_visible(True)
@@ -18594,31 +18690,13 @@ class MainWindow(QMainWindow):
             scene.set_guides_visible(False)
             scene.clearSelection()
 
-            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-            printer.setOutputFileName(path)
-
             rect = scene.sceneRect()
-            # 使用与 CorelDRAW SVG 导出相同的 DPI (600)，确保尺寸一致
-            width_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
-            height_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
-
-            page_size = QPageSize(QSizeF(width_mm, height_mm), QPageSize.Unit.Millimeter)
-            printer.setPageSize(page_size)
-            printer.setPageOrientation(QPageLayout.Orientation.Portrait)
-            printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
-
-            painter = QPainter()
-            painter.begin(printer)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
             target_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
             scale = min(target_rect.width() / rect.width(), target_rect.height() / rect.height())
+
+            painter.save()
             painter.scale(scale, scale)
 
-            # 设置PDF导出标志：跳过灰色背景/阴影，保留背景图片，隐藏0%透明度图片图元
             scene._rendering_pdf = True
             scene._rendering_export = True
             zero_op_p_items = [
@@ -18635,9 +18713,7 @@ class MainWindow(QMainWindow):
                     p_it.setVisible(True)
                 scene._rendering_pdf = False
                 scene._rendering_export = False
-
-            painter.end()
-
+                painter.restore()
         finally:
             scene._rendering_pdf = False
             scene.show_grid = original_show_grid
@@ -18649,15 +18725,107 @@ class MainWindow(QMainWindow):
                 item.setSelected(True)
             scene.update()
 
+    def _do_export_pdf(self, path, show_dialog=False, scene=None):
+        """实际执行单文档PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
+        scene = scene or self.scene
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+
+        rect = scene.sceneRect()
+        width_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
+        height_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
+
+        page_size = QPageSize(QSizeF(width_mm, height_mm), QPageSize.Unit.Millimeter)
+        printer.setPageSize(page_size)
+        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+
+        painter = QPainter()
+        painter.begin(printer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        try:
+            self._render_single_scene_to_pdf_page(painter, printer, scene)
+        finally:
+            if painter.isActive():
+                painter.end()
+
         scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"PDF已导出: {path}")
         if show_dialog:
-            QMessageBox.information(
-                self, "导出完成",
-                f"PDF已成功导出到：\n{path}\n\n"
-                f"画布尺寸：{int(width_mm)} × {int(height_mm)} mm\n\n"
-                "已包含：背景图片、文字、图片、图文连线"
+            self.show_toast(
+                f"PDF 导出完成：{os.path.basename(path)}\n画布尺寸：{int(width_mm)} × {int(height_mm)} mm",
+                "✅", 4000
             )
+
+    def _do_export_merged_pdf(self, path, documents=None, show_dialog=False):
+        """将多个文档按标签先后次序合成为一个多页 PDF（每个文档占一页，第1个文档为第1页，依此类推）"""
+        documents = documents or self._documents
+        if not documents:
+            return False
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+
+        first_rect = documents[0].scene.sceneRect()
+        first_w_mm = first_rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
+        first_h_mm = first_rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
+        printer.setPageSize(QPageSize(QSizeF(first_w_mm, first_h_mm), QPageSize.Unit.Millimeter))
+        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+        printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+
+        painter = QPainter()
+        painter.begin(printer)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        try:
+            for idx, doc in enumerate(documents):
+                rect = doc.scene.sceneRect()
+                w_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
+                h_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
+                if idx > 0:
+                    printer.setPageSize(QPageSize(QSizeF(w_mm, h_mm), QPageSize.Unit.Millimeter))
+                    printer.setPageOrientation(QPageLayout.Orientation.Portrait)
+                    printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+                    printer.newPage()
+                self._render_single_scene_to_pdf_page(painter, printer, doc.scene)
+        finally:
+            if painter.isActive():
+                painter.end()
+
+        self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+        print(f"多页合并PDF已导出: {path} (共 {len(documents)} 页)")
+        if show_dialog:
+            self.show_toast(
+                f"多页 PDF 导出完成：{os.path.basename(path)}\n共 {len(documents)} 页（按文档先后次序一档一页）",
+                "✅", 4500
+            )
+        return True
+
+    def export_all_documents_merged_pdf(self):
+        """单独调用：将当前工程全部文档按先后次序合成为一个多页 PDF 文件"""
+        if not self._documents:
+            return
+        default_dir = self.scene.config_manager.get('default_save_dir', '') or \
+                      (os.path.dirname(self._current_project_path) if self._current_project_path else '')
+        if self._current_project_path:
+            base_name = os.path.splitext(os.path.basename(self._current_project_path))[0] + ".pdf"
+        else:
+            base_name = "合并导出.pdf"
+        default_path = os.path.join(default_dir, base_name) if default_dir else base_name
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出全部文档为单个多页 PDF", default_path, "PDF (*.pdf)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith('.pdf'):
+            path += '.pdf'
+        self._do_export_merged_pdf(path, self._documents, show_dialog=True)
 
     def new_project(self):
         """新建工程，关闭当前工程中的全部文档。"""
@@ -18712,7 +18880,7 @@ class MainWindow(QMainWindow):
                 document.dirty = False
                 self._update_document_tab_title(document)
             self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.status_bar.showMessage(f"已保存: {path}", 3000)
+            self.show_toast(f"工程已保存：{os.path.basename(path)}", "✅", 3000)
             return True
         return False
 
@@ -18723,13 +18891,13 @@ class MainWindow(QMainWindow):
             for document in self._documents:
                 document.dirty = False
                 self._update_document_tab_title(document)
-            self.status_bar.showMessage(f"已保存: {self._current_project_path}", 3000)
+            self.show_toast(f"工程已保存：{os.path.basename(self._current_project_path)}", "✅", 3000)
             return True
         else:
             return self.save_proj()
 
     def save_proj_and_pdf(self):
-        """一键保存多文档工程，并按页码为每个文档导出一个 PDF。"""
+        """一键保存多文档工程并导出全部文档 PDF（支持「合并为一个多页PDF」与「按页码拆分为多个PDF」随时切换）"""
         # 第一步：确保项目已有保存路径
         if not self._current_project_path:
             if not self.save_proj():
@@ -18738,42 +18906,125 @@ class MainWindow(QMainWindow):
         # 第二步：保存项目
         ProjectData.save_documents(self._documents, self._current_project_path)
         for document in self._documents:
-                document.dirty = False
-                self._update_document_tab_title(document)
+            document.dirty = False
+            self._update_document_tab_title(document)
         self.status_bar.showMessage(f"项目已保存: {self._current_project_path}", 2000)
 
-        # 第三步：指定第一个文档的页码，后续文档自动递增
-        first_page, ok = MinimalInputDialog.getInt(
-            self,
-            "批量导出 PDF",
-            "请输入第一个文档的页码：",
-            1,
-            1,
-            999999,
-            1
+        pdf_dir = os.path.dirname(self._current_project_path)
+        proj_stem = os.path.splitext(os.path.basename(self._current_project_path))[0]
+        current_mode = self.scene.config_manager.get('multi_pdf_export_mode', 'merged')
+
+        # 第三步：弹出导出方式与参数确认对话框（可随时在「合并为一个PDF」与「拆分为多个PDF」之间切换）
+        dlg = QDialog(self)
+        dlg.setWindowTitle("导出全部文档 PDF")
+        dlg.setMinimumWidth(440)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(20, 18, 20, 18)
+        vbox.setSpacing(12)
+
+        doc_order_preview = " → ".join(
+            f"第{i}页:{doc.name}" for i, doc in enumerate(self._documents[:6], start=1)
         )
-        if not ok:
+        if len(self._documents) > 6:
+            doc_order_preview += f" …（共 {len(self._documents)} 页）"
+        order_lbl = QLabel(f"当前文档先后次序（共 {len(self._documents)} 个文档）：\n{doc_order_preview}")
+        order_lbl.setWordWrap(True)
+        order_lbl.setStyleSheet("color: #475569; font-size: 12px; background: #f8fafc; padding: 8px 10px; border-radius: 6px; border: 1px solid #e2e8f0;")
+        vbox.addWidget(order_lbl)
+
+        rb_merged = QRadioButton("合成一个多页 PDF 文件（一文档一页，按文档先后次序排列页数）", dlg)
+        rb_separate = QRadioButton("拆分为多个独立 PDF 文件（原方式：按页码生成 1.pdf、2.pdf…）", dlg)
+
+        # 合并导出文件名输入行
+        merged_box = QWidget(dlg)
+        merged_layout = QHBoxLayout(merged_box)
+        merged_layout.setContentsMargins(22, 2, 0, 2)
+        merged_layout.addWidget(QLabel("合并 PDF 文件名:"))
+        txt_merged_name = QLineEdit(f"{proj_stem}.pdf", merged_box)
+        merged_layout.addWidget(txt_merged_name, 1)
+        vbox.addWidget(rb_merged)
+        vbox.addWidget(merged_box)
+
+        # 拆分导出起始页码输入行
+        separate_box = QWidget(dlg)
+        separate_layout = QHBoxLayout(separate_box)
+        separate_layout.setContentsMargins(22, 2, 0, 2)
+        separate_layout.addWidget(QLabel("第一个文档起始页码:"))
+        spin_first_page = MinimalSpinBox(separate_box)
+        spin_first_page.setRange(1, 999999)
+        spin_first_page.setValue(1)
+        spin_first_page.setFixedWidth(110)
+        separate_layout.addWidget(spin_first_page)
+        separate_layout.addStretch(1)
+        vbox.addWidget(rb_separate)
+        vbox.addWidget(separate_box)
+
+        def _sync_mode_widgets():
+            is_merged = rb_merged.isChecked()
+            merged_box.setEnabled(is_merged)
+            separate_box.setEnabled(not is_merged)
+
+        rb_merged.toggled.connect(_sync_mode_widgets)
+        rb_separate.toggled.connect(_sync_mode_widgets)
+        if current_mode == 'separate':
+            rb_separate.setChecked(True)
+        else:
+            rb_merged.setChecked(True)
+        _sync_mode_widgets()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_cancel = QPushButton("取消", dlg)
+        btn_ok = QPushButton("开始导出", dlg)
+        btn_ok.setDefault(True)
+        btn_ok.setStyleSheet("QPushButton { background-color: #0969da; color: white; font-weight: 600; padding: 6px 18px; border-radius: 6px; } QPushButton:hover { background-color: #0550ae; }")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        vbox.addLayout(btn_row)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             self.status_bar.showMessage("已保存工程，已取消 PDF 导出", 3000)
             return
 
-        pdf_dir = os.path.dirname(self._current_project_path)
-        pdf_paths = []
-        for index, document in enumerate(self._documents, start=1):
-            page_number = first_page + index - 1
-            filename = f"{page_number}.pdf"
-            pdf_path = os.path.join(pdf_dir, filename)
-            self._do_export_pdf(pdf_path, scene=document.scene)
-            pdf_paths.append(pdf_path)
+        chosen_mode = 'merged' if rb_merged.isChecked() else 'separate'
+        self._set_shared_config('multi_pdf_export_mode', chosen_mode)
+        if hasattr(self, 'pdf_mode_merged_action') and hasattr(self, 'pdf_mode_separate_action'):
+            self.pdf_mode_merged_action.blockSignals(True)
+            self.pdf_mode_separate_action.blockSignals(True)
+            self.pdf_mode_merged_action.setChecked(chosen_mode == 'merged')
+            self.pdf_mode_separate_action.setChecked(chosen_mode == 'separate')
+            self.pdf_mode_merged_action.blockSignals(False)
+            self.pdf_mode_separate_action.blockSignals(False)
 
-        self.status_bar.showMessage(
-            f"已保存项目并导出 {len(pdf_paths)} 个文档 PDF", 4000
-        )
-        QMessageBox.information(
-            self,
-            "导出完成",
-            "工程和文档 PDF 已全部导出：\n\n" +
-            "\n".join(os.path.basename(path) for path in pdf_paths)
-        )
+        if chosen_mode == 'merged':
+            raw_name = txt_merged_name.text().strip() or f"{proj_stem}.pdf"
+            if not raw_name.lower().endswith('.pdf'):
+                raw_name += '.pdf'
+            merged_pdf_path = os.path.join(pdf_dir, raw_name)
+            self._do_export_merged_pdf(merged_pdf_path, self._documents, show_dialog=False)
+            self.show_toast(
+                f"已保存工程并合成多页 PDF：{os.path.basename(merged_pdf_path)}\n"
+                f"共 {len(self._documents)} 页（按文档先后次序一文档一页）",
+                "✅", 4500
+            )
+        else:
+            first_page = spin_first_page.value()
+            pdf_paths = []
+            for index, document in enumerate(self._documents, start=1):
+                page_number = first_page + index - 1
+                filename = f"{page_number}.pdf"
+                pdf_path = os.path.join(pdf_dir, filename)
+                self._do_export_pdf(pdf_path, scene=document.scene)
+                pdf_paths.append(pdf_path)
+
+            self.show_toast(
+                f"已保存工程并导出 {len(pdf_paths)} 个独立 PDF\n" +
+                "、".join(os.path.basename(path) for path in pdf_paths[:5]) +
+                (" 等" if len(pdf_paths) > 5 else ""),
+                "✅", 4500
+            )
 
     def open_project_file(self, path):
         """打开指定工程文件，供菜单和拖放入口共用。"""
@@ -18823,7 +19074,7 @@ class MainWindow(QMainWindow):
         )
         if path:
             if self.scene.set_background_image(path):
-                QMessageBox.information(self, "成功", f"背景图片已设置\n{path}")
+                self.show_toast(f"背景图片已设置\n{os.path.basename(path)}", "✅", 3500)
     
     def clear_background_image(self):
         """清除背景图片"""
@@ -18835,7 +19086,7 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.scene.set_background_image('')
-            QMessageBox.information(self, "成功", "背景图片已清除")
+            self.show_toast("背景图片已清除", "✅", 3500)
 
     def show_all_hidden_images(self):
         """显示所有被隐藏的图片"""
@@ -18990,10 +19241,9 @@ class MainWindow(QMainWindow):
             self.font_combo.setCurrentText(font.family())
             self.font_size_spin.setValue(font.pointSize())
             
-            QMessageBox.information(
-                self,
-                "设置成功",
-                f"默认字体已设置为:\n字体: {font.family()}\n大小: {font.pointSize()}pt\n\n新添加的文字将使用此字体。"
+            self.show_toast(
+                f"默认字体已设置：{font.family()} ({font.pointSize()}pt)",
+                "✅", 3500
             )
             print(f"默认字体已设置: {font.family()}, {font.pointSize()}pt")
 
