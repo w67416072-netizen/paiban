@@ -222,6 +222,7 @@ class ConfigManager:
             'insert_image_use_custom_size': False,  # 是否使用自定义插入尺寸
             'insert_image_fit_canvas': False,  # 插入图片时自动适应画布大小
             'hide_connection_points_when_image_selected': False,
+            'perpendicular_to_guide_enabled': False,  # 是否开启「连接点向辅助线画垂线」功能
             'show_text_hover_tooltip': False,
             'default_split_symbol': '|',  # 用户自定义的默认文本框拆分符号（全半角自动兼容）
             'default_split_keep_mode': 'remove',  # 默认拆分符号处理方式：remove / left / right
@@ -4454,12 +4455,15 @@ class ConnectionPoint(QGraphicsEllipseItem):
     def _show_context_menu(self, global_pos):
         """显示独立连接点菜单；视图拦截右键时也通过此入口调用。"""
         menu = QMenu()
-        perp_action = menu.addAction("⊥ 向辅助线画垂线 (Alt+V)")
-        menu.addSeparator()
+        sc = self.scene()
+        perp_action = None
+        if sc is not None and sc.is_perpendicular_to_guide_enabled():
+            perp_action = menu.addAction("⊥ 向辅助线画垂线 (Alt+V)")
+            menu.addSeparator()
         delete_action = menu.addAction("删除此连接点")
         chosen = menu.exec(global_pos)
-        if chosen == perp_action and self.scene() is not None:
-            self.scene().draw_perpendicular_to_guide(items=[self])
+        if perp_action is not None and chosen == perp_action and sc is not None:
+            sc.draw_perpendicular_to_guide(items=[self])
             return
         if chosen != delete_action or self.scene() is None:
             return
@@ -5497,8 +5501,10 @@ class BaseElement(QGraphicsItem):
         unbind_action = menu.addAction("解除父级绑定 (Unbind)")
         set_parent_action = menu.addAction("设置父级 (Set Parent)")
         
-        menu.addSeparator()
-        perp_to_guide_action = menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)")
+        perp_to_guide_action = None
+        if self.scene() and self.scene().is_perpendicular_to_guide_enabled():
+            menu.addSeparator()
+            perp_to_guide_action = menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)")
         
         # 批量图文连接选项
         if len(selected_items) >= 2:
@@ -5552,7 +5558,7 @@ class BaseElement(QGraphicsItem):
                 self.scene().connect_all_texts_to_image()
             elif action == clear_connections_action:
                 self.scene().remove_all_image_text_connections()
-        elif action == perp_to_guide_action:
+        elif perp_to_guide_action is not None and action == perp_to_guide_action:
             if self.scene():
                 sel = [i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
                 targets = sel if (len(sel) > 1 and (self in sel or self.get_root_parent_element() in sel)) else [self]
@@ -7132,8 +7138,7 @@ class SmoothPixmapItem(QGraphicsPixmapItem):
                 self._lod_cache_pixmap,
                 QRectF(self._lod_cache_pixmap.rect())
             )
-        if not (is_pdf or is_export) and isinstance(parent_img, VImageItem) and getattr(parent_img, 'image_opacity', 1.0) <= 0.001:
-            painter.fillRect(self._target_rect, QColor(0, 140, 255, 110))
+
         painter.restore()
 
 
@@ -7441,13 +7446,14 @@ class VImageItem(BaseElement):
             if self.scene() and isinstance(self.parentItem(), BaseElement) else None
         )
         menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
-        menu.addSeparator()
-        menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)").triggered.connect(
-            lambda: self.scene().draw_perpendicular_to_guide(
-                items=([i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
-                       if (self.isSelected() and len(self.scene().selectedItems()) > 1) else [self])
-            ) if self.scene() else None
-        )
+        if self.scene() and self.scene().is_perpendicular_to_guide_enabled():
+            menu.addSeparator()
+            menu.addAction("⊥ 连接点向辅助线画垂线 (Alt+V)").triggered.connect(
+                lambda: self.scene().draw_perpendicular_to_guide(
+                    items=([i for i in self.scene().selectedItems() if isinstance(i, (BaseElement, ConnectionPoint))]
+                           if (self.isSelected() and len(self.scene().selectedItems()) > 1) else [self])
+                ) if self.scene() else None
+            )
 
         menu.exec(global_pos)
 
@@ -7501,7 +7507,7 @@ class VImageItem(BaseElement):
         self._build_image_context_menu(event.screenPos())
 
     def paint(self, painter, option, widget):
-        """画布模式下为透明度 0% 的图片保留淡蓝色预览（导出 PDF、PNG、SVG 或打印时完全不可见）"""
+        """画布模式下为透明度 0% 的图片保留琥珀金实线外框预览（导出 PDF、PNG、SVG 或打印时完全不可见）"""
         scene = self.scene()
         is_pdf = getattr(scene, '_rendering_pdf', False) if scene else False
         is_export = getattr(scene, '_rendering_export', False) if scene else False
@@ -7512,7 +7518,11 @@ class VImageItem(BaseElement):
 
         if self.image_opacity <= 0.001 and not (is_pdf or is_export or is_thumb):
             painter.save()
-            painter.fillRect(self.boundingRect(), QColor(0, 140, 255, 45))
+            amber_pen = QPen(QColor(245, 158, 11, 240), 2.0, Qt.PenStyle.SolidLine)
+            amber_pen.setCosmetic(True)
+            painter.setPen(amber_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(self.boundingRect())
             painter.restore()
 
         super().paint(painter, option, widget)
@@ -9762,8 +9772,18 @@ class LayoutScene(QGraphicsScene):
         )
         return AddPerpendicularToGuideCommand(self, conn, foot_point, created_new_point=created_new)
 
+    def is_perpendicular_to_guide_enabled(self):
+        """是否开启「连接点向辅助线画垂线」功能"""
+        return bool(self.config_manager.get('perpendicular_to_guide_enabled', False))
+
     def draw_perpendicular_to_guide(self, items=None, target_guide=None):
         """从选中元素或连接点向辅助线画垂线（支持单个或批量选中，支持 Ctrl+Z 撤销）"""
+        if not self.is_perpendicular_to_guide_enabled():
+            self._show_status_message(
+                "「连接点向辅助线画垂线」功能当前已关闭，请先在顶部工具栏开启「⊥垂线」开关",
+                3500
+            )
+            return 0
         visible_guides = [g for g in self.guides if g.isVisible()]
         if not visible_guides:
             self._show_status_message("请先从顶部或左侧标尺拖出至少一条辅助线", 3500)
@@ -12255,17 +12275,18 @@ class LayoutView(QGraphicsView):
                         event.accept()
                         return
                     elif sc.avatar_connect_source is not None:
-                        hit_guide = next(
-                            (it for it in sc.items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape, Qt.SortOrder.DescendingOrder, self.transform())
-                             if isinstance(it, GuideItem) and it.isVisible()),
-                            None
-                        )
-                        if hit_guide is not None:
-                            sc.draw_perpendicular_to_guide(items=[sc.avatar_connect_source], target_guide=hit_guide)
-                            if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-                                sc.clear_avatar_connect_source()
-                            event.accept()
-                            return
+                        if sc.is_perpendicular_to_guide_enabled():
+                            hit_guide = next(
+                                (it for it in sc.items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape, Qt.SortOrder.DescendingOrder, self.transform())
+                                 if isinstance(it, GuideItem) and it.isVisible()),
+                                None
+                            )
+                            if hit_guide is not None:
+                                sc.draw_perpendicular_to_guide(items=[sc.avatar_connect_source], target_guide=hit_guide)
+                                if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                                    sc.clear_avatar_connect_source()
+                                event.accept()
+                                return
                         sc.clear_avatar_connect_source()
                         event.accept()
                         return
@@ -12354,10 +12375,11 @@ class LayoutView(QGraphicsView):
 
             # 如果点击的是辅助线（或正处于靠近辅助线的垂线虚线预览状态）：
             sc = self.scene()
-            hover_guide = getattr(sc, '_hover_perp_guide', None) if sc else None
+            perp_enabled = sc.is_perpendicular_to_guide_enabled() if sc else False
+            hover_guide = getattr(sc, '_hover_perp_guide', None) if (sc and perp_enabled) else None
             target_guide_hit = raw_hit if isinstance(raw_hit, GuideItem) else hover_guide
             if target_guide_hit is not None:
-                if event.button() == Qt.MouseButton.LeftButton and sc:
+                if event.button() == Qt.MouseButton.LeftButton and sc and perp_enabled:
                     if sc.connection_mode and sc.connection_source_point is not None:
                         src_pt = sc.connection_source_point
                         sc._hover_perp_guide = None
@@ -12539,9 +12561,9 @@ class LayoutView(QGraphicsView):
             if sc:
                 scene_pos = self.mapToScene(event.pos())
                 sc._connect_preview_scene_pos = scene_pos
-                # 检测：当有选中对象（或处于连线模式）且未按住左键拖拽时，鼠标靠近辅助线自动显示垂线虚线预览
+                # 检测：当开启垂线功能且有选中对象（或处于连线模式）且未按住左键拖拽时，鼠标靠近辅助线自动显示垂线虚线预览
                 old_hover_guide = getattr(sc, '_hover_perp_guide', None)
-                if not (event.buttons() & Qt.MouseButton.LeftButton) and sc._get_active_items_for_perp_preview():
+                if sc.is_perpendicular_to_guide_enabled() and not (event.buttons() & Qt.MouseButton.LeftButton) and sc._get_active_items_for_perp_preview():
                     sc._hover_perp_guide = sc.find_guide_near_pos(scene_pos, self.transform(), pixel_tolerance=24.0)
                 else:
                     sc._hover_perp_guide = None
@@ -14287,6 +14309,17 @@ class MainWindow(QMainWindow):
             self.show_connection_points_action.blockSignals(True)
             self.show_connection_points_action.setChecked(getattr(self.scene, 'show_connection_points', True))
             self.show_connection_points_action.blockSignals(False)
+        perp_enabled = self.scene.is_perpendicular_to_guide_enabled()
+        if hasattr(self, 'btn_perp_guide'):
+            self.btn_perp_guide.blockSignals(True)
+            self.btn_perp_guide.setChecked(perp_enabled)
+            self.btn_perp_guide.blockSignals(False)
+        if hasattr(self, 'perp_guide_enabled_action'):
+            self.perp_guide_enabled_action.blockSignals(True)
+            self.perp_guide_enabled_action.setChecked(perp_enabled)
+            self.perp_guide_enabled_action.blockSignals(False)
+        if hasattr(self, 'perp_guide_action'):
+            self.perp_guide_action.setEnabled(perp_enabled)
         if hasattr(self, 'btn_select_parent'):
             self.btn_select_parent.blockSignals(True)
             self.btn_select_parent.setChecked(
@@ -15199,6 +15232,17 @@ class MainWindow(QMainWindow):
         self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
         self.btn_show_cp.blockSignals(False)
 
+        self.btn_perp_guide = self._add_toolbar_action(
+            top_toolbar,
+            "⊥垂线",
+            self.toggle_perpendicular_to_guide_enabled,
+            "开启/关闭「连接点向辅助线画垂线」功能（开启后才可使用 Alt+V、右键画垂线及鼠标靠近辅助线虚线预览点击）",
+            checkable=True
+        )
+        self.btn_perp_guide.blockSignals(True)
+        self.btn_perp_guide.setChecked(self.scene.is_perpendicular_to_guide_enabled())
+        self.btn_perp_guide.blockSignals(False)
+
         # [顶部组4] 工具参数微调区（数值输入框放在横向工具栏更自然）
         top_toolbar.addSeparator()
         brush_lbl = QLabel(" 🖌笔刷半径:")
@@ -15734,10 +15778,17 @@ class MainWindow(QMainWindow):
         horiz_connect_action.triggered.connect(lambda: self.scene.connect_image_points_right_to_left())
         connect_asset_menu.addAction(horiz_connect_action)
 
-        perp_guide_action = QAction('⊥ 连接点向辅助线画垂线', self)
-        perp_guide_action.setShortcut('Alt+V')
-        perp_guide_action.triggered.connect(lambda: self.scene.draw_perpendicular_to_guide())
-        connect_asset_menu.addAction(perp_guide_action)
+        self.perp_guide_enabled_action = QAction('启用连接点向辅助线画垂线功能', self)
+        self.perp_guide_enabled_action.setCheckable(True)
+        self.perp_guide_enabled_action.setChecked(self.scene.is_perpendicular_to_guide_enabled())
+        self.perp_guide_enabled_action.toggled.connect(self.toggle_perpendicular_to_guide_enabled)
+        connect_asset_menu.addAction(self.perp_guide_enabled_action)
+
+        self.perp_guide_action = QAction('⊥ 连接点向辅助线画垂线', self)
+        self.perp_guide_action.setShortcut('Alt+V')
+        self.perp_guide_action.setEnabled(self.scene.is_perpendicular_to_guide_enabled())
+        self.perp_guide_action.triggered.connect(lambda: self.scene.draw_perpendicular_to_guide())
+        connect_asset_menu.addAction(self.perp_guide_action)
 
         connect_asset_menu.addSeparator()
 
@@ -15961,6 +16012,41 @@ class MainWindow(QMainWindow):
     def toggle_auto_exit_setting(self, enabled):
         """切换粘贴后自动退出编辑的开关"""
         self.scene.config_manager.set('auto_exit_after_paste', enabled)
+
+    def toggle_perpendicular_to_guide_enabled(self, enabled):
+        """开启/关闭「连接点向辅助线画垂线」功能"""
+        enabled = bool(enabled)
+        for document in getattr(self, '_documents', []):
+            document.scene.config_manager.set('perpendicular_to_guide_enabled', enabled)
+            if not enabled:
+                document.scene._hover_perp_guide = None
+                document.scene.update()
+        if self.scene:
+            self.scene.config_manager.set('perpendicular_to_guide_enabled', enabled)
+            if not enabled:
+                self.scene._hover_perp_guide = None
+                self.scene.update()
+        if hasattr(self, 'btn_perp_guide') and self.btn_perp_guide.isChecked() != enabled:
+            self.btn_perp_guide.blockSignals(True)
+            self.btn_perp_guide.setChecked(enabled)
+            self.btn_perp_guide.blockSignals(False)
+        if hasattr(self, 'perp_guide_enabled_action') and self.perp_guide_enabled_action.isChecked() != enabled:
+            self.perp_guide_enabled_action.blockSignals(True)
+            self.perp_guide_enabled_action.setChecked(enabled)
+            self.perp_guide_enabled_action.blockSignals(False)
+        if hasattr(self, 'perp_guide_action'):
+            self.perp_guide_action.setEnabled(enabled)
+        if hasattr(self, 'view') and self.view:
+            self.view._pending_perp_guide = None
+            self.view._pending_perp_items = []
+            self.view.viewport().update()
+        self.show_toast(
+            "已开启：连接点向辅助线画垂线（可使用 Alt+V、右键或点击辅助线画垂线）"
+            if enabled
+            else "已关闭：连接点向辅助线画垂线（辅助线恢复纯对齐/拖动，不会触发画垂线）",
+            "✅" if enabled else "⚠",
+            3500
+        )
 
     def toggle_select_child_selects_parent(self, enabled):
         """切换「选择子集时自动选中父级」功能开关"""
