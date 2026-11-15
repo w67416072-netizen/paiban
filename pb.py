@@ -7031,15 +7031,44 @@ class VTextItem(BaseElement):
     def boundingRect(self):
         return self._rect
 
+class ResizeImageCommand(UndoCommand):
+    """图片缩放调整尺寸的撤销/重做命令"""
+    def __init__(self, scene, image_item, old_w, old_h, old_scene_pos, new_w, new_h, new_scene_pos):
+        super().__init__(scene)
+        self.image_item = image_item
+        self.old_w = float(old_w)
+        self.old_h = float(old_h)
+        self.old_scene_pos = QPointF(old_scene_pos)
+        self.new_w = float(new_w)
+        self.new_h = float(new_h)
+        self.new_scene_pos = QPointF(new_scene_pos)
+
+    def execute(self):
+        if self.image_item and self.image_item.scene() == self.scene:
+            self.image_item._apply_resize(QRectF(0, 0, self.new_w, self.new_h), self.new_scene_pos)
+
+    def undo(self):
+        if self.image_item and self.image_item.scene() == self.scene:
+            self.image_item._apply_resize(QRectF(0, 0, self.old_w, self.old_h), self.old_scene_pos)
+
+
 class ResizeHandle(QGraphicsItem):
-    """图片缩放控制点：角点=方形(等比)，边中点=圆形(单向)"""
+    """Photoshop 风格图片缩放控制点：
+    - 默认全部 8 个控制点（四角 + 四边中点）均为等比缩放
+    - 按住 Shift 拖拽：临时切换为自由非等比拉伸（单向或自由宽高拉伸）
+    - 按住 Alt 拖拽：以图片中心点为基准向四周对称缩放
+    """
     SIZE = 10
 
     TOOLTIPS = {
-        'tl': '等比缩放', 'tr': '等比缩放',
-        'bl': '等比缩放', 'br': '等比缩放',
-        'tc': '上下拉伸', 'bc': '上下拉伸',
-        'ml': '左右拉伸', 'mr': '左右拉伸',
+        'tl': '等比缩放（按住Shift自由拉伸，按住Alt从中心缩放）',
+        'tr': '等比缩放（按住Shift自由拉伸，按住Alt从中心缩放）',
+        'bl': '等比缩放（按住Shift自由拉伸，按住Alt从中心缩放）',
+        'br': '等比缩放（按住Shift自由拉伸，按住Alt从中心缩放）',
+        'tc': '等比缩放（按住Shift上下拉伸，按住Alt从中心缩放）',
+        'bc': '等比缩放（按住Shift上下拉伸，按住Alt从中心缩放）',
+        'ml': '等比缩放（按住Shift左右拉伸，按住Alt从中心缩放）',
+        'mr': '等比缩放（按住Shift左右拉伸，按住Alt从中心缩放）',
     }
 
     def __init__(self, parent_image, role):
@@ -7076,10 +7105,8 @@ class ResizeHandle(QGraphicsItem):
         pen = QPen(border, 1.5 / (self.scene().views()[0].transform().m11() if self.scene() and self.scene().views() else 1))
         painter.setPen(pen)
         painter.setBrush(QBrush(fill))
-        if self.is_corner:
-            painter.drawRect(QRectF(-s/2, -s/2, s, s))
-        else:
-            painter.drawEllipse(QRectF(-s/2, -s/2, s, s))
+        # Photoshop 风格：全部 8 个控制点统一为清晰的小方框
+        painter.drawRect(QRectF(-s/2, -s/2, s, s))
 
     def _update_cursor(self):
         cursors = {
@@ -7106,62 +7133,126 @@ class ResizeHandle(QGraphicsItem):
             self._orig_rect = QRectF(self.parent_image._rect)
             self._orig_pos = self.parent_image.scenePos()
             self._orig_pos_local = self.parent_image.pos()
-            # 记录按下时在图片本地坐标系的位置
-            self._drag_start_local = self.parent_image.mapFromScene(event.scenePos())
+            self._drag_start_scene = event.scenePos()
+            sc = self.scene()
+            if sc and getattr(sc, 'resize_mode', False):
+                snapshot = getattr(sc, '_resize_snapshot', None)
+                if isinstance(snapshot, dict) and self.parent_image not in snapshot:
+                    snapshot[self.parent_image] = {
+                        'rect': QRectF(self.parent_image._rect),
+                        'pos': self.parent_image.scenePos(),
+                        'width': self.parent_image.target_width,
+                        'height': getattr(self.parent_image, 'target_height', self.parent_image.boundingRect().height()),
+                    }
             event.accept()
 
     def mouseMoveEvent(self, event):
         if not self._dragging:
             return
         img = self.parent_image
-        # 用原始场景坐标系计算 delta，避免 img 位置变化导致坐标系偏移
-        scene_start = self._drag_start_local  # 这是原始本地坐标
-        # 将当前鼠标场景坐标转到原始位置的本地坐标系
-        # 用 orig_pos 重建变换，避免 img 已经移动的影响
         cur_scene = event.scenePos()
-        # 直接用场景坐标差值（不依赖 img 当前位置）
-        orig_scene = self._orig_pos + scene_start  # 近似：orig_scene_pos + local_offset
-        dx = cur_scene.x() - orig_scene.x()
-        dy = cur_scene.y() - orig_scene.y()
+        dx = cur_scene.x() - self._drag_start_scene.x()
+        dy = cur_scene.y() - self._drag_start_scene.y()
 
-        r = QRectF(self._orig_rect)
+        orig_w = max(1.0, self._orig_rect.width())
+        orig_h = max(1.0, self._orig_rect.height())
+        cx = orig_w / 2.0
+        cy = orig_h / 2.0
+        ratio = img._orig_ratio if getattr(img, '_orig_ratio', 0) > 0 else (orig_h / orig_w)
+        min_w = max(20.0, 20.0 / ratio) if ratio > 0 else 20.0
+        min_h = min_w * ratio
 
-        r = QRectF(self._orig_rect)
+        modifiers = event.modifiers()
+        free_stretch = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        from_center = bool(modifiers & Qt.KeyboardModifier.AltModifier)
 
-        # 根据角色调整矩形
-        if 'r' in self.role:
-            r.setRight(r.right() + dx)
-        if 'l' in self.role:
-            r.setLeft(r.left() + dx)
-        if 'b' in self.role:
-            r.setBottom(r.bottom() + dy)
-        if 't' in self.role:
-            r.setTop(r.top() + dy)
+        if not free_stretch:
+            # ── Photoshop 默认模式：全部 8 个控制点均为等比缩放 ──
+            if self.is_corner:
+                sx = 1.0 if 'r' in self.role else -1.0
+                sy = 1.0 if 'b' in self.role else -1.0
+                factor = 2.0 if from_center else 1.0
+                vx = orig_w + sx * dx * factor
+                vy = orig_h + sy * dy * factor
+                # 沿原矩形对角线方向向量投影，支持横向、纵向或斜向顺滑等比拖拽
+                denom = orig_w * orig_w + orig_h * orig_h
+                scale = (vx * orig_w + vy * orig_h) / denom if denom > 0 else 1.0
+                new_w = max(min_w, orig_w * scale)
+                new_h = new_w * ratio
 
-        # 角点：等比缩放
-        if self.role in ('tl', 'tr', 'bl', 'br'):
-            new_w = max(20, r.width())
-            ratio = img._orig_ratio
-            new_h = new_w * ratio
-            if self.role == 'tl':
-                r = QRectF(r.right() - new_w, r.bottom() - new_h, new_w, new_h)
-            elif self.role == 'tr':
-                r = QRectF(r.left(), r.bottom() - new_h, new_w, new_h)
-            elif self.role == 'bl':
-                r = QRectF(r.right() - new_w, r.top(), new_w, new_h)
-            elif self.role == 'br':
-                r = QRectF(r.left(), r.top(), new_w, new_h)
+                if from_center:
+                    r = QRectF(cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+                elif self.role == 'tl':
+                    r = QRectF(orig_w - new_w, orig_h - new_h, new_w, new_h)
+                elif self.role == 'tr':
+                    r = QRectF(0.0, orig_h - new_h, new_w, new_h)
+                elif self.role == 'bl':
+                    r = QRectF(orig_w - new_w, 0.0, new_w, new_h)
+                else:  # 'br'
+                    r = QRectF(0.0, 0.0, new_w, new_h)
+
+            elif self.role in ('ml', 'mr'):
+                sx = 1.0 if self.role == 'mr' else -1.0
+                factor = 2.0 if from_center else 1.0
+                new_w = max(min_w, orig_w + sx * dx * factor)
+                new_h = new_w * ratio
+                if from_center:
+                    r = QRectF(cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+                elif self.role == 'ml':
+                    r = QRectF(orig_w - new_w, cy - new_h / 2.0, new_w, new_h)
+                else:  # 'mr'
+                    r = QRectF(0.0, cy - new_h / 2.0, new_w, new_h)
+
+            else:  # 'tc', 'bc'
+                sy = 1.0 if self.role == 'bc' else -1.0
+                factor = 2.0 if from_center else 1.0
+                new_h = max(min_h, orig_h + sy * dy * factor)
+                new_w = new_h / ratio if ratio > 0 else orig_w
+                if from_center:
+                    r = QRectF(cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+                elif self.role == 'tc':
+                    r = QRectF(cx - new_w / 2.0, orig_h - new_h, new_w, new_h)
+                else:  # 'bc'
+                    r = QRectF(cx - new_w / 2.0, 0.0, new_w, new_h)
         else:
-            r.setWidth(max(20, r.width()))
-            r.setHeight(max(20, r.height()))
+            # ── 按住 Shift：自由非等比拉伸（单向或自由调整宽高） ──
+            new_w = orig_w
+            new_h = orig_h
+            factor = 2.0 if from_center else 1.0
+            if 'r' in self.role:
+                new_w = max(20.0, orig_w + dx * factor)
+            elif 'l' in self.role:
+                new_w = max(20.0, orig_w - dx * factor)
+            if 'b' in self.role:
+                new_h = max(20.0, orig_h + dy * factor)
+            elif 't' in self.role:
+                new_h = max(20.0, orig_h - dy * factor)
+
+            if from_center:
+                r = QRectF(cx - new_w / 2.0, cy - new_h / 2.0, new_w, new_h)
+            else:
+                left = (orig_w - new_w) if 'l' in self.role else 0.0
+                top = (orig_h - new_h) if 't' in self.role else 0.0
+                r = QRectF(left, top, new_w, new_h)
 
         img._apply_resize(r, self._orig_pos)
         event.accept()
 
     def mouseReleaseEvent(self, event):
-        self._dragging = False
-        if self.scene():
-            self.scene().clear_snap_guides()
+        if self._dragging:
+            self._dragging = False
+            img = self.parent_image
+            sc = self.scene()
+            if sc:
+                sc.clear_snap_guides()
+                if (abs(img.target_width - self._orig_rect.width()) > 0.5
+                        or abs(img.target_height - self._orig_rect.height()) > 0.5
+                        or (img.scenePos() - self._orig_pos).manhattanLength() > 0.5):
+                    sc.undo_stack.push(ResizeImageCommand(
+                        sc, img,
+                        self._orig_rect.width(), self._orig_rect.height(), self._orig_pos,
+                        img.target_width, img.target_height, img.scenePos()
+                    ))
         event.accept()
 
 
@@ -7381,30 +7472,34 @@ class VImageItem(BaseElement):
 
     def _apply_resize(self, new_rect, orig_scene_pos):
         """应用新尺寸，重新缩放图片"""
-        w = max(20, new_rect.width())
-        h = max(20, new_rect.height())
+        w = max(20.0, float(new_rect.width()))
+        h = max(20.0, float(new_rect.height()))
 
         pix = QPixmap(self.file_path)
         if not pix.isNull():
             if isinstance(self.p_item, SmoothPixmapItem):
                 self.p_item.set_target_size(w, h, pix)
             else:
-                scaled = pix.scaled(int(w), int(h),
+                scaled = pix.scaled(int(round(w)), int(round(h)),
                                     Qt.AspectRatioMode.IgnoreAspectRatio,
                                     Qt.TransformationMode.SmoothTransformation)
                 self.p_item.setPixmap(scaled)
 
-        # 位置补偿：拖左/上边时，元素需要移动以保持右/下边不动
-        # new_rect 的 topLeft 是相对于原始 (0,0) 的偏移
+        # 位置补偿：始终以 orig_scene_pos + new_rect.topLeft() 精确更新场景位置，
+        # 并临时标记 _programmatic_moving 防止拖拽控制点时被水平锁定或边缘吸附干扰固定锚点
         offset_local = new_rect.topLeft()
-        if abs(offset_local.x()) > 0.1 or abs(offset_local.y()) > 0.1:
-            # 将本地偏移转换为场景偏移
+        new_scene_pos = orig_scene_pos + offset_local
+        sc = self.scene()
+        if sc:
+            sc._programmatic_moving = True
+        try:
             if self.parentItem():
-                offset_scene = self.parentItem().mapToScene(self.pos() + offset_local) - self.parentItem().mapToScene(self.pos())
-                new_scene_pos = orig_scene_pos + offset_scene
                 self.setPos(self.parentItem().mapFromScene(new_scene_pos))
             else:
-                self.setPos(orig_scene_pos + offset_local)
+                self.setPos(new_scene_pos)
+        finally:
+            if sc:
+                sc._programmatic_moving = False
 
         self.prepareGeometryChange()
         self._rect = QRectF(0, 0, w, h)
@@ -7414,8 +7509,10 @@ class VImageItem(BaseElement):
 
         if self.connection_point:
             self.connection_point.update_position()
-        if self.scene():
-            self.scene().update_image_text_connectors(self)
+        if sc:
+            sc.update_connectors(self)
+            sc.update_image_text_connectors(self)
+            self._update_children_connectors()
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
@@ -10145,6 +10242,68 @@ class LayoutScene(QGraphicsScene):
             if isinstance(i, (BaseElement, ConnectionPoint)) and not getattr(i, 'locked', False)
         ]
 
+    def _get_shift_quick_connect_source(self):
+        """获取当前选中的单个未锁定图片节点（仅当画布选中了1个图片/人物节点时返回其根图片）"""
+        sel = [
+            i for i in self.selectedItems()
+            if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
+        ]
+        roots = []
+        for it in sel:
+            info = self.get_person_group_info(it)
+            if info and info.get('is_person') and isinstance(info.get('root'), VImageItem):
+                if info['root'] not in roots:
+                    roots.append(info['root'])
+            else:
+                return None
+        return roots[0] if len(roots) == 1 else None
+
+    def can_enter_avatar_connect_by_shift(self):
+        """判定当前是否允许通过单击 Shift 键进入点图连模式：
+        - 不能处于「⤢调图片」(resize_mode)、已开启的点图连、连接点连线、对齐基准点选、图片管理或智能笔刷模式
+        - 不能正在编辑文字
+        - 画布上必须恰好选中了 1 张未锁定的图片（人物节点）
+        """
+        if (self.resize_mode
+                or self.avatar_connect_mode
+                or self.image_text_binding_mode
+                or self.connection_mode
+                or self.align_reference_mode
+                or self.image_manage_mode):
+            return False
+        if self.views() and self.views()[0].is_smart_brush_enabled():
+            return False
+        if any(isinstance(it, VTextItem) and getattr(it, 'is_editing', False) for it in self.items()):
+            return False
+        return self._get_shift_quick_connect_source() is not None
+
+    def enter_avatar_connect_from_selected_image(self):
+        """选中图片后按一下 Shift 键：直接进入点图连模式（无需一直按住 Shift），并将当前选中图片设为连线起点"""
+        if not self.can_enter_avatar_connect_by_shift():
+            return False
+        src_img = self._get_shift_quick_connect_source()
+        if src_img is None:
+            return False
+        self.set_avatar_connect_mode(True)
+        self.avatar_connect_source = src_img
+        if isinstance(src_img, BaseElement) and not getattr(src_img, 'locked', False):
+            src_img.setSelected(True)
+        if self.views():
+            view = self.views()[0]
+            vp_pos = view.viewport().mapFromGlobal(QCursor.pos())
+            if view.viewport().rect().contains(vp_pos):
+                self._connect_preview_scene_pos = view.mapToScene(vp_pos)
+                self._avatar_hover_target = self.find_connectable_element_at(
+                    self._connect_preview_scene_pos, view.transform(), exclude_root=src_img
+                )
+            view.viewport().update()
+        self._show_status_message(
+            "已进入点图连模式（起点已设为当前图片）：直接点击目标人物即可连续连线，点击鼠标中键（或按 Esc）退出",
+            0
+        )
+        self.update()
+        return True
+
     def _draw_smart_connection_preview(self, painter):
         """在画布前景层绘制智能连线动态预览曲线、向辅助线画垂线的虚线提示线及端点高亮"""
         painter.save()
@@ -10234,20 +10393,11 @@ class LayoutScene(QGraphicsScene):
             painter.restore()
             return
 
-        # 2. 确定智能头像连线的当前起点（点图片连线模式 或 普通模式下按住Shift且已选中人物）
+        # 2. 确定智能头像连线的当前起点（开启「⚡点图连」或「图文连接」模式时生效）
         active_source = None
-        if (self.avatar_connect_mode or self.image_text_binding_mode) and self.avatar_connect_source is not None:
+        if not self.resize_mode and (self.avatar_connect_mode or self.image_text_binding_mode) and self.avatar_connect_source is not None:
             if self.avatar_connect_source.scene() == self and not getattr(self.avatar_connect_source, 'locked', False):
                 active_source = self.avatar_connect_source
-        elif not self.avatar_connect_mode and (QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier):
-            sel = [
-                i for i in self.selectedItems()
-                if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
-            ]
-            if len(sel) == 1:
-                info = self.get_person_group_info(sel[0])
-                if info:
-                    active_source = info['root']
 
         # 绘制悬停目标人物的高亮外框
         hover_info = self.get_person_group_info(self._avatar_hover_target) if self._avatar_hover_target else None
@@ -11630,8 +11780,10 @@ class LayoutScene(QGraphicsScene):
         elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
             items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
             if items:
-                # Shift键使用大步长，否则1px
+                # Shift键使用大步长，否则1px（同时抑制Shift点图连预览，避免Shift+方向键微调时弹出连线）
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self._shift_connect_suppressed = True
+                    self._avatar_hover_target = None
                     step = self.config_manager.get('nudge_large_step', 10)
                 else:
                     step = 1
@@ -12369,7 +12521,14 @@ class LayoutView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
             sc = self.scene()
-            # 0) 若正处于「点选指定对象对齐」基准选择模式：直接交由场景选择基准对象（自动穿透锁定底图、不触发连接点连线）
+            # 0a) 若点击在图片缩放控制点（ResizeHandle）上，最高优先级直接交由控制点处理（支持按住Shift自由拉伸、Alt中心缩放，不触发任何连线）
+            if not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
+                raw_top = self.itemAt(pos)
+                if isinstance(raw_top, ResizeHandle):
+                    super().mousePressEvent(event)
+                    event.accept()
+                    return
+            # 0b) 若正处于「点选指定对象对齐」基准选择模式：直接交由场景选择基准对象（自动穿透锁定底图、不触发连接点连线）
             if sc.align_reference_mode and not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
                 super().mousePressEvent(event)
                 event.accept()
@@ -12401,56 +12560,8 @@ class LayoutView(QGraphicsView):
                         event.accept()
                         return
 
-            # 2) 普通编辑模式下：按住 Shift（或 Ctrl+Shift）直接左键点击人物头像，立即与当前已选人物智能连线并连续接龙
-            if (not sc.avatar_connect_mode
-                    and not sc.connection_mode
-                    and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-                    and not (self._in_h_ruler(pos) or self._in_v_ruler(pos))):
-                scene_pos = self.mapToScene(pos)
-                target_elem = sc.find_connectable_element_at(scene_pos, self.transform())
-                if target_elem is not None:
-                    # 查找当前已选中的起点人物（过滤被锁定的图片）
-                    selected_elems = [
-                        i for i in sc.selectedItems()
-                        if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
-                    ]
-                    source_elem = None
-                    if sc.selection_order:
-                        for cand in reversed(sc.selection_order):
-                            if cand in selected_elems:
-                                source_elem = cand
-                                break
-                    if source_elem is None and selected_elems:
-                        source_elem = selected_elems[-1]
-
-                    target_info = sc.get_person_group_info(target_elem)
-                    source_info = sc.get_person_group_info(source_elem) if source_elem else None
-                    if source_info and target_info and source_info['root'] != target_info['root']:
-                        ok, mode = sc.connect_avatars_smart(source_info['root'], target_info['root'])
-                        mode_label = "横向 (a点 ↔ a点)" if mode == 'horizontal' else "纵向 (b点 → a点)"
-                        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                            # Ctrl+Shift：固定起点一对多
-                            sc._show_status_message(
-                                f"已创建{mode_label}连线（Ctrl+Shift固定起点，可继续点击其他子女头像）",
-                                4000
-                            )
-                        else:
-                            # Shift：自动将选中焦点推进到当前目标人物，实现一路 Shift 点击接龙
-                            sc.clearSelection()
-                            t_root = target_info['root']
-                            if isinstance(t_root, BaseElement) and not getattr(t_root, 'locked', False):
-                                t_root.setSelected(True)
-                                sc.selection_order = [t_root]
-                            sc._show_status_message(
-                                f"已接龙{mode_label}连线！继续按住 Shift 点击下一人物头像可连续接龙",
-                                4000
-                            )
-                        sc.update()
-                        event.accept()
-                        return
-
             exclude_point = self.scene().connection_source_point if self.scene().connection_mode else None
-            point = self._connection_point_at(pos, exclude_point=exclude_point)
+            point = None if sc.resize_mode else self._connection_point_at(pos, exclude_point=exclude_point)
             if point:
                 is_custom = getattr(point, 'point_type', '') == 'custom'
                 point_mode = getattr(self.scene(), 'free_connection_point_mode', 'move')
@@ -12682,7 +12793,6 @@ class LayoutView(QGraphicsView):
                     sc.avatar_connect_mode
                     or sc.image_text_binding_mode
                     or sc.connection_mode
-                    or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
                     or (sc._hover_perp_guide is not None)
                     or (old_hover_guide is not None)
                 )
@@ -12690,7 +12800,7 @@ class LayoutView(QGraphicsView):
                     exclude_root = sc.avatar_connect_source
                     sc._avatar_hover_target = sc.find_connectable_element_at(
                         scene_pos, self.transform(), exclude_root=exclude_root
-                    ) if (sc.avatar_connect_mode or sc.image_text_binding_mode or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)) else None
+                    ) if (sc.avatar_connect_mode or sc.image_text_binding_mode) else None
                     self.viewport().update()
                 elif sc._avatar_hover_target is not None:
                     sc._avatar_hover_target = None
@@ -12910,7 +13020,11 @@ class LayoutView(QGraphicsView):
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
-            # Shift+滚轮 保留原始滚动行为
+            # Shift+滚轮 保留原始滚动行为，并抑制Shift点图连预览
+            if self.scene():
+                self.scene()._shift_connect_suppressed = True
+                self.scene()._avatar_hover_target = None
+                self.viewport().update()
             super().wheelEvent(event)
         else:
             # 滚轮直接缩放（以鼠标位置为中心）
@@ -16748,7 +16862,7 @@ class MainWindow(QMainWindow):
             self.scene.set_avatar_connect_mode(False)
         self.scene.set_resize_mode(enabled)
         if enabled:
-            self.status_bar.showMessage("调整大小模式：拖拽控制点缩放  回车/双击空白=确认  Esc=取消还原")
+            self.status_bar.showMessage("调整大小模式：拖拽任意控制点等比缩放（按住Shift自由拉伸，按住Alt从中心缩放）  回车/双击空白=确认  Esc=取消还原")
         else:
             self.status_bar.showMessage("已退出调整大小模式")
     
@@ -17316,26 +17430,52 @@ class MainWindow(QMainWindow):
                 gp = event.globalPosition().toPoint() if hasattr(event, 'globalPosition') else event.globalPos()
                 if not self._cmd_palette.frameGeometry().contains(gp):
                     self.hide_command_palette()
-        elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-            if self.scene and not isinstance(obj, InlineTextEditor):
-                if getattr(self.scene, 'align_reference_mode', None):
-                    self.scene._cancel_align_reference_mode()
-                    return True
-                if getattr(self.scene, 'avatar_connect_mode', False):
-                    self.scene.set_avatar_connect_mode(False)
-                    return True
-                if getattr(self.scene, 'connection_mode', False):
-                    self.scene.cancel_connection_mode()
-                    return True
-                if getattr(self.scene, 'image_text_binding_mode', False):
-                    self.scene.image_text_binding_mode = False
-                    self.scene.image_text_source = None
-                    self.scene.avatar_connect_source = None
-                    if self.scene.views():
-                        self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
-                    self.scene.update()
-                    self.scene._show_status_message("已退出图文连线模式", 2500)
-                    return True
+        elif event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                if self.scene and not isinstance(obj, InlineTextEditor):
+                    if getattr(self.scene, 'align_reference_mode', None):
+                        self.scene._cancel_align_reference_mode()
+                        return True
+                    if getattr(self.scene, 'avatar_connect_mode', False):
+                        self.scene.set_avatar_connect_mode(False)
+                        return True
+                    if getattr(self.scene, 'connection_mode', False):
+                        self.scene.cancel_connection_mode()
+                        return True
+                    if getattr(self.scene, 'image_text_binding_mode', False):
+                        self.scene.image_text_binding_mode = False
+                        self.scene.image_text_source = None
+                        self.scene.avatar_connect_source = None
+                        if self.scene.views():
+                            self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                        self.scene.update()
+                        self.scene._show_status_message("已退出图文连线模式", 2500)
+                        return True
+            elif event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
+                if self.scene and not isinstance(obj, (QLineEdit, QTextEdit, QAbstractSpinBox)):
+                    other_mods = event.modifiers() & (
+                        Qt.KeyboardModifier.ControlModifier
+                        | Qt.KeyboardModifier.AltModifier
+                        | Qt.KeyboardModifier.MetaModifier
+                    )
+                    if other_mods == Qt.KeyboardModifier.NoModifier and QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+                        self.scene._shift_tap_candidate = self.scene.can_enter_avatar_connect_by_shift()
+                    else:
+                        self.scene._shift_tap_candidate = False
+            elif not event.isAutoRepeat():
+                # 按下了除 Shift 以外的任何键（例如 Ctrl+Shift+... 或 Shift+方向键），取消单按 Shift 进入点图连候选
+                if self.scene:
+                    self.scene._shift_tap_candidate = False
+        elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
+            if self.scene and getattr(self.scene, '_shift_tap_candidate', False):
+                self.scene._shift_tap_candidate = False
+                if (QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier
+                        and QApplication.mouseButtons() == Qt.MouseButton.NoButton):
+                    self.scene.enter_avatar_connect_from_selected_image()
+        elif event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.Wheel):
+            if self.scene and getattr(self.scene, '_shift_tap_candidate', False):
+                # 按住 Shift 期间进行了鼠标点击/拖拽（如 Shift+拖拽缩放）或 Shift+滚轮，不触发进入点图连
+                self.scene._shift_tap_candidate = False
         return super().eventFilter(obj, event)
 
     def open_excel_column_map_dialog(self):
@@ -18140,7 +18280,7 @@ class MainWindow(QMainWindow):
                     f"{kind} 右上角  X: {cdr_x} mm  Y: {cdr_y} mm（CDR坐标）"
                 )
             elif images and not texts:
-                self.status_bar.showMessage("拖拽蓝色控制点可缩放图片  角点=等比缩放  边中点=单向拉伸  右键=更多选项")
+                self.status_bar.showMessage("拖拽控制点可等比缩放图片（按住Shift自由拉伸，按住Alt从中心缩放）  右键=更多选项")
             elif texts and not images:
                 self.status_bar.showMessage("双击文字可编辑  右键=字体/颜色/列间距等设置")
             elif images and texts:
