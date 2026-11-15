@@ -14145,6 +14145,9 @@ class DocumentState:
         self.scene = scene
         self.view = view
         self.dirty = False
+        self._needs_initial_fit = True
+        if self.view is not None:
+            self.view._needs_initial_fit = True
         self._saved_name = name
         self._saved_snapshot = ProjectData.scene_to_dict(scene, quiet=True) if scene else None
 
@@ -14612,7 +14615,12 @@ class MainWindow(QMainWindow):
             self._sync_align_mode_ui()
         if hasattr(self, 'refresh_ui'):
             self.refresh_ui()
-        if hasattr(self, 'fit_in_view'):
+        if getattr(document, '_needs_initial_fit', False):
+            document._needs_initial_fit = False
+            document.view._needs_initial_fit = False
+            document.view.fit_in_view()
+            QTimer.singleShot(0, document.view.fit_in_view)
+        elif hasattr(self, 'fit_in_view'):
             self.view.transformChanged.emit()
 
     def new_document(self):
@@ -14727,6 +14735,9 @@ class MainWindow(QMainWindow):
         if not self._documents:
             self.new_document()
             return
+        for doc in self._documents:
+            doc._needs_initial_fit = True
+            doc.view._needs_initial_fit = True
         self.document_tabs.setCurrentIndex(0)
         self._on_document_changed(0)
 
