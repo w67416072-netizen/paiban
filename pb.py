@@ -2940,7 +2940,7 @@ class AssetLibraryWidget(QWidget):
 class ProjectData:
     """Helper to serialize/deserialize project"""
     @staticmethod
-    def scene_to_dict(scene):
+    def scene_to_dict(scene, quiet=False):
         project_data = {
             'version': '2.0',
             'items': [],
@@ -2955,13 +2955,13 @@ class ProjectData:
             ]
         }
         
-        # Store items with IDs to reconstruct hierarchy
+        # Store items with IDs to reconstruct hierarchy (use deterministic counter for VTextItem/VImageItem only)
         item_map = {}  # item -> id
-        
-        # Assign IDs
-        for idx, item in enumerate(scene.items()):
+        next_id = 0
+        for item in scene.items():
             if isinstance(item, (VTextItem, VImageItem)):
-                item_map[item] = idx
+                item_map[item] = next_id
+                next_id += 1
         
         # Save items
         for item, item_id in item_map.items():
@@ -3077,7 +3077,8 @@ class ProjectData:
             if conn_data:
                 project_data['image_text_connectors'].append(conn_data)
         
-        print(f"工程已保存: {len(project_data['items'])} 个元素, {len(project_data['connectors'])} 个父子连接, {len(project_data['image_text_connectors'])} 个图文连接")
+        if not quiet:
+            print(f"工程已保存: {len(project_data['items'])} 个元素, {len(project_data['connectors'])} 个父子连接, {len(project_data['image_text_connectors'])} 个图文连接")
         return project_data
 
     @staticmethod
@@ -14144,6 +14145,32 @@ class DocumentState:
         self.scene = scene
         self.view = view
         self.dirty = False
+        self._saved_name = name
+        self._saved_snapshot = ProjectData.scene_to_dict(scene, quiet=True) if scene else None
+
+    def has_content(self):
+        return bool(self.scene) and any(
+            isinstance(item, (VImageItem, VTextItem))
+            for item in self.scene.items()
+        )
+
+    def mark_saved(self):
+        """记录当前场景快照为已保存基准，消除假未保存状态"""
+        self.dirty = False
+        self._saved_name = self.name
+        if self.scene is not None:
+            self._saved_snapshot = ProjectData.scene_to_dict(self.scene, quiet=True)
+
+    def check_dirty(self):
+        """精确比对当前场景数据与上次保存快照是否发生实质性改变（忽略选中/悬停/缩放/渲染等纯视觉重绘）"""
+        if self.scene is None or not self.has_content():
+            self.dirty = False
+            return False
+        if self._saved_snapshot is None:
+            return bool(self.dirty)
+        current_snapshot = ProjectData.scene_to_dict(self.scene, quiet=True)
+        self.dirty = (self.name != self._saved_name) or (current_snapshot != self._saved_snapshot)
+        return self.dirty
 
 
 class PlusTabBar(QTabBar):
@@ -14424,11 +14451,12 @@ class MainWindow(QMainWindow):
         """当用户拖动顶部文档标签调整先后次序时，同步更新 self._documents 列表顺序（决定多页PDF的页码先后次序）"""
         if self._loading_documents:
             return
-        if 0 <= from_index < len(self._documents) and 0 <= to_index < len(self._documents):
+        if 0 <= from_index < len(self._documents) and 0 <= to_index < len(self._documents) and from_index != to_index:
             doc = self._documents.pop(from_index)
             self._documents.insert(to_index, doc)
             for d in self._documents:
                 d.dirty = True
+                d._saved_name = None
             self._update_document_tab_title(doc)
         if hasattr(self, 'document_tabs') and hasattr(self.document_tabs.tabBar(), '_move_plus_btn'):
             self.document_tabs.tabBar()._move_plus_btn()
@@ -14481,12 +14509,13 @@ class MainWindow(QMainWindow):
             button.setAccessibleName("关闭文档")
 
     def _mark_scene_dirty(self, scene):
-        if self._loading_documents:
+        if self._loading_documents or getattr(scene, '_rendering_pdf', False) or getattr(scene, '_rendering_export', False):
             return
         for document in self._documents:
             if document.scene is scene:
-                if not document.dirty:
-                    document.dirty = True
+                was_dirty = document.dirty
+                now_dirty = document.check_dirty()
+                if now_dirty != was_dirty:
                     self._update_document_tab_title(document)
                 return
 
@@ -14620,7 +14649,7 @@ class MainWindow(QMainWindow):
 
     def _ask_save_before_action(self, title):
         has_unsaved_content = any(
-            document.dirty and self._document_has_content(document)
+            document.check_dirty() and self._document_has_content(document)
             for document in self._documents
         )
         if not has_unsaved_content:
@@ -14646,7 +14675,7 @@ class MainWindow(QMainWindow):
         if index < 0 or index >= len(self._documents):
             return
         document = self._documents[index]
-        if document.dirty:
+        if document.check_dirty():
             reply = QMessageBox.question(
                 self,
                 "关闭文档",
@@ -14688,7 +14717,7 @@ class MainWindow(QMainWindow):
             for index, data in enumerate(document_data):
                 document = self._create_document(data.get('name') or f"文档 {index + 1}")
                 ProjectData.load_scene(document.scene, data.get('data', {}))
-                document.dirty = False
+                document.mark_saved()
                 self._documents.append(document)
                 self.document_tabs.addTab(document.view, document.name)
                 self._set_document_tab_close_text(self.document_tabs.indexOf(document.view))
@@ -14829,7 +14858,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时提示保存，停止定时器，保存窗口状态"""
-        if any(document.dirty for document in self._documents):
+        for doc in self._documents:
+            doc.check_dirty()
+            self._update_document_tab_title(doc)
+        if any(document.dirty and self._document_has_content(document) for document in self._documents):
             msg_box = QMessageBox(self)
             msg_box.setWindowTitle("保存工程")
             msg_box.setText("当前工程有未保存的修改，是否在关闭前保存？")
@@ -18914,6 +18946,8 @@ class MainWindow(QMainWindow):
         selected_items = scene.selectedItems()
         painter = QPainter()
 
+        scene._rendering_pdf = True
+        scene._rendering_export = True
         try:
             scene.show_grid = False
             scene.set_connectors_visible(False)
@@ -19066,7 +19100,6 @@ class MainWindow(QMainWindow):
                 scene._rendering_export = False
                 painter.restore()
         finally:
-            scene._rendering_pdf = False
             scene.show_grid = original_show_grid
             scene.set_connectors_visible(original_show_connectors)
             scene.set_image_text_connectors_visible(original_show_image_text_connectors)
@@ -19075,6 +19108,8 @@ class MainWindow(QMainWindow):
             for item in selected_items:
                 item.setSelected(True)
             scene.update()
+            scene._rendering_pdf = False
+            scene._rendering_export = False
 
     def _do_export_pdf(self, path, show_dialog=False, scene=None):
         """实际执行单文档PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
@@ -19107,6 +19142,8 @@ class MainWindow(QMainWindow):
         if target_doc is not None:
             try:
                 ProjectData.embed_project_into_pdf(path, [target_doc])
+                target_doc.mark_saved()
+                self._update_document_tab_title(target_doc)
             except Exception as e:
                 print(f"内嵌工程数据到PDF失败: {e}")
 
@@ -19158,6 +19195,9 @@ class MainWindow(QMainWindow):
 
         try:
             ProjectData.embed_project_into_pdf(path, documents)
+            for doc in documents:
+                doc.mark_saved()
+                self._update_document_tab_title(doc)
         except Exception as e:
             print(f"内嵌多页工程数据到PDF失败: {e}")
 
@@ -19196,7 +19236,7 @@ class MainWindow(QMainWindow):
             return
         self._current_project_path = None
         self._replace_documents([{'name': '文档 1', 'data': {}}])
-        self._documents[0].dirty = False
+        self._documents[0].mark_saved()
         self._update_document_tab_title(self._documents[0])
         self.status_bar.showMessage("已新建工程", 2000)
 
@@ -19261,7 +19301,7 @@ class MainWindow(QMainWindow):
             ProjectData.save_documents(self._documents, path)
         self._current_project_path = path
         for document in self._documents:
-            document.dirty = False
+            document.mark_saved()
             self._update_document_tab_title(document)
         self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
         if is_pdf:
@@ -19455,7 +19495,7 @@ class MainWindow(QMainWindow):
         self._replace_documents(document_data)
         self._current_project_path = path
         for document in self._documents:
-            document.dirty = False
+            document.mark_saved()
             self._update_document_tab_title(document)
         self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
         # 文档标签和视图刚替换完成时尺寸可能尚未更新；下一轮事件循环再适配，
