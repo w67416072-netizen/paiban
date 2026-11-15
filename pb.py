@@ -2280,8 +2280,8 @@ class AssetLibraryDockWidget(QDockWidget):
         # 标签页1：组合素材
         self.group_tab_widget = QWidget()
         gl = QVBoxLayout(self.group_tab_widget)
-        gl.setContentsMargins(6, 6, 6, 6)
-        gl.setSpacing(6)
+        gl.setContentsMargins(8, 8, 8, 8)
+        gl.setSpacing(10)
         self.group_list = QListWidget()
         self.group_list.setDragEnabled(True)
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
@@ -2301,14 +2301,18 @@ class AssetLibraryDockWidget(QDockWidget):
         self._preview_asset = None
         gl.addWidget(self.group_list)
         gb = QHBoxLayout()
-        gb.setSpacing(4)
-        btn_use = QPushButton("使用"); btn_use.setMaximumHeight(30); btn_use.setProperty("class", "primary")
+        gb.setSpacing(8)
+        btn_use = QPushButton("使用"); btn_use.setFixedHeight(34); btn_use.setProperty("class", "primary")
+        btn_use.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_use.clicked.connect(self.use_group_asset_selected); gb.addWidget(btn_use)
-        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(30)
+        btn_edit = QPushButton("编辑"); btn_edit.setFixedHeight(34)
+        btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_edit.clicked.connect(self.edit_group_asset_selected); gb.addWidget(btn_edit)
-        btn_ren = QPushButton("重命名"); btn_ren.setMaximumHeight(30)
+        btn_ren = QPushButton("重命名"); btn_ren.setFixedHeight(34)
+        btn_ren.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_ren.clicked.connect(self.rename_group_asset_selected); gb.addWidget(btn_ren)
-        btn_del = QPushButton("删除"); btn_del.setMaximumHeight(30)
+        btn_del = QPushButton("删除"); btn_del.setFixedHeight(34)
+        btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_del.setProperty("class", "danger")
         btn_del.clicked.connect(self.delete_group_asset); gb.addWidget(btn_del)
         gl.addLayout(gb)
@@ -2317,8 +2321,8 @@ class AssetLibraryDockWidget(QDockWidget):
         # 标签页2：常用文字
         self.text_tab_widget = QWidget()
         tl = QVBoxLayout(self.text_tab_widget)
-        tl.setContentsMargins(6, 6, 6, 6)
-        tl.setSpacing(6)
+        tl.setContentsMargins(8, 8, 8, 8)
+        tl.setSpacing(10)
         tl.addWidget(QLabel("单击插入到光标处:"))
         self.snippet_list = QListWidget()
         # 设置不抢焦点，避免编辑器失焦
@@ -2326,14 +2330,17 @@ class AssetLibraryDockWidget(QDockWidget):
         self.snippet_list.itemClicked.connect(self._insert_snippet)
         tl.addWidget(self.snippet_list)
         tb = QHBoxLayout()
-        tb.setSpacing(4)
-        btn_add = QPushButton("添加"); btn_add.setMaximumHeight(30); btn_add.setProperty("class", "primary")
+        tb.setSpacing(8)
+        btn_add = QPushButton("添加"); btn_add.setFixedHeight(34); btn_add.setProperty("class", "primary")
+        btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_add.clicked.connect(self._add_snippet); tb.addWidget(btn_add)
-        btn_edit = QPushButton("编辑"); btn_edit.setMaximumHeight(30)
+        btn_edit = QPushButton("编辑"); btn_edit.setFixedHeight(34)
+        btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_edit.clicked.connect(self._edit_snippet); tb.addWidget(btn_edit)
-        btn_sdel = QPushButton("删除"); btn_sdel.setMaximumHeight(30)
+        btn_sdel = QPushButton("删除"); btn_sdel.setFixedHeight(34)
+        btn_sdel.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_sdel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_sdel.setProperty("class", "danger")
         btn_sdel.clicked.connect(self._delete_snippet); tb.addWidget(btn_sdel)
@@ -14198,27 +14205,29 @@ class PlusTabBar(QTabBar):
             self._plus_btn = QToolButton(button_parent)
             self._plus_btn.setText("+")
             self._plus_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            self._plus_btn.setFixedSize(28, 28)
+            self._plus_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._plus_btn.setFixedSize(28, 26)
             self._plus_btn.setToolTip("新建文档 (Ctrl+N)")
             self._plus_btn.setStyleSheet(
                 "QToolButton { "
-                "   border: 1px solid #ccc; "
-                "   border-radius: 4px; "
+                "   border: 1px solid #cfd6e0; "
+                "   border-radius: 7px; "
                 "   font-size: 16px; "
-                "   font-weight: bold; "
-                "   background: #f0f0f0; "
-                "   color: #333; "
+                "   font-weight: 600; "
+                "   background: #e2e6ec; "
+                "   color: #1e293b; "
                 "   padding: 0px; "
                 "   margin: 0px; "
                 "   min-width: 0px; "
                 "   min-height: 0px; "
                 "}"
                 "QToolButton:hover { "
-                "   background: #e0e0e0; "
-                "   border-color: #999; "
+                "   background: #d5dce6; "
+                "   border-color: #0d6efd; "
+                "   color: #0d6efd; "
                 "}"
                 "QToolButton:pressed { "
-                "   background: #d0d0d0; "
+                "   background: #cbd5e1; "
                 "}"
             )
             self._plus_btn.clicked.connect(self.addTabRequested)
@@ -14301,8 +14310,15 @@ class MainWindow(QMainWindow):
         # 右侧：层级 / 属性 / 组合素材 / 常用文字 四合一面板
         self.sidebar_dock = QDockWidget("层级 / 属性 / 素材", self)
         self.sidebar_dock.setObjectName("dock_hierarchy")
-        self.sidebar_dock.setMinimumWidth(280)
+        self.sidebar_dock.setMinimumWidth(295)
         self.sidebar_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.sidebar_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        sidebar_title_bar = QLabel("层级 / 属性 / 素材")
+        sidebar_title_bar.setStyleSheet(
+            "background: #f4f6f9; color: #1e293b; font-size: 13px; font-weight: 700; "
+            "padding: 8px 12px 6px 12px; border: none;"
+        )
+        self.sidebar_dock.setTitleBarWidget(sidebar_title_bar)
         self._eye_visible_icon = self._make_eye_icon(True)
         self._eye_hidden_icon = self._make_eye_icon(False)
         self.tree_widget = QTreeWidget()
@@ -14317,20 +14333,20 @@ class MainWindow(QMainWindow):
         self.sidebar_tabs.setMovable(True)  # 允许用户直接用鼠标左右拖动调整 4 个标签的先后顺序
         self.property_panel = self.create_property_panel()
 
-        # 实例化素材控制器并将「层级 / 属性 / 组合素材 / 常用文字」按用户保存的顺序放入右侧标签栏
+        # 实例化素材控制器并将「组合素材 / 常用文字 / 层级 / 属性」按用户保存的顺序放入右侧标签栏
         self.asset_library_dock = AssetLibraryDockWidget(self.scene.asset_manager, self)
         self.asset_library_dock.setObjectName("dock_assets_Legacy")
         self.asset_library_dock.hide()  # 隐藏旧独立壳容器，仅保留其控制器逻辑与内部组件
 
         self._sidebar_tab_map = {
-            "层级": self.tree_widget,
-            "属性": self.property_panel,
             "组合素材": self.asset_library_dock.group_tab_widget,
             "常用文字": self.asset_library_dock.text_tab_widget,
+            "层级": self.tree_widget,
+            "属性": self.property_panel,
         }
-        saved_order = self.scene.config_manager.get('sidebar_tab_order', ["层级", "属性", "组合素材", "常用文字"])
+        saved_order = self.scene.config_manager.get('sidebar_tab_order', ["组合素材", "常用文字", "层级", "属性"])
         if not isinstance(saved_order, list):
-            saved_order = ["层级", "属性", "组合素材", "常用文字"]
+            saved_order = ["组合素材", "常用文字", "层级", "属性"]
         added_names = []
         for tab_name in saved_order:
             if tab_name in self._sidebar_tab_map and tab_name not in added_names:
@@ -14352,6 +14368,7 @@ class MainWindow(QMainWindow):
         self.asset_library = None
         
         self.document_tabs = QTabWidget()
+        self.document_tabs.setObjectName("document_tabs")
         self.document_tabs.setDocumentMode(False)
         # 使用自定义标签栏，+ 按钮紧跟在标签后面
         plus_tab_bar = PlusTabBar()
@@ -14367,6 +14384,7 @@ class MainWindow(QMainWindow):
         self.document_tabs.addTab(self.view, "文档 1")
         self._set_document_tab_close_text(0)
         self.document_tabs.setCurrentIndex(0)
+        self._update_document_tab_title()
         self.document_tabs.currentChanged.connect(self._on_document_changed)
 
         self.setCentralWidget(self.document_tabs)
@@ -14376,25 +14394,27 @@ class MainWindow(QMainWindow):
         self._sync_marquee_mode_ui()
         self._sync_align_mode_ui()
         
-        # 创建状态栏
+        # 创建状态栏（左侧显示当前模式与选中对象数量，右侧显示缩放比例与授权状态）
         self.status_bar = self.statusBar()
+        self.mode_selection_label = QLabel("  当前模式: 编辑    选中对象: 0")
+        self.mode_selection_label.setStyleSheet("color: #334155; font-size: 12px; padding: 0 6px;")
+        self.status_bar.addWidget(self.mode_selection_label)
+
         self.zoom_label = QLabel("缩放: 100%")
+        self.zoom_label.setStyleSheet("color: #334155; font-size: 12px; padding: 0 10px;")
         self.status_bar.addPermanentWidget(self.zoom_label)
         self.license_expiry_label = QLabel()
-        self.license_expiry_label.setStyleSheet("color: #5b6573; font-size: 11px; padding: 0 8px;")
+        self.license_expiry_label.setStyleSheet("color: #334155; font-size: 12px; padding: 0 10px;")
         self.status_bar.addPermanentWidget(self.license_expiry_label)
+        self.lang_status_label = QLabel("语言: 简体中文")
+        self.lang_status_label.setStyleSheet("color: #334155; font-size: 12px; padding: 0 10px;")
+        self.status_bar.addPermanentWidget(self.lang_status_label)
         self._license_status_timer = QTimer(self)
         self._license_status_timer.timeout.connect(self.update_license_expiry_display)
         self._license_status_timer.start(60 * 1000)
         self.update_license_expiry_display()
         
-        # 快捷键提示
-        hint = QLabel("  放大: Ctrl+=   缩小: Ctrl+-   合适屏幕: Ctrl+0   撤销: Ctrl+Z   保存: Ctrl+S   导出: Ctrl+E   素材库: F9")
-        hint.setStyleSheet("color: gray; font-size: 11px;")
-        hint.setText("  当前模式：编辑   选中对象：0")
-        self.status_bar.addWidget(hint)
-        
-        # 导航器停靠面板
+        # 导航器停靠面板（默认隐藏，因为画布右下角已有 ⊕ 弹出式导航器与 N 快捷键，让右侧素材/属性面板完整到底）
         self.navigator_dock = QDockWidget("导航器", self)
         self.navigator_dock.setObjectName("dock_navigator")
         self.navigator_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
@@ -14408,15 +14428,14 @@ class MainWindow(QMainWindow):
         self.navigator_dock.setMinimumHeight(self.navigator.NAV_H + 26)
         self.navigator_dock.setMaximumHeight(self.navigator.NAV_H + 60)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.navigator_dock)
-        # 右侧面板在上、导航器在下，形成类似 CDR 的右下角导航区域。
         self.splitDockWidget(
             self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
         )
-        self.resizeDocks(
-            [self.sidebar_dock, self.navigator_dock],
-            [600, self.navigator.NAV_H + 30],
-            Qt.Orientation.Vertical
-        )
+        self.navigator_dock.hide()
+        if hasattr(self, 'toggle_navigator_action'):
+            self.toggle_navigator_action.blockSignals(True)
+            self.toggle_navigator_action.setChecked(False)
+            self.toggle_navigator_action.blockSignals(False)
         self.navigator_dock.visibilityChanged.connect(self._sync_navigator_action)
         
         self.timer = QTimer(self)
@@ -14484,20 +14503,28 @@ class MainWindow(QMainWindow):
             for item in document.scene.items()
         )
 
-    def _update_document_tab_title(self, document):
+    def _update_document_tab_title(self, document=None):
         if not hasattr(self, 'document_tabs'):
             return
-        try:
-            index = self._documents.index(document)
-        except ValueError:
-            return
-        title = document.name + (" *" if document.dirty else "")
-        self.document_tabs.setTabText(index, title)
-        if index == self.document_tabs.currentIndex():
-            suffix = f" - {document.name}" if document.name else ""
+        cur_idx = self.document_tabs.currentIndex()
+        tab_bar = self.document_tabs.tabBar()
+        for idx, doc in enumerate(self._documents):
+            if idx >= self.document_tabs.count():
+                break
+            is_cur = (idx == cur_idx)
+            title = f"{doc.name}{' *' if doc.dirty else ''}"
+            if self.document_tabs.tabText(idx) != title:
+                self.document_tabs.setTabText(idx, title)
+            if tab_bar is not None:
+                tab_bar.setTabTextColor(idx, QColor("#0d6efd") if is_cur else QColor("#334155"))
+        if 0 <= cur_idx < len(self._documents):
+            active_doc = self._documents[cur_idx]
+            suffix = f" - {active_doc.name}" if active_doc.name else ""
             if self._current_project_path:
                 suffix = f" - {os.path.basename(self._current_project_path)}{suffix}"
             self.setWindowTitle(f"VertiLayout Pro{suffix}")
+        if tab_bar is not None and hasattr(tab_bar, '_move_plus_btn'):
+            tab_bar._move_plus_btn()
 
     def _set_document_tab_close_text(self, index):
         """将文档标签关闭按钮的提示改为中文。"""
@@ -14846,8 +14873,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'asset_library_dock') and self.asset_library_dock:
                 self.asset_library_dock.hide()
 
-            if layout_version < 4:
-                was_visible = self.navigator_dock.isVisible()
+            if layout_version < 5:
                 self.sidebar_dock.setFloating(False)
                 self.navigator_dock.setFloating(False)
                 self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sidebar_dock)
@@ -14855,14 +14881,13 @@ class MainWindow(QMainWindow):
                 self.splitDockWidget(
                     self.sidebar_dock, self.navigator_dock, Qt.Orientation.Vertical
                 )
-                self.resizeDocks(
-                    [self.sidebar_dock, self.navigator_dock],
-                    [620, self.navigator.NAV_H + 30],
-                    Qt.Orientation.Vertical
-                )
                 self.sidebar_dock.setVisible(True)
-                self.navigator_dock.setVisible(was_visible)
-                settings.setValue("navigator_dock_layout_version", 4)
+                self.navigator_dock.hide()
+                if hasattr(self, 'toggle_navigator_action'):
+                    self.toggle_navigator_action.blockSignals(True)
+                    self.toggle_navigator_action.setChecked(False)
+                    self.toggle_navigator_action.blockSignals(False)
+                settings.setValue("navigator_dock_layout_version", 5)
 
         # 等窗口状态恢复完成后再调整，确保顶部工具栏与左侧工具箱固定到位
         QTimer.singleShot(0, enforce_ps_layout)
@@ -18323,6 +18348,7 @@ class MainWindow(QMainWindow):
     
     def on_selection_changed(self):
         try:
+            self._update_mode_selection_status()
             # 检查场景是否还存在
             if not self.scene:
                 return
@@ -18541,8 +18567,26 @@ class MainWindow(QMainWindow):
         finally:
             self._tree_updating = False
 
+    def _update_mode_selection_status(self):
+        """实时更新底部状态栏左侧的「当前模式」与「选中对象」计数"""
+        if not hasattr(self, 'mode_selection_label') or not self.scene:
+            return
+        if getattr(self.scene, 'avatar_connect_mode', False):
+            mode_str = "点图连"
+        elif getattr(self.scene, 'resize_mode', False):
+            mode_str = "调图片"
+        elif getattr(self.scene, 'connection_mode', False):
+            mode_str = "连接点连线"
+        elif getattr(self, 'view', None) and self.view.is_smart_brush_enabled():
+            mode_str = "智能笔刷"
+        else:
+            mode_str = "编辑"
+        sel_count = len([i for i in self.scene.selectedItems() if isinstance(i, (BaseElement, VImageTextConnector, VGenericConnector))])
+        self.mode_selection_label.setText(f"  当前模式: {mode_str}    选中对象: {sel_count}")
+
     def refresh_ui(self):
         try:
+            self._update_mode_selection_status()
             # 检查场景是否还存在
             if not self.scene:
                 return
@@ -19914,25 +19958,31 @@ class MainWindow(QMainWindow):
         }
         
         QTabBar::tab {
-            background: rgba(245, 245, 245, 0.9);
-            border: 1px solid rgba(0, 0, 0, 0.1);
-            border-bottom: none;
+            background: #e2e8f0;
+            border: 1px solid #cbd5e1;
+            border-bottom: 1px solid #94a3b8;
             border-top-left-radius: 6px;
             border-top-right-radius: 6px;
-            padding: 8px 16px;
-            margin-right: 2px;
-            color: #605e5c;
+            padding: 6px 14px;
+            margin-right: 3px;
+            margin-top: 4px;
+            color: #64748b;
         }
         
         QTabBar::tab:selected {
-            background: rgba(255, 255, 255, 1.0);
-            color: #323130;
-            font-weight: 600;
+            background: #dbeafe;
+            border: 1px solid #3b82f6;
+            border-top: 3px solid #2563eb;
+            border-bottom: none;
+            margin-top: 0px;
+            padding: 8px 16px;
+            color: #1d4ed8;
+            font-weight: 700;
         }
         
         QTabBar::tab:hover:!selected {
-            background: rgba(250, 250, 250, 1.0);
-            color: #323130;
+            background: #f1f5f9;
+            color: #334155;
         }
         
         /* 列表样式 */
@@ -20088,36 +20138,57 @@ class MainWindow(QMainWindow):
             background: rgba(0, 0, 0, 0.5);
         }
 
-        /* Professional editor refinements */
+        /* Professional editor refinements matching modern clean layout UI */
         QMainWindow {
-            background-color: #f6f8fa;
+            background-color: #f4f6f9;
+        }
+
+        QMenuBar {
+            background-color: #f4f6f9;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 3px 8px;
+            font-size: 13px;
+            color: #1e293b;
+        }
+
+        QMenuBar::item {
+            background: transparent;
+            padding: 6px 14px;
+            border-radius: 6px;
+            color: #1e293b;
+            font-weight: 500;
+        }
+
+        QMenuBar::item:selected {
+            background: #e2e8f0;
+            color: #0d6efd;
         }
 
         QToolBar#toolbar_top {
-            background: #ffffff;
+            background: #f8fafc;
             border: none;
-            border-bottom: 1px solid #d8dee4;
-            spacing: 6px;
-            padding: 4px 10px;
+            border-bottom: 1px solid #e2e8f0;
+            spacing: 8px;
+            padding: 6px 12px;
         }
 
         QToolBar#toolbar_top::separator {
-            background-color: #d0d7de;
+            background-color: #dce1e8;
             width: 1px;
-            height: 20px;
-            margin: 3px 6px;
+            height: 22px;
+            margin: 4px 6px;
         }
 
         QToolBar#toolbar_main {
-            background: #ffffff;
+            background: #f4f6f9;
             border: none;
-            border-right: 1px solid #d8dee4;
-            spacing: 5px;
-            padding: 6px 5px;
+            border-right: 1px solid #e2e8f0;
+            spacing: 8px;
+            padding: 10px 8px;
         }
 
         QToolBar#toolbar_main::separator {
-            background-color: #d0d7de;
+            background-color: #dce1e8;
             height: 1px;
             width: 64px;
             margin: 4px 6px;
@@ -20125,36 +20196,36 @@ class MainWindow(QMainWindow):
 
         QToolBar#toolbar_top QToolButton {
             background: #ffffff;
-            border: 1px solid #d0d7de;
-            border-radius: 5px;
-            color: #24292f;
-            padding: 3px 10px;
-            min-height: 24px;
-            font-size: 12px;
+            border: 1px solid #dce1e8;
+            border-radius: 8px;
+            color: #1e293b;
+            padding: 5px 13px;
+            min-height: 26px;
+            font-size: 12.5px;
             font-weight: 500;
         }
 
         QToolBar#toolbar_main QToolButton {
             background: #ffffff;
-            border: 1px solid #d0d7de;
-            border-radius: 5px;
-            color: #24292f;
-            padding: 4px 4px;
-            min-height: 25px;
-            font-size: 12px;
+            border: 1px solid #dce1e8;
+            border-radius: 8px;
+            color: #1e293b;
+            padding: 6px 6px;
+            min-height: 30px;
+            font-size: 12.5px;
             font-weight: 500;
         }
 
         QTabWidget#sidebar_tabs QTabBar::tab {
-            padding: 7px 9px;
-            font-size: 12px;
+            padding: 7px 12px;
+            font-size: 12.5px;
         }
 
         QToolBar#toolbar_main QToolButton#qt_toolbar_ext_button {
             background: #eef6ff;
             border: 1px solid #69b1ff;
-            border-radius: 5px;
-            color: #0969da;
+            border-radius: 7px;
+            color: #0d6efd;
             padding: 0px 2px;
             min-width: 18px;
             font-size: 15px;
@@ -20163,130 +20234,153 @@ class MainWindow(QMainWindow):
 
         QToolBar#toolbar_main QToolButton#qt_toolbar_ext_button:hover {
             background: #d0e8ff;
-            border-color: #0969da;
+            border-color: #0d6efd;
         }
 
         QToolBar#toolbar_top QToolButton:hover,
         QToolBar#toolbar_main QToolButton:hover {
-            background: #f6f8fa;
-            border-color: #0969da;
+            background: #f0f6ff;
+            border-color: #93c5fd;
+            color: #0d6efd;
         }
 
         QToolBar#toolbar_top QToolButton:pressed,
         QToolBar#toolbar_top QToolButton:checked,
         QToolBar#toolbar_main QToolButton:pressed,
         QToolBar#toolbar_main QToolButton:checked {
-            background: #0969da;
-            border-color: #0969da;
+            background: #0d6efd;
+            border-color: #0b5ed7;
             color: #ffffff;
+            font-weight: 600;
         }
 
         QLabel#toolbarHint {
-            color: #57606a;
+            color: #334155;
             padding-right: 4px;
-            font-size: 12px;
+            font-size: 12.5px;
+            font-weight: 500;
         }
 
         QPushButton, QToolButton {
             background: #ffffff;
-            border: 1px solid #d0d7de;
-            border-radius: 5px;
-            color: #24292f;
-            padding: 6px 12px;
+            border: 1px solid #cfd6e0;
+            border-radius: 8px;
+            color: #1e293b;
+            padding: 6px 14px;
             min-height: 24px;
             font-size: 13px;
             font-weight: 500;
         }
 
         QPushButton:hover, QToolButton:hover {
-            background: #f6f8fa;
-            border-color: #0969da;
+            background: #f0f6ff;
+            border-color: #0d6efd;
+            color: #0d6efd;
         }
 
         QPushButton:pressed, QToolButton:pressed {
-            background: #eaeef2;
+            background: #e2e8f0;
         }
 
         QPushButton[class="primary"] {
-            background: #0969da;
-            border-color: #0969da;
+            background: #0d6efd;
+            border-color: #0b5ed7;
             color: #ffffff;
             font-weight: 600;
+            border-radius: 8px;
         }
 
         QPushButton[class="primary"]:hover {
-            background: #075fc5;
-            border-color: #075fc5;
+            background: #0b5ed7;
+            border-color: #0a58ca;
+            color: #ffffff;
         }
 
         QPushButton[class="danger"] {
-            background: #cf222e;
-            border-color: #cf222e;
+            background: #dc2626;
+            border-color: #b91c1c;
             color: #ffffff;
             font-weight: 600;
+            border-radius: 8px;
         }
 
         QPushButton[class="danger"]:hover {
-            background: #a40e26;
-            border-color: #a40e26;
+            background: #b91c1c;
+            border-color: #991b1b;
+            color: #ffffff;
         }
 
         QPushButton[class="toggle"]:checked {
-            background: #0969da;
-            border-color: #0969da;
+            background: #0d6efd;
+            border-color: #0b5ed7;
             color: #ffffff;
         }
 
         QDockWidget {
-            background: #ffffff;
-            border: 1px solid #d8dee4;
-            border-radius: 0;
+            background: #f4f6f9;
+            border: none;
+            border-left: 1px solid #e2e8f0;
         }
 
         QDockWidget::title {
-            background: #f6f8fa;
-            border-bottom: 1px solid #d8dee4;
-            padding: 7px 8px;
-            font-weight: 600;
-            color: #24292f;
+            background: #f4f6f9;
+            border: none;
+            padding: 8px 12px 4px 12px;
+            font-weight: 700;
+            color: #1e293b;
         }
 
         QTabWidget::pane {
-            border: 1px solid #d8dee4;
-            border-radius: 4px;
+            border: 1px solid #dce1e8;
+            border-radius: 8px;
             background: #ffffff;
         }
 
         QTabBar::tab {
-            background: #f6f8fa;
-            border: 1px solid #d8dee4;
-            border-bottom: none;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
-            padding: 7px 13px;
-            color: #57606a;
+            background: #e2e6ec;
+            border: 1px solid #cfd6e0;
+            border-bottom: 1px solid #dce1e8;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            padding: 6px 15px;
+            margin-right: 4px;
+            margin-top: 2px;
+            color: #334155;
+            font-size: 13px;
+            font-weight: 500;
         }
 
         QTabBar::tab:selected {
             background: #ffffff;
-            color: #24292f;
-            font-weight: 600;
+            border: 1px solid #dce1e8;
+            border-bottom: 2px solid #ffffff;
+            margin-top: 0px;
+            padding: 7px 16px;
+            color: #0d6efd;
+            font-weight: 700;
+        }
+
+        QTabBar::tab:hover:!selected {
+            background: #eef2f6;
+            color: #0d6efd;
         }
 
         QListWidget, QTreeWidget {
             background: #ffffff;
-            border: 1px solid #d8dee4;
-            border-radius: 5px;
-            padding: 4px;
-            alternate-background-color: #f6f8fa;
-            selection-background-color: #ddf4ff;
-            selection-color: #24292f;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 6px;
+            alternate-background-color: #f8fafc;
+            selection-background-color: #e8f2ff;
+            selection-color: #0d6efd;
+            font-size: 13px;
+            color: #1e293b;
         }
 
         QListWidget::item {
-            border-radius: 4px;
-            padding: 7px 8px;
-            margin: 1px;
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin: 1px 0px;
         }
 
         QListWidget::item:hover,
@@ -20391,10 +20485,15 @@ class MainWindow(QMainWindow):
             color: #b8bfc6;
         }
 
+        /* 状态栏样式 */
         QStatusBar {
-            background: #ffffff;
-            border-top: 1px solid #d8dee4;
-            color: #57606a;
+            background: #f8fafc;
+            border-top: 1px solid #e2e8f0;
+            color: #334155;
+            min-height: 28px;
+        }
+        QStatusBar::item {
+            border: none;
         }
         """
         
