@@ -10091,6 +10091,7 @@ class LayoutScene(QGraphicsScene):
     def set_avatar_connect_mode(self, enabled):
         """开启/关闭「点图片连线」工具模式"""
         self.avatar_connect_mode = bool(enabled)
+        self._entered_by_shift_key = False
         self.avatar_connect_source = None
         self._avatar_hover_target = None
         self._connect_preview_scene_pos = None
@@ -10145,6 +10146,7 @@ class LayoutScene(QGraphicsScene):
 
     def handle_avatar_connect_click(self, clicked_item, modifiers=Qt.KeyboardModifier.NoModifier):
         """处理在点图片连线模式（或Shift快速连线）下点击人物头像/文字"""
+        self._entered_by_shift_key = False
         info = self.get_person_group_info(clicked_item)
         if not info:
             return False
@@ -10243,26 +10245,32 @@ class LayoutScene(QGraphicsScene):
         ]
 
     def _get_shift_quick_connect_source(self):
-        """获取当前选中的单个未锁定图片节点（仅当画布选中了1个图片/人物节点时返回其根图片）"""
-        sel = [
+        """获取当前选中的单个未锁定图片节点（优先取选中的图片，或选中子文字所属的父图片）"""
+        sel_images = [
             i for i in self.selectedItems()
-            if isinstance(i, (VImageItem, VTextItem)) and not getattr(i, 'locked', False)
+            if isinstance(i, VImageItem) and not getattr(i, 'locked', False)
+        ]
+        if len(sel_images) == 1:
+            return sel_images[0]
+        if len(sel_images) > 1:
+            return None
+        # 若只选中了图片下的子文字，也支持向上找到其父级图片
+        sel_texts = [
+            i for i in self.selectedItems()
+            if isinstance(i, VTextItem) and not getattr(i, 'locked', False)
         ]
         roots = []
-        for it in sel:
-            info = self.get_person_group_info(it)
-            if info and info.get('is_person') and isinstance(info.get('root'), VImageItem):
-                if info['root'] not in roots:
-                    roots.append(info['root'])
-            else:
-                return None
+        for t in sel_texts:
+            if isinstance(t.parentItem(), VImageItem) and not getattr(t.parentItem(), 'locked', False):
+                if t.parentItem() not in roots:
+                    roots.append(t.parentItem())
         return roots[0] if len(roots) == 1 else None
 
     def can_enter_avatar_connect_by_shift(self):
-        """判定当前是否允许通过单击 Shift 键进入点图连模式：
+        """判定当前是否允许通过按下 Shift 键进入点图连模式：
         - 不能处于「⤢调图片」(resize_mode)、已开启的点图连、连接点连线、对齐基准点选、图片管理或智能笔刷模式
         - 不能正在编辑文字
-        - 画布上必须恰好选中了 1 张未锁定的图片（人物节点）
+        - 画布上必须选中了 1 张未锁定的图片
         """
         if (self.resize_mode
                 or self.avatar_connect_mode
@@ -10278,13 +10286,14 @@ class LayoutScene(QGraphicsScene):
         return self._get_shift_quick_connect_source() is not None
 
     def enter_avatar_connect_from_selected_image(self):
-        """选中图片后按一下 Shift 键：直接进入点图连模式（无需一直按住 Shift），并将当前选中图片设为连线起点"""
+        """选中图片后按下 Shift 键：立即进入点图连模式（无需一直按住 Shift），并将当前选中图片设为连线起点"""
         if not self.can_enter_avatar_connect_by_shift():
             return False
         src_img = self._get_shift_quick_connect_source()
         if src_img is None:
             return False
         self.set_avatar_connect_mode(True)
+        self._entered_by_shift_key = True
         self.avatar_connect_source = src_img
         if isinstance(src_img, BaseElement) and not getattr(src_img, 'locked', False):
             src_img.setSelected(True)
@@ -10298,7 +10307,7 @@ class LayoutScene(QGraphicsScene):
                 )
             view.viewport().update()
         self._show_status_message(
-            "已进入点图连模式（起点已设为当前图片）：直接点击目标人物即可连续连线，点击鼠标中键（或按 Esc）退出",
+            "已进入点图连模式（起点已设为当前图片，无需按住Shift）：直接点击目标人物连续连线，点击鼠标中键（或按 Esc）退出",
             0
         )
         self.update()
@@ -11780,10 +11789,10 @@ class LayoutScene(QGraphicsScene):
         elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
             items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
             if items:
-                # Shift键使用大步长，否则1px（同时抑制Shift点图连预览，避免Shift+方向键微调时弹出连线）
+                # Shift键使用大步长，否则1px（若刚因按下Shift进入了点图连模式且尚未点击连线，按方向键微调时自动退出点图连）
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    self._shift_connect_suppressed = True
-                    self._avatar_hover_target = None
+                    if getattr(self, '_entered_by_shift_key', False) and getattr(self, 'avatar_connect_mode', False):
+                        self.set_avatar_connect_mode(False)
                     step = self.config_manager.get('nudge_large_step', 10)
                 else:
                     step = 1
@@ -12984,6 +12993,15 @@ class LayoutView(QGraphicsView):
                     self.show_cdr_navigator_popup(QCursor.pos(), hold_mode=False)
                 event.accept()
                 return
+        if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat() and self.scene():
+            other_mods = event.modifiers() & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.AltModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+            if other_mods == Qt.KeyboardModifier.NoModifier and QApplication.mouseButtons() == Qt.MouseButton.NoButton:
+                self.scene()._shift_key_currently_down = True
+                self.scene().enter_avatar_connect_from_selected_image()
         if event.key() == Qt.Key.Key_F5 and self.scene():
             scene = self.scene()
             if (getattr(scene, 'free_connection_point_mode', 'connect') == 'connect'
@@ -12995,6 +13013,8 @@ class LayoutView(QGraphicsView):
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat() and self.scene():
+            self.scene()._shift_key_currently_down = False
         if event.key() == Qt.Key.Key_F5 and self.scene():
             if getattr(self, '_free_point_f5_move_active', False):
                 self._free_point_f5_move_active = False
@@ -13020,11 +13040,9 @@ class LayoutView(QGraphicsView):
 
     def wheelEvent(self, event):
         if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
-            # Shift+滚轮 保留原始滚动行为，并抑制Shift点图连预览
-            if self.scene():
-                self.scene()._shift_connect_suppressed = True
-                self.scene()._avatar_hover_target = None
-                self.viewport().update()
+            # Shift+滚轮 保留原始滚动行为；若刚因按下Shift进入点图连且未连线，自动退出点图连
+            if self.scene() and getattr(self.scene(), '_entered_by_shift_key', False) and getattr(self.scene(), 'avatar_connect_mode', False):
+                self.scene().set_avatar_connect_mode(False)
             super().wheelEvent(event)
         else:
             # 滚轮直接缩放（以鼠标位置为中心）
@@ -17458,24 +17476,22 @@ class MainWindow(QMainWindow):
                         | Qt.KeyboardModifier.AltModifier
                         | Qt.KeyboardModifier.MetaModifier
                     )
-                    if other_mods == Qt.KeyboardModifier.NoModifier and QApplication.mouseButtons() == Qt.MouseButton.NoButton:
-                        self.scene._shift_tap_candidate = self.scene.can_enter_avatar_connect_by_shift()
-                    else:
-                        self.scene._shift_tap_candidate = False
-            elif not event.isAutoRepeat():
-                # 按下了除 Shift 以外的任何键（例如 Ctrl+Shift+... 或 Shift+方向键），取消单按 Shift 进入点图连候选
-                if self.scene:
-                    self.scene._shift_tap_candidate = False
+                    if (other_mods == Qt.KeyboardModifier.NoModifier
+                            and QApplication.mouseButtons() == Qt.MouseButton.NoButton):
+                        self.scene._shift_key_currently_down = True
+                        self.scene.enter_avatar_connect_from_selected_image()
+            elif not event.isAutoRepeat() and event.key() != Qt.Key.Key_Shift:
+                # 若按住 Shift 期间按下了其他键（如 Shift+方向键微调、Shift+Ctrl+... 等组合键），自动退出刚由 Shift 触发的点图连模式
+                if self.scene and getattr(self.scene, '_shift_key_currently_down', False):
+                    if getattr(self.scene, '_entered_by_shift_key', False) and getattr(self.scene, 'avatar_connect_mode', False):
+                        self.scene.set_avatar_connect_mode(False)
         elif event.type() == QEvent.Type.KeyRelease and event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
-            if self.scene and getattr(self.scene, '_shift_tap_candidate', False):
-                self.scene._shift_tap_candidate = False
-                if (QApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier
-                        and QApplication.mouseButtons() == Qt.MouseButton.NoButton):
-                    self.scene.enter_avatar_connect_from_selected_image()
-        elif event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.Wheel):
-            if self.scene and getattr(self.scene, '_shift_tap_candidate', False):
-                # 按住 Shift 期间进行了鼠标点击/拖拽（如 Shift+拖拽缩放）或 Shift+滚轮，不触发进入点图连
-                self.scene._shift_tap_candidate = False
+            if self.scene:
+                self.scene._shift_key_currently_down = False
+        elif event.type() == QEvent.Type.Wheel:
+            if self.scene and getattr(self.scene, '_shift_key_currently_down', False):
+                if getattr(self.scene, '_entered_by_shift_key', False) and getattr(self.scene, 'avatar_connect_mode', False):
+                    self.scene.set_avatar_connect_mode(False)
         return super().eventFilter(obj, event)
 
     def open_excel_column_map_dialog(self):
