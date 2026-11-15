@@ -15505,6 +15505,7 @@ class MainWindow(QMainWindow):
         export_submenu.addAction(export_pdf_action)
 
         export_merged_pdf_action = QAction('导出全部文档为单个多页 PDF（按文档先后次序一档一页）...', self)
+        export_merged_pdf_action.setShortcut('Alt+Z')
         export_merged_pdf_action.triggered.connect(self.export_all_documents_merged_pdf)
         export_submenu.addAction(export_merged_pdf_action)
 
@@ -15512,29 +15513,6 @@ class MainWindow(QMainWindow):
         save_and_pdf_action.setShortcut('Ctrl+Shift+P')
         save_and_pdf_action.triggered.connect(self.save_proj_and_pdf)
         export_submenu.addAction(save_and_pdf_action)
-
-        # 多文档 PDF 导出方式切换子菜单
-        pdf_mode_menu = export_submenu.addMenu('多文档 PDF 导出方式切换')
-        self.pdf_export_mode_group = QActionGroup(self)
-        self.pdf_export_mode_group.setExclusive(True)
-        self.pdf_mode_merged_action = QAction('合并为一个多页 PDF（一文档一页，按文档先后次序排页码）', self)
-        self.pdf_mode_merged_action.setCheckable(True)
-        self.pdf_mode_merged_action.setData('merged')
-        self.pdf_mode_separate_action = QAction('拆分为多个独立 PDF（按起始页码导出 1.pdf, 2.pdf...）', self)
-        self.pdf_mode_separate_action.setCheckable(True)
-        self.pdf_mode_separate_action.setData('separate')
-        self.pdf_export_mode_group.addAction(self.pdf_mode_merged_action)
-        self.pdf_export_mode_group.addAction(self.pdf_mode_separate_action)
-        pdf_mode_menu.addAction(self.pdf_mode_merged_action)
-        pdf_mode_menu.addAction(self.pdf_mode_separate_action)
-        current_pdf_mode = self.scene.config_manager.get('multi_pdf_export_mode', 'merged')
-        if current_pdf_mode == 'separate':
-            self.pdf_mode_separate_action.setChecked(True)
-        else:
-            self.pdf_mode_merged_action.setChecked(True)
-        self.pdf_export_mode_group.triggered.connect(
-            lambda act: self.set_multi_pdf_export_mode(act.data())
-        )
 
         export_submenu.addSeparator()
 
@@ -16557,6 +16535,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("导出图片\tCtrl+E", self.export_image)
         menu.addAction("导出 PDF\tCtrl+Alt+P", self.export_pdf)
+        menu.addAction("导出单个多页 PDF\tAlt+Z", self.export_all_documents_merged_pdf)
         menu.addAction("导出 CorelDRAW SVG", self.export_coreldraw_svg)
         action = menu.exec(self.view.mapToGlobal(pos))
         if action is None:
