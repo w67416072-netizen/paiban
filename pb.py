@@ -216,6 +216,7 @@ class ConfigManager:
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
             'display_unit': 'mm',  # 全局显示/输入单位：px / mm
+            'default_save_format': 'pdf',  # 默认保存格式：'pdf'（内嵌工程可编辑PDF） / 'vlayout'（纯工程文件）
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
             'insert_image_max_width_ratio': 0.3,  # 插入图片最大宽度（画布宽度的比例）
@@ -15702,6 +15703,23 @@ class MainWindow(QMainWindow):
         set_save_dir_action.triggered.connect(self.set_default_save_dir)
         sys_pref_submenu.addAction(set_save_dir_action)
 
+        save_fmt_menu = sys_pref_submenu.addMenu('默认保存格式')
+        self._save_fmt_action_group = QActionGroup(self)
+        self._save_fmt_action_group.setExclusive(True)
+
+        self.save_fmt_pdf_action = QAction('可编辑 PDF (*.pdf) — 推荐：可预览/打印/二次编辑', self, checkable=True)
+        self.save_fmt_vlayout_action = QAction('VLayout 工程 (*.vlayout) — 纯工程极速保存', self, checkable=True)
+        cur_save_fmt = self.scene.config_manager.get('default_save_format', 'pdf')
+        self.save_fmt_pdf_action.setChecked(cur_save_fmt != 'vlayout')
+        self.save_fmt_vlayout_action.setChecked(cur_save_fmt == 'vlayout')
+
+        self.save_fmt_pdf_action.triggered.connect(lambda: self.set_default_save_format('pdf'))
+        self.save_fmt_vlayout_action.triggered.connect(lambda: self.set_default_save_format('vlayout'))
+        self._save_fmt_action_group.addAction(self.save_fmt_pdf_action)
+        self._save_fmt_action_group.addAction(self.save_fmt_vlayout_action)
+        save_fmt_menu.addAction(self.save_fmt_pdf_action)
+        save_fmt_menu.addAction(self.save_fmt_vlayout_action)
+
         sys_pref_submenu.addSeparator()
 
         license_expiry_action = QAction('设置软件到期日期...', self)
@@ -19213,31 +19231,79 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda p=path: self.open_project_file(p))
         event.acceptProposedAction()
 
+    def set_default_save_format(self, fmt: str):
+        """设置软件默认保存格式：'pdf'（内嵌工程可编辑PDF）或 'vlayout'（纯JSON工程文件）"""
+        fmt = 'vlayout' if fmt == 'vlayout' else 'pdf'
+        self.scene.config_manager.set('default_save_format', fmt)
+        if hasattr(self, 'save_fmt_pdf_action'):
+            self.save_fmt_pdf_action.blockSignals(True)
+            self.save_fmt_pdf_action.setChecked(fmt == 'pdf')
+            self.save_fmt_pdf_action.blockSignals(False)
+        if hasattr(self, 'save_fmt_vlayout_action'):
+            self.save_fmt_vlayout_action.blockSignals(True)
+            self.save_fmt_vlayout_action.setChecked(fmt == 'vlayout')
+            self.save_fmt_vlayout_action.blockSignals(False)
+        label = "可编辑 PDF (*.pdf)" if fmt == 'pdf' else "VLayout 工程 (*.vlayout)"
+        self.show_toast(f"默认保存格式已设为：{label}", "✅", 3000)
+
+    def _save_project_to_path(self, path: str) -> bool:
+        """根据文件扩展名（.pdf 或 .vlayout）保存当前全部文档工程"""
+        if not path:
+            return False
+        is_pdf = path.lower().endswith('.pdf')
+        if is_pdf:
+            ok = self._do_export_merged_pdf(path, self._documents, show_dialog=False)
+            if not ok:
+                return False
+        else:
+            if not path.lower().endswith('.vlayout'):
+                path += '.vlayout'
+            ProjectData.save_documents(self._documents, path)
+        self._current_project_path = path
+        for document in self._documents:
+            document.dirty = False
+            self._update_document_tab_title(document)
+        self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
+        if is_pdf:
+            self.show_toast(
+                f"可编辑 PDF 已保存：{os.path.basename(path)}\n（共 {len(self._documents)} 页，已内嵌无损工程数据，可直接拖入软件编辑）",
+                "✅", 3500
+            )
+        else:
+            self.show_toast(f"工程已保存：{os.path.basename(path)}", "✅", 3000)
+        return True
+
     def save_proj(self):
-        """另存为：弹出对话框选择路径"""
+        """另存为：按用户设置的默认保存格式（默认可编辑 PDF，可切换为 .vlayout）弹出保存对话框"""
         default_dir = self.scene.config_manager.get('default_save_dir', '') or \
                       (os.path.dirname(self._current_project_path) if self._current_project_path else '')
-        path, _ = QFileDialog.getSaveFileName(self, "保存工程", default_dir, "VLayout (*.vlayout)")
+        fmt = self.scene.config_manager.get('default_save_format', 'pdf')
+        ext = '.pdf' if fmt != 'vlayout' else '.vlayout'
+        if self._current_project_path:
+            stem = os.path.splitext(os.path.basename(self._current_project_path))[0]
+        elif self._documents and self._documents[0].name:
+            stem = self._documents[0].name
+        else:
+            stem = '未命名工程'
+        default_path = os.path.join(default_dir, stem + ext) if default_dir else (stem + ext)
+        if fmt != 'vlayout':
+            filters = "可编辑 PDF (*.pdf);;VLayout 工程 (*.vlayout)"
+        else:
+            filters = "VLayout 工程 (*.vlayout);;可编辑 PDF (*.pdf)"
+        path, selected_filter = QFileDialog.getSaveFileName(self, "保存工程", default_path, filters)
         if path:
-            ProjectData.save_documents(self._documents, path)
-            self._current_project_path = path
-            for document in self._documents:
-                document.dirty = False
-                self._update_document_tab_title(document)
-            self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-            self.show_toast(f"工程已保存：{os.path.basename(path)}", "✅", 3000)
-            return True
+            if not path.lower().endswith(('.pdf', '.vlayout')):
+                if 'vlayout' in (selected_filter or '').lower():
+                    path += '.vlayout'
+                else:
+                    path += '.pdf'
+            return self._save_project_to_path(path)
         return False
 
     def quick_save_proj(self):
-        """快速保存：直接覆盖当前文件，没有路径时弹对话框"""
+        """快速保存（Ctrl+S）：直接覆盖当前文件（支持可编辑 .pdf 或 .vlayout），未保存过则按默认格式弹对话框"""
         if self._current_project_path:
-            ProjectData.save_documents(self._documents, self._current_project_path)
-            for document in self._documents:
-                document.dirty = False
-                self._update_document_tab_title(document)
-            self.show_toast(f"工程已保存：{os.path.basename(self._current_project_path)}", "✅", 3000)
-            return True
+            return self._save_project_to_path(self._current_project_path)
         else:
             return self.save_proj()
 
@@ -19249,10 +19315,7 @@ class MainWindow(QMainWindow):
                 return
 
         # 第二步：保存项目
-        ProjectData.save_documents(self._documents, self._current_project_path)
-        for document in self._documents:
-            document.dirty = False
-            self._update_document_tab_title(document)
+        self._save_project_to_path(self._current_project_path)
         self.status_bar.showMessage(f"项目已保存: {self._current_project_path}", 2000)
 
         pdf_dir = os.path.dirname(self._current_project_path)
@@ -19390,7 +19453,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._replace_documents(document_data)
-        self._current_project_path = None if is_pdf else path
+        self._current_project_path = path
         for document in self._documents:
             document.dirty = False
             self._update_document_tab_title(document)
