@@ -234,6 +234,14 @@ class ConfigManager:
             'favorite_fonts': ['SimSun', 'Microsoft YaHei', '黑体', '楷体', 'Arial'],
             'favorite_sizes': [10, 12, 14, 16, 18, 20, 24, 30, 36, 48, 72],
             'sidebar_tab_order': ['层级', '属性', '组合素材', '常用文字'],
+            'ftimport_unit': 'px',
+            'ftimport_start_x': 500,
+            'ftimport_spacing': 200,
+            'ftimport_y1': 500,
+            'ftimport_y2': 1000,
+            'ftimport_y3': 1500,
+            'ftimport_y4': 2000,
+            'ftimport_y5': 2500,
             'multi_pdf_export_mode': 'merged',  # 多文档PDF导出方式：'merged'（合并为一个多页PDF，按文档先后次序一文档一页） / 'separate'（按页码拆分为多个独立PDF）
             'license_password_hash': hash_license_password(DEFAULT_LICENSE_PASSWORD),
             'license_expiry_date': '',
@@ -13847,14 +13855,24 @@ class FamilyTreeImportDialog(QDialog):
             self.y_spins.append(sp)
         root.addWidget(y_group)
 
-        # 按钮
+        # 按钮（左侧「保存参数」，右侧「导入 / 取消」）
+        btn_row = QHBoxLayout()
+        self.btn_save_params = QPushButton("保存参数")
+        self.btn_save_params.setToolTip("将当前的尺寸单位、布局参数、各辈分 Y 坐标及模板设置保存为默认值")
+        self.btn_save_params.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_save_params.clicked.connect(self._on_save_params_clicked)
+        btn_row.addWidget(self.btn_save_params)
+        btn_row.addStretch(1)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("导入")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        root.addWidget(btns)
+        btn_row.addWidget(btns)
+        root.addLayout(btn_row)
         self._refresh_template_text_map()
         self._update_unit_suffix()
 
@@ -13908,11 +13926,16 @@ class FamilyTreeImportDialog(QDialog):
             't2': self.combo_template_t2.currentData(),
             't3': self.combo_template_t3.currentData(),
         }
-        self.scene.config_manager.set('ftimport_template_text_maps', maps)
+        parent_win = self.parent()
+        if parent_win and hasattr(parent_win, '_set_shared_config'):
+            parent_win._set_shared_config('ftimport_template_text_maps', maps)
+        else:
+            self.scene.config_manager.set('ftimport_template_text_maps', maps)
 
     def _save_template_map_clicked(self):
         self._on_template_name_edited()
         self._save_current_template_text_map()
+        ToastNotification.notify("模板文字对象指定已保存", "✅", 3000)
 
     def _restore_combo_data(self, combo, value):
         for idx in range(combo.count()):
@@ -14161,14 +14184,37 @@ class FamilyTreeImportDialog(QDialog):
 
     def _save_settings(self):
         cfg = self.scene.config_manager
-        cfg.set('ftimport_excel_path', self.txt_excel.text())
-        cfg.set('ftimport_template_name', self.combo_template.currentText().strip())
         self._save_current_template_text_map()
-        cfg.set('ftimport_unit', self.combo_unit.currentData() or 'px')
-        cfg.set('ftimport_start_x', self.spin_start_x.value())
-        cfg.set('ftimport_spacing', self.spin_spacing.value())
+        unit = self.combo_unit.currentData() or 'px'
+        new_values = {
+            'ftimport_excel_path': self.txt_excel.text(),
+            'ftimport_template_name': self.combo_template.currentText().strip(),
+            'ftimport_unit': unit,
+            'ftimport_start_x': self.spin_start_x.value(),
+            'ftimport_spacing': self.spin_spacing.value(),
+        }
         for i, sp in enumerate(self.y_spins):
-            cfg.set(f'ftimport_y{i+1}', sp.value())
+            new_values[f'ftimport_y{i+1}'] = sp.value()
+        parent_win = self.parent()
+        if parent_win and hasattr(parent_win, '_set_shared_configs'):
+            parent_win._set_shared_configs(new_values)
+        else:
+            for k, v in new_values.items():
+                cfg.config[k] = v
+            cfg.save_config()
+
+    def _on_save_params_clicked(self):
+        """手动保存当前窗口中的布局参数、各辈分 Y 坐标及模板设置为默认值"""
+        self._on_template_name_edited()
+        self._save_settings()
+        unit = self.combo_unit.currentData() or 'px'
+        y_vals = ", ".join(f"{sp.value():g}" for sp in self.y_spins)
+        ToastNotification.notify(
+            f"布局参数与各辈分 Y 坐标已保存（单位: {unit}）\n"
+            f"起始X: {self.spin_start_x.value():g}  |  间距: {self.spin_spacing.value():g}  |  各代Y: [{y_vals}]",
+            "✅",
+            3500
+        )
 
     def _get_t1_font(self):
         """从模板的B组（t1）文字对象取字号和字体，找不到时用系统默认"""
