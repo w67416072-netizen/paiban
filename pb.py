@@ -12267,16 +12267,37 @@ class LayoutView(QGraphicsView):
         """鼠标是否在垂直标尺区域（左侧）"""
         return pos.x() < self.RULER_SIZE and pos.y() >= self.RULER_SIZE
 
+    def _find_connector_near_viewport_pos(self, pos, tolerance_px=6):
+        """在视口坐标 pos 附近查找可见的连线对象（供按住 Alt 点击选连线使用）"""
+        if not self.scene():
+            return None
+        direct = self.itemAt(pos)
+        if isinstance(direct, (VImageTextConnector, VGenericConnector)) and direct.isVisible():
+            return direct
+        hit_rect = QRect(pos.x() - tolerance_px, pos.y() - tolerance_px, tolerance_px * 2, tolerance_px * 2)
+        for it in self.items(hit_rect):
+            if isinstance(it, (VImageTextConnector, VGenericConnector)) and it.isVisible():
+                return it
+        return None
+
     def _update_marquee_style(self, current_pos):
+        alt_active = getattr(self, '_marquee_alt_pressed', False) or bool(
+            QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+        )
+        mode = self.scene().config_manager.get('marquee_mode', 'images') if self.scene() else 'images'
         left_to_right = current_pos.x() >= self._marquee_origin.x()
-        if left_to_right:
+        if mode == 'images' and alt_active:
+            # 仅图片模式下按住 Alt 框选：专属连线框选样式（碰线即选）
+            self._marquee_mode = Qt.ItemSelectionMode.IntersectsItemShape
+            self._marquee_band.setStyleSheet("background: rgba(245, 158, 11, 0.18); border: 1px solid rgba(217, 119, 6, 0.95);")
+        elif left_to_right:
             self._marquee_mode = Qt.ItemSelectionMode.ContainsItemShape
             self._marquee_band.setStyleSheet("background: rgba(0, 120, 215, 0.18); border: 1px solid rgba(0, 120, 215, 0.95);")
         else:
             self._marquee_mode = Qt.ItemSelectionMode.IntersectsItemShape
             self._marquee_band.setStyleSheet("background: rgba(0, 200, 120, 0.18); border: 1px solid rgba(0, 200, 120, 0.95);")
 
-    def _apply_marquee_selection(self):
+    def _apply_marquee_selection(self, modifiers=None):
         rect = self._marquee_band.geometry()
         if rect.width() < 3 or rect.height() < 3:
             return
@@ -12287,12 +12308,29 @@ class LayoutView(QGraphicsView):
 
         scene = self.scene()
         mode = scene.config_manager.get('marquee_mode', 'images')
-        scene.clearSelection()
-        items = scene.items(path, self._marquee_mode, Qt.SortOrder.DescendingOrder, self.transform())
+        if modifiers is None:
+            modifiers = QApplication.keyboardModifiers()
+        alt_select_connectors = getattr(self, '_marquee_alt_pressed', False) or bool(
+            modifiers & Qt.KeyboardModifier.AltModifier
+        )
+        if not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
+            scene.clearSelection()
+
+        query_mode = (
+            Qt.ItemSelectionMode.IntersectsItemShape
+            if (mode == 'images' and alt_select_connectors)
+            else self._marquee_mode
+        )
+        items = scene.items(path, query_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
         select_parent_mode = scene.config_manager.get('select_child_selects_parent', True)
         has_connector_in_rect = False
         for item in items:
+            if mode == 'images' and alt_select_connectors:
+                # 仅图片模式下按住 Alt 框选：专门选中框选碰到的连线
+                if isinstance(item, (VImageTextConnector, VGenericConnector)) and item.isVisible():
+                    item.setSelected(True)
+                continue
             if isinstance(item, BaseElement) and select_parent_mode:
                 item = item.get_root_parent_element()
             if (isinstance(item, ConnectionPoint)
@@ -12314,19 +12352,21 @@ class LayoutView(QGraphicsView):
                 if item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable:
                     item.setSelected(True)
 
-        # 独立连接点按圆心是否落入选框判定。这样左到右的“完全包含”框选
-        # 不会因为点的可点击范围较大而漏选。
-        # 移除模式检查，连接模式下也能框选独立连接点
-        for point in getattr(scene, 'free_connection_points', []):
-            if point.scene() is scene and point.isVisible() and path.contains(point.get_scene_center()):
-                point.setSelected(True)
+        if not (mode == 'images' and alt_select_connectors):
+            # 独立连接点按圆心是否落入选框判定。这样左到右的“完全包含”框选
+            # 不会因为点的可点击范围较大而漏选。
+            for point in getattr(scene, 'free_connection_points', []):
+                if point.scene() is scene and point.isVisible() and path.contains(point.get_scene_center()):
+                    point.setSelected(True)
 
-        # 仅图片模式下框选到连线时弹出提示
-        if mode == 'images' and has_connector_in_rect:
+        # 仅图片模式下未按 Alt 框选到连线时弹出提示
+        if mode == 'images' and not alt_select_connectors and has_connector_in_rect:
             mw = self._main_window
             if mw and hasattr(mw, '_toast'):
                 mw._toast.show_message(
-                    "框选范围内有连线未被选中\n当前模式：仅图片\nAlt+M 切换为「全选」模式", "⚠", 4000)
+                    "框选范围内有连线未被选中\n当前模式：仅图片（按住 Alt 点击或框选可直接选连线，或按 Alt+M 切换全选）",
+                    "⚠", 3500
+                )
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -12668,9 +12708,43 @@ class LayoutView(QGraphicsView):
                     is_locked = True
                 # 如果未来有锁定的文字，也可以在这里增加判断
 
-            # 3. 开启框选逻辑的条件：点在空白处 OR 点在锁定的物体上
+            mode = self.scene().config_manager.get('marquee_mode', 'images') if self.scene() else 'images'
+            alt_held = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+
+            # 3. 仅图片模式下按住 Alt 键：优先支持点击选中连线，或拖拽框选连线
+            if mode == 'images' and alt_held:
+                hit_conn = self._find_connector_near_viewport_pos(pos, tolerance_px=6)
+                if hit_conn is not None:
+                    if event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+                        hit_conn.setSelected(not hit_conn.isSelected())
+                    else:
+                        self.scene().clearSelection()
+                        hit_conn.setSelected(True)
+                    event.accept()
+                    return
+                # 按住 Alt 在空白处或图片/文字上拖框时，开启连线专属框选
+                self._marquee_active = True
+                self._marquee_alt_pressed = True
+                self._marquee_clicked_connector = None
+                self._marquee_origin = pos
+                self._marquee_sweep_order = []
+                self._update_marquee_style(pos)
+                self._marquee_band.setGeometry(QRect(self._marquee_origin, QSize()))
+                self._marquee_band.show()
+                self._marquee_trigger_button = event.button()
+                event.accept()
+                return
+
+            # 4. 非仅图片模式（如「全选」模式）下直接点击连线：交由默认逻辑直接选中连线
+            if hit_element is None and isinstance(raw_hit, (VImageTextConnector, VGenericConnector)) and mode != 'images':
+                super().mousePressEvent(event)
+                return
+
+            # 5. 开启框选逻辑的条件：点在空白处、点在锁定物体上、或仅图片模式下未按 Alt 点在连线上
             if hit_element is None or is_locked:
                 self._marquee_active = True
+                self._marquee_alt_pressed = alt_held
+                self._marquee_clicked_connector = raw_hit if isinstance(raw_hit, (VImageTextConnector, VGenericConnector)) else None
                 self._marquee_origin = pos
                 self._marquee_sweep_order = []  # 开始新的框选，清空扫过记录
                 self._update_marquee_style(pos)
@@ -12680,20 +12754,8 @@ class LayoutView(QGraphicsView):
                 self._marquee_trigger_button = event.button()
                 event.accept()
                 return
-            
-            # 4. 仅图片模式下，点击连线时阻止选中并弹提示
-            if hit_element is None and raw_hit is not None:
-                # raw_hit 可能是连线
-                if isinstance(raw_hit, (VImageTextConnector, VGenericConnector)):
-                    mode = self.scene().config_manager.get('marquee_mode', 'images')
-                    if mode == 'images':
-                        if self._main_window and hasattr(self._main_window, '_toast'):
-                            self._main_window._toast.show_message(
-                                "当前模式：仅图片\n连线无法选中\nAlt+M 切换为「全选」模式", "⚠", 4000)
-                        event.accept()
-                        return
 
-            # 5. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
+            # 6. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -12885,7 +12947,24 @@ class LayoutView(QGraphicsView):
         # 结束框选并应用选择逻辑
         if self._marquee_active and event.button() == self._marquee_trigger_button:
             self._marquee_active = False
-            self._apply_marquee_selection()
+            rect = self._marquee_band.geometry()
+            clicked_conn = getattr(self, '_marquee_clicked_connector', None)
+            self._marquee_clicked_connector = None
+            if rect.width() < 3 and rect.height() < 3:
+                self._marquee_band.hide()
+                self._marquee_alt_pressed = False
+                if clicked_conn is not None and scene and scene.config_manager.get('marquee_mode', 'images') == 'images':
+                    if self._main_window and hasattr(self._main_window, '_toast'):
+                        self._main_window._toast.show_message(
+                            "当前模式：仅图片\n按住 Alt 点击或框选可直接选择连线（或按 Alt+M 切换全选）",
+                            "💡", 3500
+                        )
+                elif scene and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)):
+                    scene.clearSelection()
+                event.accept()
+                return
+            self._apply_marquee_selection(event.modifiers())
+            self._marquee_alt_pressed = False
             # 用框选过程中实时追踪的扫过顺序更新 selection_order，并补齐释放瞬间新选中的元素
             scene = self.scene()
             if scene:
