@@ -13801,9 +13801,6 @@ class FamilyTreeImportDialog(QDialog):
         tm.addRow("主文字(A组)填入:", self.combo_template_t1)
         tm.addRow("副文字1(C组)填入:", self.combo_template_t2)
         tm.addRow("副文字2(B组)填入:", self.combo_template_t3)
-        self.btn_save_template_map = QPushButton("保存此模板指定")
-        self.btn_save_template_map.clicked.connect(self._save_template_map_clicked)
-        tm.addRow("", self.btn_save_template_map)
         root.addWidget(template_map_group)
         self._template_map_loading = False
         self._current_template_key = None
@@ -13932,10 +13929,6 @@ class FamilyTreeImportDialog(QDialog):
         else:
             self.scene.config_manager.set('ftimport_template_text_maps', maps)
 
-    def _save_template_map_clicked(self):
-        self._on_template_name_edited()
-        self._save_current_template_text_map()
-        ToastNotification.notify("模板文字对象指定已保存", "✅", 3000)
 
     def _restore_combo_data(self, combo, value):
         for idx in range(combo.count()):
@@ -14204,13 +14197,13 @@ class FamilyTreeImportDialog(QDialog):
             cfg.save_config()
 
     def _on_save_params_clicked(self):
-        """手动保存当前窗口中的布局参数、各辈分 Y 坐标及模板设置为默认值"""
+        """一键保存当前窗口中的模板文字指定、布局参数及各辈分 Y 坐标为默认值"""
         self._on_template_name_edited()
         self._save_settings()
         unit = self.combo_unit.currentData() or 'px'
         y_vals = ", ".join(f"{sp.value():g}" for sp in self.y_spins)
         ToastNotification.notify(
-            f"布局参数与各辈分 Y 坐标已保存（单位: {unit}）\n"
+            f"模板指定、布局参数与各辈分 Y 坐标已保存（单位: {unit}）\n"
             f"起始X: {self.spin_start_x.value():g}  |  间距: {self.spin_spacing.value():g}  |  各代Y: [{y_vals}]",
             "✅",
             3500
