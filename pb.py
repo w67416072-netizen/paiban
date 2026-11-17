@@ -459,10 +459,14 @@ class AssetManager:
             if img_idx != -1 and text_idx != -1:
                 image_text_connections.append((img_idx, text_idx))
         
-        # 生成组合名称
-        text_count = sum(1 for item in items if isinstance(item, VTextItem))
-        image_count = sum(1 for item in items if isinstance(item, VImageItem))
-        group_name = f"组合_{text_count}文字_{image_count}图片"
+        # 生成组合名称：组合+数字（取当前最大数字加1）
+        max_group_num = 0
+        for existing_asset in self.assets.get('groups', []):
+            existing_name = str(existing_asset.get('name', '')).strip()
+            m = re.match(r'^(?:组合[_\-\s]*)?(\d+)$', existing_name)
+            if m:
+                max_group_num = max(max_group_num, int(m.group(1)))
+        group_name = f"组合{max_group_num + 1}"
 
         # 生成缩略图：把选中元素渲染到 QPixmap
         thumb_path = ''
@@ -2505,7 +2509,8 @@ class AssetLibraryDockWidget(QDockWidget):
                 off_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
                 new_item.setZValue(10)
-                cmd = AddItemCommand(scene, new_item)
+                is_root_in_asset = (item_data.get('parent_index', -1) == -1)
+                cmd = AddItemCommand(scene, new_item, auto_bind_isolation_parent=is_root_in_asset)
                 cmd.execute()
                 sub_commands.append(cmd)
                 if item_data.get('connection_point_deleted', False):
@@ -2623,13 +2628,22 @@ class AssetLibraryDockWidget(QDockWidget):
         else:
             base_pos = center
 
+        if getattr(scene, 'isolation_manager', None) is not None and scene.isolation_manager.is_active():
+            scene.exit_all_isolation_modes(silent=True)
+
         placed = self._place_group_at(asset, base_pos)
 
         scene._editing_group_asset_id = asset['id']
         scene._editing_group_items = [i for i in (placed or []) if isinstance(i, (VImageItem, VTextItem))]
+        if scene._editing_group_items and getattr(scene, 'isolation_manager', None) is not None:
+            scene.enter_isolation_mode(
+                scene._editing_group_items,
+                auto_from_group_edit=True,
+                label=f"编辑组合：{asset['name']}"
+            )
 
         self.main_window.status_bar.showMessage(
-            f"正在编辑组合「{asset['name']}」— 编辑完成后右键画布选择「更新到素材库」", 0
+            f"正在独立模式中编辑组合「{asset['name']}」— 编辑完成后右键画布选择「更新到素材库」（按 ESC 可退出独立模式）", 0
         )
 
 class AssetLibraryWidget(QWidget):
@@ -3444,31 +3458,80 @@ class UndoCommand:
         pass
 
 class AddItemCommand(UndoCommand):
-    """添加元素命令 - 增加了父子项安全检查"""
-    def __init__(self, scene, item):
+    """添加元素命令 - 支持独立模式下新建对象自动归属当前隔离对象子集及完整撤销/重做"""
+    def __init__(self, scene, item, auto_bind_isolation_parent=True):
         super().__init__(scene)
         self.item = item
+        self.auto_bind_isolation_parent = bool(auto_bind_isolation_parent)
+        self._explicit_parent = item.parentItem() if isinstance(item.parentItem(), BaseElement) else None
+        self._isolation_parent = None
+        if (self.auto_bind_isolation_parent
+                and self._explicit_parent is None
+                and isinstance(item, BaseElement)
+                and getattr(scene, 'isolation_manager', None) is not None
+                and scene.isolation_manager.is_active()):
+            self._isolation_parent = scene.isolation_manager.get_active_parent_for_new_item(exclude=item)
+        self._saved_scene_pos = None
+        self._added_to_editing_group = False
 
     def execute(self):
-        """执行添加操作：只有当元素既没有父级也不在场景中时才添加"""
-        # 如果元素已经有父级了，它会随父级自动进入场景，无需手动 addItem
-        if not self.item.scene() and not self.item.parentItem():
-            self.scene.addItem(self.item)
-            
+        """执行添加操作：在独立模式下自动挂载为当前隔离对象的子级"""
+        target_parent = self._explicit_parent or self._isolation_parent
+        if self._saved_scene_pos is not None:
+            desired_scene_pos = QPointF(self._saved_scene_pos)
+        elif self.item.scene() is not None:
+            desired_scene_pos = self.item.scenePos()
+        elif self.item.parentItem() is not None:
+            desired_scene_pos = self.item.parentItem().mapToScene(self.item.pos())
+        else:
+            desired_scene_pos = QPointF(self.item.pos())
+
+        if (target_parent is not None
+                and target_parent is not self.item
+                and target_parent.scene() == self.scene
+                and isinstance(self.item, BaseElement)):
+            if self.item.parentItem() is not target_parent:
+                self.item.setParentItem(target_parent)
+            self.item.setPos(target_parent.mapFromScene(desired_scene_pos))
+            self.scene.add_connector(target_parent, self.item)
+        else:
+            if not self.item.scene() and not self.item.parentItem():
+                self.scene.addItem(self.item)
+            if self._saved_scene_pos is not None and not self.item.parentItem():
+                self.item.setPos(desired_scene_pos)
+
         if isinstance(self.item, (VTextItem, VImageItem)):
-            # 只有连接点存在时才设置可见性
             if hasattr(self.item, 'connection_point') and self.item.connection_point is not None:
                 self.item.set_connection_points_visible(self.scene.show_connection_points)
         if isinstance(self.item, VTextItem):
             self.item.update_hover_tooltip()
 
+        if getattr(self.scene, '_editing_group_asset_id', None) is not None and isinstance(self.item, (VImageItem, VTextItem)):
+            ed_list = getattr(self.scene, '_editing_group_items', None)
+            if isinstance(ed_list, list) and self.item not in ed_list:
+                ed_list.append(self.item)
+                self._added_to_editing_group = True
+
+        if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.is_active():
+            self.scene.isolation_manager.register_new_item(self.item)
+            self.scene.isolation_manager.sync_permissions_and_visuals()
+
     def undo(self):
-        """撤销添加操作：增加场景归属判断，防止重复删除报错"""
-        # 检查元素是否还在当前场景中（可能已随父级被移除）
+        """撤销添加操作：保存场景位置并安全解除父子关系与连线"""
         if self.item.scene() == self.scene:
+            self._saved_scene_pos = self.item.scenePos()
             self.scene.remove_all_connectors_for_item(self.item)
             self.scene.remove_image_text_connectors(self.item)
+            if self.item.parentItem() is not None:
+                self.item.setParentItem(None)
             self.scene.removeItem(self.item)
+            self.item.setPos(self._saved_scene_pos)
+        if self._added_to_editing_group:
+            ed_list = getattr(self.scene, '_editing_group_items', None)
+            if isinstance(ed_list, list) and self.item in ed_list:
+                ed_list.remove(self.item)
+        if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.is_active():
+            self.scene.isolation_manager.sync_permissions_and_visuals()
 
 class DeleteItemCommand(UndoCommand):
     """删除元素命令"""
@@ -4031,6 +4094,9 @@ class SplitTextItemCommand(UndoCommand):
         self.scene.update_image_text_connectors(self.item)
         self.scene.update_connectors(self.new_item)
         self.scene.update_image_text_connectors(self.new_item)
+        if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.is_active():
+            self.scene.isolation_manager.register_new_item(self.new_item)
+            self.scene.isolation_manager.sync_permissions_and_visuals()
 
     def undo(self):
         orig_scene_rect = self.item.mapRectToScene(self.item.boundingRect())
@@ -5500,7 +5566,13 @@ class BaseElement(QGraphicsItem):
         self._proxy_dragging_root = None
         if event.button() == Qt.MouseButton.LeftButton:
             scene = self.scene()
-            if scene and scene.config_manager.get('select_child_selects_parent', True) and not getattr(self, 'is_editing', False):
+            if scene and not scene.can_interact_with_item(self):
+                event.ignore()
+                return
+            if (scene
+                    and scene.config_manager.get('select_child_selects_parent', True)
+                    and not getattr(self, 'is_editing', False)
+                    and not scene.is_isolation_active()):
                 root = self.get_root_parent_element()
                 # 若当前子元素已被单独选中（且父级未被选中，例如刚拆分出的文本框），允许直接拖动该子元素
                 individually_selected_child = self.isSelected() and not root.isSelected()
@@ -5602,6 +5674,8 @@ class BaseElement(QGraphicsItem):
         copy_action = menu.addAction("复制 (Copy)")
         delete_action = menu.addAction("删除 (Delete)")
         save_as_asset_action = menu.addAction("保存组合")
+        isolation_enter_act = menu.addAction("🔒 进入/深入独立模式 (I)")
+        isolation_exit_act = menu.addAction("🔙 退出当前独立模式层级 (Esc)") if (self.scene() and self.scene().is_isolation_active()) else None
         menu.addSeparator()
         
         # 对齐功能
@@ -5660,6 +5734,14 @@ class BaseElement(QGraphicsItem):
         elif action == save_as_asset_action:
             if self.scene():
                 self.scene().save_group_as_asset()
+        elif action == isolation_enter_act:
+            if self.scene():
+                if not self.isSelected():
+                    self.setSelected(True)
+                self.scene().handle_isolation_shortcut()
+        elif isolation_exit_act and action == isolation_exit_act:
+            if self.scene():
+                self.scene().exit_isolation_level()
         elif len(selected_items) >= 2:
             if action == align_top_action:
                 self.scene().align_top(selected_items)
@@ -6668,6 +6750,8 @@ class VTextItem(BaseElement):
     
     def start_inline_editing(self, cursor_position=None, select_all=False):
         """开始内联编辑：原位显示文字层、直接输入，体验接近 Photoshop"""
+        if self.scene() and not self.scene().can_interact_with_item(self):
+            return
         if self.is_editing:
             return
 
@@ -6806,6 +6890,8 @@ class VTextItem(BaseElement):
 
     def start_dialog_editing(self):
         """开始对话框编辑"""
+        if self.scene() and not self.scene().can_interact_with_item(self):
+            return
         text, ok = QInputDialog.getMultiLineText(None, "编辑文本", "请输入排版内容", self.full_text)
         if ok and text != self.full_text and self.scene():
             old_text = self.full_text
@@ -7629,6 +7715,13 @@ class VImageItem(BaseElement):
         menu.addAction("复制").triggered.connect(lambda: self.scene().copy_item(self) if self.scene() else None)
         menu.addAction("删除").triggered.connect(lambda: self.scene().delete_item(self) if self.scene() else None)
         menu.addAction("保存组合").triggered.connect(lambda: self.scene().save_group_as_asset() if self.scene() else None)
+        menu.addAction("🔒 进入/深入独立模式 (I)").triggered.connect(
+            lambda: (self.setSelected(True) if not self.isSelected() else None, self.scene().handle_isolation_shortcut()) if self.scene() else None
+        )
+        if self.scene() and self.scene().is_isolation_active():
+            menu.addAction("🔙 退出当前独立模式层级 (Esc)").triggered.connect(
+                lambda: self.scene().exit_isolation_level() if self.scene() else None
+            )
         menu.addSeparator()
 
         main_window = None
@@ -8743,6 +8836,373 @@ class CdrNavigatorButton(QToolButton):
         super().mouseReleaseEvent(event)
 
 
+class IsolationStateManager:
+    """Adobe Illustrator 风格「独立模式（隔离模式）」状态管理器：
+    - 支持多层级隔离栈（按 I 键进入或深入子级隔离，按 ESC 逐层退出当前隔离层级）
+    - 统一管理对象选择、移动、删除与编辑权限
+    - 隔离范围外对象保持可见（绝不通过隐藏或删除实现），采用降低不透明度 + 画布半透明遮罩呈现变暗效果
+    - 隔离模式下新建对象自动归属当前隔离对象的子集
+    - 编辑组合素材时自动进入隔离模式，更新保存到素材库或取消编辑后自动离开隔离模式
+    """
+    DIMMED_ELEMENT_OPACITY = 0.22
+    DIMMED_CONNECTOR_OPACITY = 0.16
+
+    def __init__(self, scene):
+        self.scene = scene
+        self._stack = []
+        self._suspended_for_export = False
+
+    def is_active(self) -> bool:
+        return bool(self._stack) and not self._suspended_for_export
+
+    def has_levels(self) -> bool:
+        return bool(self._stack)
+
+    def level_count(self) -> int:
+        return len(self._stack)
+
+    def current_level(self):
+        return self._stack[-1] if self._stack else None
+
+    def compute_scope_for_roots(self, roots):
+        """给定一组根对象，递归收集其自身及所有子孙 BaseElement"""
+        scope = set()
+        def _collect(el):
+            if isinstance(el, BaseElement) and el.scene() == self.scene and el not in scope:
+                scope.add(el)
+                for ch in el.childItems():
+                    if isinstance(ch, BaseElement):
+                        _collect(ch)
+        for r in (roots or []):
+            _collect(r)
+        return scope
+
+    def _prune_stale_items(self):
+        """清理栈中已不在场景内的对象引用"""
+        while self._stack:
+            top = self._stack[-1]
+            top['roots'] = [r for r in top.get('roots', []) if r is not None and r.scene() == self.scene]
+            owner = top.get('primary_owner')
+            if owner is None or owner.scene() != self.scene:
+                top['primary_owner'] = self._determine_primary_owner(top['roots'])
+            if top['roots'] or top['primary_owner'] is not None:
+                break
+            self._stack.pop()
+
+    def get_isolated_elements(self):
+        """返回当前隔离层级允许交互的所有 BaseElement 集合（当前对象及其全部子级对象）"""
+        if not self._stack:
+            return set()
+        self._prune_stale_items()
+        if not self._stack:
+            return set()
+        top = self._stack[-1]
+        roots = list(top.get('roots', []))
+        owner = top.get('primary_owner')
+        if owner is not None and owner.scene() == self.scene and owner not in roots:
+            roots.append(owner)
+        return self.compute_scope_for_roots(roots)
+
+    def _determine_primary_owner(self, roots):
+        valid = [r for r in (roots or []) if isinstance(r, BaseElement) and r.scene() == self.scene and not getattr(r, 'locked', False)]
+        if not valid:
+            return None
+        valid_set = set(valid)
+        top_roots = [r for r in valid if r.parentItem() not in valid_set]
+        candidates = top_roots if top_roots else valid
+        for r in candidates:
+            if isinstance(r, VImageItem):
+                return r
+        return candidates[0]
+
+    def _make_level_label(self, roots, custom_label=None):
+        if custom_label:
+            return str(custom_label)
+        owner = self._determine_primary_owner(roots)
+        if isinstance(owner, VImageItem):
+            base = os.path.basename(owner.file_path) or "图片"
+        elif isinstance(owner, VTextItem):
+            preview = owner.full_text.replace('\n', ' ').strip()[:8] or "文字"
+            base = f"文字「{preview}」"
+        else:
+            base = "选中对象"
+        scope = self.compute_scope_for_roots(roots)
+        if len(scope) > 1:
+            return f"{base} (含子级共{len(scope)}项)"
+        return base
+
+    def get_active_parent_for_new_item(self, exclude=None):
+        """获取隔离模式下新建对象应自动归属的父级对象"""
+        if not self.is_active():
+            return None
+        self._prune_stale_items()
+        lvl = self.current_level()
+        if not lvl:
+            return None
+        valid_roots = [
+            r for r in lvl.get('roots', [])
+            if isinstance(r, BaseElement) and r.scene() == self.scene and r is not exclude and not getattr(r, 'locked', False)
+        ]
+        valid_set = set(valid_roots)
+        top_roots = [r for r in valid_roots if r.parentItem() not in valid_set]
+        if len(top_roots) > 1:
+            for sel in self.scene.selectedItems():
+                if sel in top_roots and sel is not exclude:
+                    return sel
+        owner = lvl.get('primary_owner')
+        if (isinstance(owner, BaseElement)
+                and owner.scene() == self.scene
+                and owner is not exclude
+                and not getattr(owner, 'locked', False)):
+            return owner
+        return top_roots[0] if top_roots else (valid_roots[0] if valid_roots else None)
+
+    def register_new_item(self, item):
+        """当在独立模式中新建或拆分出新对象时，将其纳入当前隔离范围"""
+        if not self._stack or item is None:
+            return
+        lvl = self._stack[-1]
+        if isinstance(item, BaseElement):
+            if item not in lvl['roots'] and item.parentItem() is None:
+                lvl['roots'].append(item)
+            if lvl.get('primary_owner') is None or lvl['primary_owner'].scene() != self.scene:
+                lvl['primary_owner'] = item
+        elif isinstance(item, ConnectionPoint) and item.parent_element is None:
+            lvl.setdefault('free_points', set()).add(item)
+
+    def can_interact(self, item) -> bool:
+        """统一权限判定：判断指定对象在当前隔离状态下是否允许选择、移动、删除和编辑"""
+        if item is None:
+            return False
+        if not self.is_active():
+            if isinstance(item, VImageItem) and getattr(item, 'locked', False):
+                return False
+            return True
+
+        isolated_elements = self.get_isolated_elements()
+        if not isolated_elements:
+            return True
+
+        if isinstance(item, BaseElement):
+            if getattr(item, 'locked', False):
+                return False
+            return item in isolated_elements
+
+        if isinstance(item, ResizeHandle):
+            return self.can_interact(getattr(item, 'parent_image', None))
+
+        if isinstance(item, QGraphicsSimpleTextItem):
+            return self.can_interact(item.parentItem())
+
+        if isinstance(item, SmoothPixmapItem):
+            return self.can_interact(item.parentItem())
+
+        if isinstance(item, ConnectionPoint):
+            if item.parent_element is not None:
+                return self.can_interact(item.parent_element)
+            lvl = self.current_level()
+            if lvl and item in lvl.get('free_points', set()):
+                return True
+            for conn in getattr(item, 'connected_lines', []):
+                i1, i2 = self.scene._image_text_connector_items(conn)
+                if (i1 in isolated_elements) or (i2 in isolated_elements):
+                    return True
+            return False
+
+        if isinstance(item, VConnector):
+            return (item.parent_element in isolated_elements) and (item.child_element in isolated_elements)
+
+        if isinstance(item, (VImageTextConnector, VGenericConnector)):
+            i1, i2 = self.scene._image_text_connector_items(item)
+            if i1 is not None and i2 is not None:
+                return (i1 in isolated_elements) and (i2 in isolated_elements)
+            p1, p2 = getattr(item, 'point1', None), getattr(item, 'point2', None)
+            if p1 is not None and p2 is not None:
+                return self.can_interact(p1) and self.can_interact(p2)
+            return False
+
+        return True
+
+    def enter_level(self, items, auto_from_group_edit=False, label=None) -> bool:
+        valid = [
+            it for it in (items or [])
+            if isinstance(it, BaseElement) and it.scene() == self.scene and not getattr(it, 'locked', False)
+        ]
+        if not valid:
+            return False
+
+        # 若从非隔离态按 I 进入，且开启了「选父」，将子元素归一到其顶层组合根对象以隔离整个组合；
+        # 若已在隔离模式中按 I，则直接以所选子元素作为新隔离层级根对象（支持逐层深入）
+        roots = []
+        if not self._stack and not auto_from_group_edit and self.scene.config_manager.get('select_child_selects_parent', True):
+            for it in valid:
+                r = it.get_root_parent_element()
+                if r not in roots:
+                    roots.append(r)
+        else:
+            for it in valid:
+                if it not in roots:
+                    roots.append(it)
+
+        scope = self.compute_scope_for_roots(roots)
+        if not scope:
+            return False
+
+        primary_owner = self._determine_primary_owner(roots)
+        level_label = self._make_level_label(roots, custom_label=label)
+
+        free_pts = set()
+        for pt in getattr(self.scene, 'free_connection_points', []):
+            if pt.scene() == self.scene:
+                for conn in getattr(pt, 'connected_lines', []):
+                    i1, i2 = self.scene._image_text_connector_items(conn)
+                    if (i1 in scope) or (i2 in scope):
+                        free_pts.add(pt)
+
+        self._stack.append({
+            'roots': roots,
+            'primary_owner': primary_owner,
+            'auto_from_group_edit': bool(auto_from_group_edit),
+            'label': level_label,
+            'free_points': free_pts,
+        })
+        self.sync_permissions_and_visuals()
+
+        self.scene.clearSelection()
+        for r in roots:
+            if r.scene() == self.scene and not getattr(r, 'locked', False):
+                r.setSelected(True)
+
+        self._notify_ui_state_changed()
+        ToastNotification.notify(
+            f"已进入独立模式（层级 {len(self._stack)}：{level_label}）\n"
+            f"新建对象自动归属当前子集，按 ESC 退出当前隔离层级",
+            "🔒",
+            3200
+        )
+        return True
+
+    def exit_level(self, silent=False) -> bool:
+        if not self._stack:
+            return False
+        popped = self._stack.pop()
+        self._prune_stale_items()
+        self.sync_permissions_and_visuals()
+
+        self.scene.clearSelection()
+        for r in popped.get('roots', []):
+            if r is not None and r.scene() == self.scene and self.can_interact(r):
+                r.setSelected(True)
+
+        self._notify_ui_state_changed()
+        if not silent:
+            if self._stack:
+                cur = self._stack[-1]
+                ToastNotification.notify(
+                    f"已退出上一层级，当前处于独立模式（层级 {len(self._stack)}：{cur['label']}）",
+                    "🔙",
+                    2600
+                )
+            else:
+                ToastNotification.notify("已退出独立模式，所有对象已恢复正常显示与编辑", "✅", 2600)
+        return True
+
+    def exit_all(self, silent=False) -> bool:
+        if not self._stack:
+            return False
+        last_roots = self._stack[0].get('roots', [])
+        self._stack.clear()
+        self.sync_permissions_and_visuals()
+        self.scene.clearSelection()
+        for r in last_roots:
+            if r is not None and r.scene() == self.scene and not getattr(r, 'locked', False):
+                r.setSelected(True)
+        self._notify_ui_state_changed()
+        if not silent:
+            ToastNotification.notify("已完全退出独立模式", "✅", 2600)
+        return True
+
+    def set_export_suspended(self, suspended: bool):
+        """在导出 PDF/图片/SVG 或打印时临时挂起变暗效果，保证导出成果不受影响"""
+        if self._suspended_for_export == bool(suspended):
+            return
+        self._suspended_for_export = bool(suspended)
+        self.sync_permissions_and_visuals()
+
+    def sync_permissions_and_visuals(self):
+        """同步场景中所有元素的选择/移动/编辑权限与半透明变暗效果（不隐藏、不删除任何对象）"""
+        if not self.scene:
+            return
+        self._prune_stale_items()
+        active = self.is_active()
+        isolated_elements = self.get_isolated_elements() if active else set()
+
+        for item in self.scene.items():
+            if isinstance(item, BaseElement):
+                locked = bool(getattr(item, 'locked', False))
+                if active:
+                    allowed = (item in isolated_elements) and not locked
+                    if not allowed and getattr(item, 'is_editing', False) and getattr(item, 'inline_editor', None):
+                        item.inline_editor.finish_editing()
+                    if not allowed and item.isSelected():
+                        item.setSelected(False)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, allowed)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, allowed)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresParentOpacity, True)
+                    item.setOpacity(1.0 if (item in isolated_elements) else self.DIMMED_ELEMENT_OPACITY)
+                else:
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, not locked)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, not locked)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresParentOpacity, False)
+                    item.setOpacity(1.0)
+            elif isinstance(item, VConnector):
+                if active:
+                    allowed = (item.parent_element in isolated_elements) and (item.child_element in isolated_elements)
+                    item.setOpacity(1.0 if allowed else self.DIMMED_CONNECTOR_OPACITY)
+                else:
+                    item.setOpacity(1.0)
+            elif isinstance(item, (VImageTextConnector, VGenericConnector)):
+                if active:
+                    allowed = self.can_interact(item)
+                    if not allowed and item.isSelected():
+                        item.setSelected(False)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, allowed)
+                    item.setAcceptedMouseButtons(Qt.MouseButton.AllButtons if allowed else Qt.MouseButton.NoButton)
+                    item.setOpacity(1.0 if allowed else self.DIMMED_CONNECTOR_OPACITY)
+                else:
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                    item.setAcceptedMouseButtons(Qt.MouseButton.AllButtons)
+                    item.setOpacity(1.0)
+            elif isinstance(item, ConnectionPoint):
+                if active:
+                    allowed = self.can_interact(item)
+                    if not allowed and item.isSelected():
+                        item.setSelected(False)
+                    if getattr(item, '_custom_position', False):
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, allowed)
+                        item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, allowed)
+                    item.setAcceptedMouseButtons(Qt.MouseButton.AllButtons if allowed else Qt.MouseButton.NoButton)
+                    item.setOpacity(1.0 if allowed else self.DIMMED_CONNECTOR_OPACITY)
+                else:
+                    is_custom = bool(getattr(item, '_custom_position', False))
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, is_custom)
+                    item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, is_custom)
+                    item.setAcceptedMouseButtons(Qt.MouseButton.AllButtons)
+                    item.setOpacity(1.0)
+
+        self.scene.update()
+        if self.scene.views():
+            self.scene.views()[0].viewport().update()
+
+    def _notify_ui_state_changed(self):
+        if self.scene and self.scene.views():
+            mw = getattr(self.scene.views()[0], '_main_window', None) or self.scene.views()[0].window()
+            if mw and hasattr(mw, '_update_mode_selection_status'):
+                mw._update_mode_selection_status()
+            if mw and hasattr(mw, 'refresh_ui'):
+                mw.refresh_ui()
+
+
 class LayoutScene(QGraphicsScene):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8795,6 +9255,7 @@ class LayoutScene(QGraphicsScene):
         self._pending_selection_click_item = None
         self._editing_group_asset_id = None  # 正在编辑的组合素材ID
         self._editing_group_items = []       # 正在编辑的组合元素列表
+        self.isolation_manager = IsolationStateManager(self)  # 独立模式（隔离模式）状态管理器
         
         # 连接选择改变信号
         self.selectionChanged.connect(self.on_selection_changed_track)
@@ -9281,6 +9742,14 @@ class LayoutScene(QGraphicsScene):
             
             painter.setOpacity(old_opacity)
         
+        # 独立模式（隔离模式）下绘制半透明遮罩层，突出当前隔离对象及子级
+        if (getattr(self, 'isolation_manager', None) is not None
+                and self.isolation_manager.is_active()
+                and not is_pdf_export
+                and not is_thumb
+                and not getattr(self, '_rendering_export', False)):
+            painter.fillRect(canvas_rect, QColor(15, 23, 42, 42))
+
         # 绘制画布边框（最后绘制）
         painter.setPen(QPen(QColor(180, 180, 180), 1))
         painter.drawRect(canvas_rect)
@@ -10098,7 +10567,7 @@ class LayoutScene(QGraphicsScene):
             while curr is not None and not isinstance(curr, BaseElement):
                 curr = curr.parentItem()
             if isinstance(curr, (VImageItem, VTextItem)) and curr.isVisible() and not getattr(curr, '_was_hidden', False):
-                if isinstance(curr, VImageItem) and getattr(curr, 'locked', False):
+                if not self.can_interact_with_item(curr):
                     continue
                 info = self.get_person_group_info(curr)
                 if info and info['root'] != exclude_root:
@@ -11119,7 +11588,8 @@ class LayoutScene(QGraphicsScene):
             print("已删除父子连接线")
     
     def copy_items(self, items):
-        """复制多个元素到剪贴板（若开启选子即选父或选中了父级，自动包含其子元素）"""
+        """复制多个元素到剪贴板（若开启选子即选父或选中了父级，自动包含其子元素；隔离模式下仅复制隔离范围内对象）"""
+        items = [it for it in (items or []) if self.can_interact_with_item(it)]
         if not items: return
         expanded_items = []
         def _collect_copy_descendants(el):
@@ -11239,8 +11709,9 @@ class LayoutScene(QGraphicsScene):
                 if item_data.get('connection_point_deleted', False):
                     new_item.delete_connection_point()
 
-                # 执行添加命令
-                cmd = AddItemCommand(self, new_item)
+                # 执行添加命令（独立模式下仅剪贴板中的顶层无父级对象自动归属当前隔离对象子集）
+                is_root_in_clipboard = (item_data.get('parent_index', -1) == -1)
+                cmd = AddItemCommand(self, new_item, auto_bind_isolation_parent=is_root_in_clipboard)
                 cmd.execute()
                 sub_commands.append(cmd)
 
@@ -11368,8 +11839,58 @@ class LayoutScene(QGraphicsScene):
         items = self.paste_items(pos)
         return items[0] if items else None
     
+    def is_isolation_active(self) -> bool:
+        return getattr(self, 'isolation_manager', None) is not None and self.isolation_manager.is_active()
+
+    def can_interact_with_item(self, item) -> bool:
+        if getattr(self, 'isolation_manager', None) is None:
+            return not (isinstance(item, VImageItem) and getattr(item, 'locked', False))
+        return self.isolation_manager.can_interact(item)
+
+    def enter_isolation_mode(self, items=None, auto_from_group_edit=False, label=None) -> bool:
+        if items is None:
+            items = [
+                it for it in self.selectedItems()
+                if isinstance(it, BaseElement) and self.can_interact_with_item(it)
+            ]
+        return self.isolation_manager.enter_level(items, auto_from_group_edit=auto_from_group_edit, label=label)
+
+    def exit_isolation_level(self, silent=False) -> bool:
+        return self.isolation_manager.exit_level(silent=silent)
+
+    def exit_all_isolation_modes(self, silent=False) -> bool:
+        return self.isolation_manager.exit_all(silent=silent)
+
+    def handle_isolation_shortcut(self):
+        """处理按 I 键：进入独立模式，或在独立模式中选中子对象时深入下一隔离层级"""
+        if any(isinstance(it, VTextItem) and getattr(it, 'is_editing', False) for it in self.items()):
+            return
+        selected = [
+            it for it in self.selectedItems()
+            if isinstance(it, BaseElement) and self.can_interact_with_item(it)
+        ]
+        if not self.is_isolation_active():
+            if not selected:
+                self._show_status_message("请先选中对象，再按 I 键进入独立模式", 3000)
+                ToastNotification.notify("请先选中一个或多个对象，再按 I 键进入独立模式", "💡", 2500)
+                return
+            self.enter_isolation_mode(selected)
+        else:
+            if selected:
+                current_allowed = self.isolation_manager.get_isolated_elements()
+                candidate_scope = self.isolation_manager.compute_scope_for_roots(selected)
+                if candidate_scope and candidate_scope < current_allowed:
+                    self.enter_isolation_mode(selected)
+                    return
+            self._show_status_message("当前已在独立模式（选中内部子对象再按 I 可深入子层级，按 ESC 退出当前层级）", 3500)
+            ToastNotification.notify("当前已在独立模式顶层\n选中内部子对象按 I 可深入子层级，按 ESC 退出当前隔离层级", "🔒", 2600)
+
     def delete_item(self, item):
+        if not self.can_interact_with_item(item):
+            return
         self.undo_stack.push_and_execute(DeleteItemCommand(self, item))
+        if self.is_isolation_active():
+            self.isolation_manager.sync_permissions_and_visuals()
 
     def clear_canvas_with_undo(self, keep_locked_images=False, clear_guides=False):
         """清空当前画布上的所有元素、连线与连接点，并推入撤销栈"""
@@ -11698,17 +12219,20 @@ class LayoutScene(QGraphicsScene):
         )
 
     def add_item_with_undo(self, item):
-        """添加元素到场景并记录撤销"""
-        self.addItem(item)
-        if isinstance(item, (VTextItem, VImageItem)):
-            item.set_connection_points_visible(self.show_connection_points)
-        self.undo_stack.push(AddItemCommand(self, item))
+        """添加元素到场景并记录撤销（独立模式下自动挂载为当前隔离对象子集）"""
+        cmd = AddItemCommand(self, item, auto_bind_isolation_parent=True)
+        cmd.execute()
+        self.undo_stack.push(cmd)
     
     def undo(self):
         self.undo_stack.undo()
+        if getattr(self, 'isolation_manager', None) is not None and self.isolation_manager.has_levels():
+            self.isolation_manager.sync_permissions_and_visuals()
     
     def redo(self):
         self.undo_stack.redo()
+        if getattr(self, 'isolation_manager', None) is not None and self.isolation_manager.has_levels():
+            self.isolation_manager.sync_permissions_and_visuals()
     
     def keyPressEvent(self, event):
         # 对齐基准点选模式：ESC 取消
@@ -11762,6 +12286,12 @@ class LayoutScene(QGraphicsScene):
                 event.accept()
                 return
             
+            # 若处于独立模式（隔离模式），按 ESC 退出当前隔离层级
+            if self.is_isolation_active():
+                self.exit_isolation_level()
+                event.accept()
+                return
+
             # 清除所有选中状态，包括连接线
             if self.selectedItems():
                 self.clearSelection()
@@ -11791,7 +12321,7 @@ class LayoutScene(QGraphicsScene):
                 self.remove_guide(self._selected_guide)
                 event.accept()
                 return
-            selected = self.selectedItems()
+            selected = [it for it in self.selectedItems() if self.can_interact_with_item(it)]
             for item in selected:
                 if isinstance(item, BaseElement):
                     self.delete_item(item)
@@ -11804,7 +12334,7 @@ class LayoutScene(QGraphicsScene):
                         self.free_connection_points.remove(item)
                     self.removeItem(item)
         elif event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
-            items = [i for i in self.selectedItems() if isinstance(i, BaseElement)]
+            items = [i for i in self.selectedItems() if isinstance(i, BaseElement) and self.can_interact_with_item(i)]
             if items:
                 # Shift键使用大步长，否则1px（若刚因按下Shift进入了点图连模式且尚未点击连线，按方向键微调时自动退出点图连）
                 if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
@@ -12169,6 +12699,8 @@ class LayoutView(QGraphicsView):
     def _smart_brush_allows_item(self, item):
         if not isinstance(item, (VImageItem, VTextItem)):
             return False
+        if self.scene() and not self.scene().can_interact_with_item(item):
+            return False
         if getattr(item, 'locked', False):
             return False
         if not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable):
@@ -12241,8 +12773,8 @@ class LayoutView(QGraphicsView):
         for item in self.scene().items():
             if not isinstance(item, ConnectionPoint) or not item.isVisible() or item == exclude_point:
                 continue
-            # 被锁定的图片不参与连线，跳过其连接点
-            if isinstance(getattr(item, 'parent_element', None), VImageItem) and getattr(item.parent_element, 'locked', False):
+            # 被锁定的图片或隔离范围外的对象不参与连线，跳过其连接点
+            if not self.scene().can_interact_with_item(item):
                 continue
             view_pos = self.mapFromScene(item.get_scene_center())
             dist = math.hypot(view_pos.x() - pos.x(), view_pos.y() + hit_offset_y - pos.y())
@@ -12331,9 +12863,11 @@ class LayoutView(QGraphicsView):
         )
         items = scene.items(path, query_mode, Qt.SortOrder.DescendingOrder, self.transform())
 
-        select_parent_mode = scene.config_manager.get('select_child_selects_parent', True)
+        select_parent_mode = scene.config_manager.get('select_child_selects_parent', True) and not scene.is_isolation_active()
         has_connector_in_rect = False
         for item in items:
+            if not scene.can_interact_with_item(item):
+                continue
             if mode == 'images' and alt_select_connectors:
                 # 仅图片模式下按住 Alt 框选：专门选中框选碰到的连线
                 if isinstance(item, (VImageTextConnector, VGenericConnector)) and item.isVisible():
@@ -12341,6 +12875,8 @@ class LayoutView(QGraphicsView):
                 continue
             if isinstance(item, BaseElement) and select_parent_mode:
                 item = item.get_root_parent_element()
+                if not scene.can_interact_with_item(item):
+                    continue
             if (isinstance(item, ConnectionPoint)
                     and getattr(item, 'point_type', '') == 'custom'
                     and item.isVisible()
@@ -12348,6 +12884,8 @@ class LayoutView(QGraphicsView):
                 item.setSelected(True)
             elif mode == 'images':
                 if isinstance(item, VImageItem) and not getattr(item, 'locked', False):
+                    item.setSelected(True)
+                elif scene.is_isolation_active() and isinstance(item, VTextItem) and scene.can_interact_with_item(item):
                     item.setSelected(True)
                 elif isinstance(item, (VImageTextConnector, VGenericConnector)):
                     has_connector_in_rect = True
@@ -12381,6 +12919,8 @@ class LayoutView(QGraphicsView):
         # 标尺画在 viewport 上
         painter = QPainter(self.viewport())
         self._draw_rulers(painter)
+        if self.scene() and self.scene().is_isolation_active():
+            self._draw_isolation_banner(painter)
         if self._smart_brush_enabled:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             subtract = QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
@@ -12396,6 +12936,43 @@ class LayoutView(QGraphicsView):
         """平移时强制重绘整个 viewport 以清除标尺残影"""
         super().scrollContentsBy(dx, dy)
         self.viewport().update()
+
+    def _draw_isolation_banner(self, painter):
+        """在画布视口顶部绘制类似 Adobe Illustrator 的独立模式状态指示条与外框"""
+        sc = self.scene()
+        if not sc or not sc.is_isolation_active():
+            return
+        mgr = sc.isolation_manager
+        lvl = mgr.current_level()
+        if not lvl:
+            return
+        R = self.RULER_SIZE
+        vp = self.viewport().rect()
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # 绘制视口内侧蓝色隔离边框
+        border_pen = QPen(QColor(13, 110, 253, 210), 2)
+        painter.setPen(border_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(QRectF(R + 1, R + 1, max(1, vp.width() - R - 2), max(1, vp.height() - R - 2)))
+
+        # 绘制顶部居中胶囊提示条
+        text = f"🔒 独立模式 [层级 {mgr.level_count()}: {lvl.get('label', '')}]  —  新建归属当前子集  |  按 I 深入子级  |  按 ESC 退出"
+        font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+        tw = fm.horizontalAdvance(text) + 28
+        th = fm.height() + 10
+        bx = R + max(8.0, (vp.width() - R - tw) / 2.0)
+        by = R + 8.0
+        pill_rect = QRectF(bx, by, tw, th)
+        painter.setPen(QPen(QColor(59, 130, 246, 220), 1))
+        painter.setBrush(QBrush(QColor(15, 23, 42, 225)))
+        painter.drawRoundedRect(pill_rect, th / 2.0, th / 2.0)
+        painter.setPen(QColor(255, 255, 255))
+        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
 
     def _draw_rulers(self, painter):
         """在 viewport 上绘制标尺"""
@@ -12488,9 +13065,13 @@ class LayoutView(QGraphicsView):
             return
         scene_pos = self.mapToScene(event.pos())
 
-        # 遍历该点所有 items（包括锁定的不可选元素）
-        items_at = self.scene().items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape,
-                                      Qt.SortOrder.DescendingOrder, self.transform())
+        # 遍历该点所有 items（隔离模式下过滤掉隔离范围外的元素，禁止对其唤起右键编辑菜单）
+        raw_items_at = self.scene().items(scene_pos, Qt.ItemSelectionMode.IntersectsItemShape,
+                                          Qt.SortOrder.DescendingOrder, self.transform())
+        items_at = [
+            it for it in raw_items_at
+            if isinstance(it, GuideItem) or self.scene().can_interact_with_item(it)
+        ]
         target = None
         # 独立连接点位于画布顶层，优先交给连接点自身处理右键菜单。
         for it in items_at:
@@ -12709,12 +13290,13 @@ class LayoutView(QGraphicsView):
             while hit_element and not isinstance(hit_element, BaseElement):
                 hit_element = hit_element.parentItem()
             
-            # 判断是否为锁定状态
+            # 判断是否为锁定状态或处于独立模式隔离范围之外
             is_locked = False
             if hit_element:
-                if isinstance(hit_element, VImageItem) and hit_element.locked:
+                if not self.scene().can_interact_with_item(hit_element):
                     is_locked = True
-                # 如果未来有锁定的文字，也可以在这里增加判断
+                elif isinstance(hit_element, VImageItem) and hit_element.locked:
+                    is_locked = True
 
             mode = self.scene().config_manager.get('marquee_mode', 'images') if self.scene() else 'images'
             alt_held = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
@@ -13059,7 +13641,7 @@ class LayoutView(QGraphicsView):
             self._cdr_nav_popup.begin_hold_drag(anchor_global_pos)
 
     def keyPressEvent(self, event):
-        """按 T 键设置图片透明度（Ctrl+T 快速归零）；按 N 键弹出导航器；按住 F5 时独立连接点临时进入移动模式。"""
+        """按 I 键进入独立模式；按 T 键设置图片透明度（Ctrl+T 快速归零）；按 N 键弹出导航器；按住 F5 时独立连接点临时进入移动模式。"""
         if (event.key() == Qt.Key.Key_T
                 and event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ControlModifier)
                 and self.scene()):
@@ -13784,10 +14366,11 @@ class FamilyTreeImportDialog(QDialog):
         # 模板素材选择
         tmpl_group = QGroupBox("组合素材模板（可选）")
         tl = QHBoxLayout(tmpl_group)
-        tl.addWidget(QLabel("输入/选择模板名称："))
+        tl.addWidget(QLabel("选择组合素材模板："))
         self.combo_template = QComboBox()
-        self.combo_template.setEditable(True)
+        self.combo_template.setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_template.addItem("— 不使用模板，纯文字 —", None)
+        self.scene.asset_manager.load_assets()
         for asset in self.scene.asset_manager.get_group_assets():
             self.combo_template.addItem(asset['name'], asset)
         tl.addWidget(self.combo_template, 1)
@@ -14159,8 +14742,6 @@ class FamilyTreeImportDialog(QDialog):
             idx = self.combo_template.findText(template_name)
             if idx >= 0:
                 self.combo_template.setCurrentIndex(idx)
-            else:
-                self.combo_template.setCurrentText(template_name)
         self._refresh_template_text_map()
         self._update_unit_suffix()
 
@@ -16125,6 +16706,16 @@ class MainWindow(QMainWindow):
         interact_menu.addSeparator()
 
         # 一级高频开关：选子即选父 & 水平移动锁定
+        isolation_enter_action = QAction('进入/深入独立模式（隔离模式）	I', self)
+        isolation_enter_action.triggered.connect(lambda: self.scene.handle_isolation_shortcut() if self.scene else None)
+        interact_menu.addAction(isolation_enter_action)
+
+        isolation_exit_action = QAction('退出当前独立模式层级 (Esc)', self)
+        isolation_exit_action.triggered.connect(lambda: self.scene.exit_isolation_level() if self.scene else None)
+        interact_menu.addAction(isolation_exit_action)
+
+        interact_menu.addSeparator()
+
         self.select_child_selects_parent_action = QAction('选子即选父（点击子文字联动父级图片）', self)
         self.select_child_selects_parent_action.setCheckable(True)
         self.select_child_selects_parent_action.setShortcut('Alt+G')
@@ -16845,6 +17436,12 @@ class MainWindow(QMainWindow):
     def show_canvas_context_menu(self, pos):
         """画布空白处右键菜单"""
         menu = QMenu(self)
+        if self.scene and self.scene.is_isolation_active():
+            lvl_cnt = self.scene.isolation_manager.level_count()
+            menu.addAction(f"🔙 退出当前独立模式层级 (第{lvl_cnt}层) [Esc]", self.scene.exit_isolation_level)
+            if lvl_cnt > 1:
+                menu.addAction("❌ 完全退出独立模式", self.scene.exit_all_isolation_modes)
+            menu.addSeparator()
         move_mode_action = None
         connect_mode_action = None
         add_free_point_here_action = None
@@ -16903,13 +17500,21 @@ class MainWindow(QMainWindow):
         if not items:
             QMessageBox.warning(self, "更新失败", "找不到编辑中的元素，请重新操作")
             return
-        result = self.scene.asset_manager.update_group_asset(asset_id, items, self.scene)
+        if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.has_levels():
+            self.scene.isolation_manager.set_export_suspended(True)
+        try:
+            result = self.scene.asset_manager.update_group_asset(asset_id, items, self.scene)
+        finally:
+            if getattr(self.scene, 'isolation_manager', None) is not None:
+                self.scene.isolation_manager.set_export_suspended(False)
         if result:
+            if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.has_levels():
+                self.scene.exit_all_isolation_modes(silent=True)
             self._remove_editing_group_items_from_canvas(items)
             self.scene._editing_group_asset_id = None
             self.scene._editing_group_items = []
             self.asset_library_dock.refresh_assets()
-            self.show_toast(f"更新成功\n组合「{result['name']}」已成功更新到素材库", "✅", 4000)
+            self.show_toast(f"更新成功\n组合「{result['name']}」已更新到素材库并退出独立模式", "✅", 4000)
         else:
             QMessageBox.warning(self, "更新失败", "更新素材库失败，请重试")
 
@@ -16967,10 +17572,12 @@ class MainWindow(QMainWindow):
         self.refresh_ui()
 
     def cancel_edit_group_asset(self):
-        """取消编辑，清除编辑状态"""
+        """取消编辑，清除编辑状态并退出独立模式"""
+        if getattr(self.scene, 'isolation_manager', None) is not None and self.scene.isolation_manager.has_levels():
+            self.scene.exit_all_isolation_modes(silent=True)
         self.scene._editing_group_asset_id = None
         self.scene._editing_group_items = []
-        self.status_bar.showMessage("已取消编辑组合", 3000)
+        self.status_bar.showMessage("已取消编辑组合并退出独立模式", 3000)
 
     def fit_view(self):
         """初始化时适应视图"""
@@ -17390,6 +17997,7 @@ class MainWindow(QMainWindow):
         '导出': '保存图片 另存 pdf svg coreldraw cdr png',
         '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
         '清空': '清空当前画布 清空画布 清除全部 删除全部 重置画布 清屏 clean clear ctrl+shift+delete',
+        '独立模式': '隔离模式 单独编辑 聚焦 遮罩 子集 退出隔离 isolation i esc',
     }
 
     def _setup_command_palette(self):
@@ -17653,8 +18261,14 @@ class MainWindow(QMainWindow):
                 if not self._cmd_palette.frameGeometry().contains(gp):
                     self.hide_command_palette()
         elif event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Escape:
-                if self.scene and not isinstance(obj, InlineTextEditor):
+            if event.key() == Qt.Key.Key_Escape and isinstance(obj, QWidget) and not event.isAutoRepeat():
+                if self.scene and not isinstance(obj, (InlineTextEditor, QDialog)):
+                    if getattr(self.scene, 'stamping_session', None):
+                        self.scene.abort_stamping_session()
+                        return True
+                    if getattr(self.scene, 'resize_mode', False):
+                        self.scene.cancel_resize()
+                        return True
                     if getattr(self.scene, 'align_reference_mode', None):
                         self.scene._cancel_align_reference_mode()
                         return True
@@ -17672,6 +18286,29 @@ class MainWindow(QMainWindow):
                             self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
                         self.scene.update()
                         self.scene._show_status_message("已退出图文连线模式", 2500)
+                        return True
+                    if getattr(self.scene, 'binding_source', None):
+                        self.scene.binding_source = None
+                        if self.scene.views():
+                            self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                        return True
+                    if self.scene.is_isolation_active():
+                        self.scene.exit_isolation_level()
+                        return True
+            elif (event.key() == Qt.Key.Key_I
+                  and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                  and isinstance(obj, QWidget)
+                  and not event.isAutoRepeat()):
+                fw = QApplication.focusWidget()
+                if (self.scene
+                        and not isinstance(obj, (QLineEdit, QTextEdit, QAbstractSpinBox, InlineTextEditor, QDialog))
+                        and not isinstance(fw, (QLineEdit, QTextEdit, QAbstractSpinBox, InlineTextEditor))):
+                    editing_text = any(
+                        isinstance(it, VTextItem) and getattr(it, 'is_editing', False)
+                        for it in self.scene.items()
+                    )
+                    if not editing_text:
+                        self.scene.handle_isolation_shortcut()
                         return True
             elif event.key() == Qt.Key.Key_Shift and not event.isAutoRepeat():
                 if self.scene and not isinstance(obj, (QLineEdit, QTextEdit, QAbstractSpinBox)):
@@ -18697,6 +19334,8 @@ class MainWindow(QMainWindow):
             mode_str = "连接点连线"
         elif getattr(self, 'view', None) and self.view.is_smart_brush_enabled():
             mode_str = "智能笔刷"
+        elif self.scene.is_isolation_active():
+            mode_str = f"独立模式(L{self.scene.isolation_manager.level_count()})"
         else:
             mode_str = "编辑"
         sel_count = len([i for i in self.scene.selectedItems() if isinstance(i, (BaseElement, VImageTextConnector, VGenericConnector))])
@@ -18780,6 +19419,10 @@ class MainWindow(QMainWindow):
         try:
             item = self._tree_item_element(node)
             if item and item.scene():
+                if self.scene and not self.scene.can_interact_with_item(item):
+                    self.status_bar.showMessage("当前处于独立模式，隔离范围之外的对象禁止选择和编辑（按 ESC 退出独立模式）", 3000)
+                    self._sync_tree_selection_to_scene()
+                    return
                 if column == 0:
                     # 判断是否是用户指定了彩色眼睛的子文字
                     color_key = self._get_child_text_role(item)
@@ -18855,6 +19498,8 @@ class MainWindow(QMainWindow):
                 img = QImage(rect.size().toSize(), QImage.Format.Format_ARGB32)
                 img.fill(Qt.GlobalColor.white)
                 self.scene._rendering_export = True
+                if getattr(self.scene, 'isolation_manager', None) is not None:
+                    self.scene.isolation_manager.set_export_suspended(True)
                 zero_op_p_items = [
                     it.p_item for it in self.scene.items()
                     if isinstance(it, VImageItem) and getattr(it, 'image_opacity', 1.0) <= 0.001 and hasattr(it, 'p_item') and it.p_item is not None
@@ -18879,6 +19524,8 @@ class MainWindow(QMainWindow):
             finally:
                 # 恢复原始设置
                 self.scene._rendering_export = False
+                if getattr(self.scene, 'isolation_manager', None) is not None:
+                    self.scene.isolation_manager.set_export_suspended(False)
                 self.scene.show_grid = original_show_grid
                 self.scene.set_connectors_visible(original_show_connectors)
                 self.scene.set_connection_points_visible(original_show_connection_points)
@@ -19257,6 +19904,8 @@ class MainWindow(QMainWindow):
 
             scene._rendering_pdf = True
             scene._rendering_export = True
+            if getattr(scene, 'isolation_manager', None) is not None:
+                scene.isolation_manager.set_export_suspended(True)
             zero_op_p_items = [
                 it.p_item for it in scene.items()
                 if isinstance(it, VImageItem) and getattr(it, 'image_opacity', 1.0) <= 0.001 and hasattr(it, 'p_item') and it.p_item is not None
@@ -19280,6 +19929,8 @@ class MainWindow(QMainWindow):
             scene.set_guides_visible(original_show_guides)
             for item in selected_items:
                 item.setSelected(True)
+            if getattr(scene, 'isolation_manager', None) is not None:
+                scene.isolation_manager.set_export_suspended(False)
             scene.update()
             scene._rendering_pdf = False
             scene._rendering_export = False
