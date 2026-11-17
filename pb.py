@@ -13,6 +13,67 @@ from PyQt6.QtCore import *
 from PyQt6.QtGui import *
 from PyQt6.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog
 
+
+# --- Dropdown Popup Alignment Fix ---
+_OriginalQComboBox = QComboBox
+
+
+class AlignedComboBox(_OriginalQComboBox):
+    """修复下拉菜单弹出位置：
+    1. 下拉菜单默认从输入框下方展开
+    2. 下拉菜单左边缘与输入框左边缘对齐
+    3. 只有下方空间不足时，才允许向上展开
+    """
+    def showPopup(self):
+        super().showPopup()
+        self._reposition_popup()
+        QTimer.singleShot(0, self._reposition_popup)
+
+    def _reposition_popup(self):
+        view = self.view()
+        if view is None:
+            return
+        popup = view.window()
+        if popup is None or popup is self.window() or not popup.isVisible():
+            return
+
+        # 输入框左上角与左下角的全局屏幕坐标
+        top_left_global = self.mapToGlobal(QPoint(0, 0))
+        bottom_left_global = self.mapToGlobal(QPoint(0, self.height()))
+
+        screen = self.screen() or QApplication.screenAt(top_left_global) or QApplication.primaryScreen()
+        avail_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+        popup_geo = popup.frameGeometry()
+        popup_h = popup_geo.height()
+        popup_w = max(popup_geo.width(), self.width())
+
+        # 1. 下拉菜单左边缘与输入框左边缘严格对齐（若右侧超出屏幕则防裁剪微调）
+        target_x = top_left_global.x()
+        if target_x + popup_w > avail_geo.right() + 1:
+            target_x = max(avail_geo.left(), avail_geo.right() + 1 - popup_w)
+
+        # 2. 默认从输入框下方展开；只有下方空间不足时，才允许向上展开
+        space_below = avail_geo.bottom() + 1 - bottom_left_global.y()
+        space_above = top_left_global.y() - avail_geo.top()
+
+        if space_below >= popup_h or space_below >= space_above:
+            target_y = bottom_left_global.y()
+            if popup_h > space_below and space_below > 60:
+                popup.resize(popup_w, space_below)
+            elif popup.width() < self.width():
+                popup.resize(popup_w, popup_h)
+        else:
+            actual_h = min(popup_h, max(60, space_above))
+            if actual_h != popup_h or popup.width() < self.width():
+                popup.resize(popup_w, actual_h)
+            target_y = top_left_global.y() - popup.frameGeometry().height()
+
+        popup.move(target_x, target_y)
+
+
+QComboBox = AlignedComboBox
+
 # --- Configuration & Constants ---
 DEFAULT_FONT = "SimSun"
 DEFAULT_FONT_SIZE = 24
@@ -21194,6 +21255,7 @@ class MainWindow(QMainWindow):
             padding: 5px 7px;
             color: #24292f;
             min-height: 22px;
+            combobox-popup: 0;
         }
 
         QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
