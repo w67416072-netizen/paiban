@@ -472,17 +472,16 @@ class AssetManager:
                 filename = os.path.basename(original_path)
                 
                 # 清理文件名：移除已有的 group_ 前缀，避免重复叠加
-                import re
+                import time
+                import shutil
                 # 匹配 group_数字_数字_ 开头的模式并移除
                 clean_filename = re.sub(r'^(group_\d+_\d+_)+', '', filename)
                 
                 # 生成新的唯一文件名
-                import time
                 timestamp = int(time.time() * 1000)  # 毫秒级时间戳
                 asset_path = os.path.join(ASSETS_DIR, f"group_{timestamp}_{idx}_{clean_filename}")
 
                 try:
-                    import shutil
                     shutil.copy2(original_path, asset_path)
 
                     # 保存连接点状态
@@ -2624,7 +2623,12 @@ class AssetLibraryDockWidget(QDockWidget):
                 off_y = item_data['scene_pos'][1] - min_y
                 new_item.setPos(base_pos.x() + off_x, base_pos.y() + off_y)
                 new_item.setZValue(25 if for_group_edit else 10)
-                if not for_group_edit and getattr(scene, '_editing_group_asset_id', None) is not None:
+                if for_group_edit:
+                    new_item._is_editing_group_item = True
+                    sess_id = getattr(scene, '_editing_group_session_id', None)
+                    if sess_id is not None:
+                        new_item._editing_group_session = sess_id
+                elif getattr(scene, '_editing_group_asset_id', None) is not None:
                     pre_set = getattr(scene, '_pre_edit_canvas_items', None)
                     if isinstance(pre_set, set):
                         pre_set.add(new_item)
@@ -2635,7 +2639,8 @@ class AssetLibraryDockWidget(QDockWidget):
                     track_in_editing_group=bool(for_group_edit)
                 )
                 cmd.execute()
-                sub_commands.append(cmd)
+                if not for_group_edit:
+                    sub_commands.append(cmd)
                 if item_data.get('connection_point_deleted', False):
                     new_item.delete_connection_point()
                 elif 'connection_point_visible' in item_data and new_item.connection_point:
@@ -2662,7 +2667,8 @@ class AssetLibraryDockWidget(QDockWidget):
                 conn_cmd = scene._make_connector_command(item1, item2)
                 if conn_cmd:
                     conn_cmd.execute()
-                    sub_commands.append(conn_cmd)
+                    if not for_group_edit:
+                        sub_commands.append(conn_cmd)
         # 最终统一应用连接点可见性/删除状态，防止父子关系建立/连线创建的回调将其覆盖
         for idx, item_data in enumerate(asset['items']):
             cloned = new_items_by_asset_index[idx]
@@ -2671,7 +2677,7 @@ class AssetLibraryDockWidget(QDockWidget):
                     cloned.delete_connection_point()
                 elif 'connection_point_visible' in item_data and cloned.connection_point:
                     cloned._cp_user_visible = bool(item_data['connection_point_visible']); cloned.set_connection_points_visible(cloned.scene().show_connection_points if cloned.scene() else False)
-        if sub_commands:
+        if sub_commands and not for_group_edit:
             scene.undo_stack.push(MacroCommand(scene, sub_commands))
         scene.clearSelection()
         for i in new_items:
@@ -2738,13 +2744,18 @@ class AssetLibraryDockWidget(QDockWidget):
         scene = self.main_window.scene
         view = self.main_window.view
 
-        # 若此前已有未结束的组合编辑会话，先清理上一次的临时编辑副本，防止两个编辑副本叠在一起
+        if getattr(scene, 'resize_mode', False):
+            scene.set_resize_mode(False)
+            if hasattr(self.main_window, 'btn_resize'):
+                self.main_window.btn_resize.setChecked(False)
+        scene.stamping_session = None
+
+        # 若此前已有未结束的组合编辑会话，先彻底销毁上一次的临时编辑副本，防止两个编辑副本叠在一起
         if getattr(scene, '_editing_group_asset_id', None) is not None:
             prev_edit_items = self.main_window._collect_all_session_editing_items()
             if getattr(scene, 'isolation_manager', None) is not None and scene.isolation_manager.has_levels():
                 scene.exit_all_isolation_modes(silent=True)
-            if prev_edit_items:
-                self.main_window._remove_editing_group_items_from_canvas(prev_edit_items)
+            self.main_window._remove_editing_group_items_from_canvas(prev_edit_items)
             scene._editing_group_asset_id = None
             scene._editing_group_items = []
             scene._pre_edit_canvas_items = set()
@@ -2783,6 +2794,7 @@ class AssetLibraryDockWidget(QDockWidget):
         scene._editing_group_items = [i for i in (placed or []) if isinstance(i, (VImageItem, VTextItem))]
         for it in scene._editing_group_items:
             it._editing_group_session = session_id
+            it._is_editing_group_item = True
 
         if scene._editing_group_items and getattr(scene, 'isolation_manager', None) is not None:
             scene.enter_isolation_mode(
@@ -3665,6 +3677,7 @@ class AddItemCommand(UndoCommand):
             if isinstance(ed_list, list) and self.item not in ed_list:
                 ed_list.append(self.item)
                 self._added_to_editing_group = True
+            self.item._is_editing_group_item = True
             sess_id = getattr(self.scene, '_editing_group_session_id', None)
             if sess_id is not None:
                 self.item._editing_group_session = sess_id
@@ -3766,6 +3779,8 @@ class DeleteItemCommand(UndoCommand):
         
         # 若原元素属于当前正在编辑的组合，同步迁移会话标记与列表引用
         old_ref = self.item
+        if getattr(old_ref, '_is_editing_group_item', False):
+            new_item._is_editing_group_item = True
         sess_id = getattr(old_ref, '_editing_group_session', None)
         if sess_id is not None:
             new_item._editing_group_session = sess_id
@@ -4269,6 +4284,7 @@ class SplitTextItemCommand(UndoCommand):
 
         if (getattr(self.scene, '_editing_group_asset_id', None) is not None
                 and self.scene.is_item_in_active_editing_group(self.item)):
+            self.new_item._is_editing_group_item = True
             sess_id = getattr(self.item, '_editing_group_session', getattr(self.scene, '_editing_group_session_id', None))
             if sess_id is not None:
                 self.new_item._editing_group_session = sess_id
@@ -5867,6 +5883,16 @@ class BaseElement(QGraphicsItem):
         isolation_enter_act = menu.addAction("🔒 进入/深入独立模式 (I)")
         isolation_exit_act = menu.addAction("🔙 退出当前独立模式层级 (Esc)") if (self.scene() and self.scene().is_isolation_active()) else None
         menu.addSeparator()
+        main_window = None
+        if self.scene() and self.scene().views():
+            view = self.scene().views()[0]
+            main_window = getattr(view, '_main_window', None)
+        update_group_asset_action = None
+        cancel_group_edit_action = None
+        if main_window and getattr(self.scene(), '_editing_group_asset_id', None) is not None:
+            update_group_asset_action = menu.addAction("✅ 更新到素材库（完成编辑）")
+            cancel_group_edit_action = menu.addAction("❌ 取消编辑组合")
+            menu.addSeparator()
         
         # 对齐功能
         selected_items = [item for item in self.scene().selectedItems() if isinstance(item, BaseElement)]
@@ -5909,6 +5935,13 @@ class BaseElement(QGraphicsItem):
             clear_connections_action = batch_menu.addAction("清除所有连接")
         
         action = menu.exec(global_pos)
+
+        if update_group_asset_action and action == update_group_asset_action:
+            QTimer.singleShot(0, main_window.finish_edit_group_asset)
+            return
+        if cancel_group_edit_action and action == cancel_group_edit_action:
+            QTimer.singleShot(0, main_window.cancel_edit_group_asset)
+            return
 
         # 处理隐藏/显示/删除连接点
         if toggle_connection_point_action and action == toggle_connection_point_action:
@@ -6725,10 +6758,10 @@ class VTextItem(BaseElement):
             selected_images_in_sel[0]._zero_opacity()
             return
         if update_group_asset_action and action == update_group_asset_action:
-            main_window.finish_edit_group_asset()
+            QTimer.singleShot(0, main_window.finish_edit_group_asset)
             return
         if cancel_group_edit_action and action == cancel_group_edit_action:
-            main_window.cancel_edit_group_asset()
+            QTimer.singleShot(0, main_window.cancel_edit_group_asset)
             return
 
         if action == action_inline_edit:
@@ -7921,8 +7954,12 @@ class VImageItem(BaseElement):
             view = self.scene().views()[0]
             main_window = getattr(view, '_main_window', None)
         if main_window and getattr(self.scene(), '_editing_group_asset_id', None) is not None:
-            menu.addAction("✅ 更新到素材库（完成编辑）").triggered.connect(main_window.finish_edit_group_asset)
-            menu.addAction("❌ 取消编辑组合").triggered.connect(main_window.cancel_edit_group_asset)
+            menu.addAction("✅ 更新到素材库（完成编辑）").triggered.connect(
+                lambda: QTimer.singleShot(0, main_window.finish_edit_group_asset)
+            )
+            menu.addAction("❌ 取消编辑组合").triggered.connect(
+                lambda: QTimer.singleShot(0, main_window.cancel_edit_group_asset)
+            )
             menu.addSeparator()
 
         selected_items = [i for i in self.scene().selectedItems() if isinstance(i, BaseElement)] if self.scene() else []
@@ -9163,9 +9200,19 @@ class IsolationStateManager:
             lvl.setdefault('free_points', set()).add(item)
 
     def can_interact(self, item) -> bool:
-        """统一权限判定：判断指定对象在当前隔离状态下是否允许选择、移动、删除和编辑"""
+        """统一权限判定：判断指定对象在当前隔离状态或组合编辑状态下是否允许选择、移动、删除和编辑"""
         if item is None:
             return False
+        if getattr(self.scene, '_editing_group_asset_id', None) is not None and not self._suspended_for_export:
+            curr = item
+            if isinstance(curr, ResizeHandle):
+                curr = getattr(curr, 'parent_image', None)
+            elif isinstance(curr, ConnectionPoint) and curr.parent_element is not None:
+                curr = curr.parent_element
+            while curr is not None and not isinstance(curr, BaseElement):
+                curr = curr.parentItem()
+            if isinstance(curr, BaseElement) and not self.scene.is_item_in_active_editing_group(curr):
+                return False
         if not self.is_active():
             if isinstance(item, VImageItem) and getattr(item, 'locked', False):
                 return False
@@ -9326,8 +9373,19 @@ class IsolationStateManager:
         if not self.scene:
             return
         self._prune_stale_items()
-        active = self.is_active()
-        isolated_elements = self.get_isolated_elements() if active else set()
+        group_editing = (getattr(self.scene, '_editing_group_asset_id', None) is not None) and not self._suspended_for_export
+        active = self.is_active() or group_editing
+        if self.is_active():
+            isolated_elements = self.get_isolated_elements()
+            if group_editing:
+                isolated_elements = {el for el in isolated_elements if self.scene.is_item_in_active_editing_group(el)}
+        elif group_editing:
+            isolated_elements = {
+                el for el in self.scene.items()
+                if isinstance(el, BaseElement) and self.scene.is_item_in_active_editing_group(el)
+            }
+        else:
+            isolated_elements = set()
 
         for item in self.scene.items():
             if isinstance(item, BaseElement):
@@ -10042,8 +10100,9 @@ class LayoutScene(QGraphicsScene):
                 clicked_item = clicked_item.parentItem()
             self._pending_selection_click_item = clicked_item
 
-        # 盖章模式拦截：仅在按住左键且已实际拖拽移动过程中按右键才触发盖章，防止普通右键呼出菜单时误克隆副本
+        # 盖章模式拦截：仅在非组合编辑状态、按住左键且已实际拖拽移动过程中按右键才触发盖章，防止右键呼出「更新到素材库」时误克隆图片副本
         if (event.button() == Qt.MouseButton.RightButton
+                and getattr(self, '_editing_group_asset_id', None) is None
                 and self.stamping_session
                 and (event.buttons() & Qt.MouseButton.LeftButton)
                 and self.stamping_session.get('moved', False)):
@@ -12115,6 +12174,8 @@ class LayoutScene(QGraphicsScene):
             curr = curr.parentItem()
         if not isinstance(curr, BaseElement):
             return True
+        if getattr(curr, '_is_editing_group_item', False):
+            return True
         pre_existing = getattr(self, '_pre_edit_canvas_items', None)
         if pre_existing and curr in pre_existing:
             return False
@@ -12130,7 +12191,7 @@ class LayoutScene(QGraphicsScene):
                 if p is ed_it:
                     return True
                 p = p.parentItem()
-        return False
+        return curr not in (pre_existing or set())
 
     def enter_isolation_mode(self, items=None, auto_from_group_edit=False, label=None) -> bool:
         if items is None:
@@ -12510,8 +12571,13 @@ class LayoutScene(QGraphicsScene):
         self.undo_stack.push(cmd)
     
     def undo(self):
+        if getattr(self, '_editing_group_asset_id', None) is not None:
+            min_idx = getattr(self, '_editing_group_undo_index', None)
+            if min_idx is not None and self.undo_stack.current_index <= min_idx:
+                self._show_status_message("已回退到组合编辑初始状态", 2500)
+                return
         self.undo_stack.undo()
-        if getattr(self, 'isolation_manager', None) is not None and self.isolation_manager.has_levels():
+        if getattr(self, 'isolation_manager', None) is not None and (self.isolation_manager.has_levels() or getattr(self, '_editing_group_asset_id', None) is not None):
             self.isolation_manager.sync_permissions_and_visuals()
     
     def redo(self):
@@ -13351,6 +13417,8 @@ class LayoutView(QGraphicsView):
 
     def contextMenuEvent(self, event):
         """右键：点到元素交给元素处理，空白处弹画布菜单"""
+        if self.scene() and getattr(self.scene(), 'stamping_session', None) is not None:
+            self.scene().stamping_session = None
         if getattr(self, '_suppress_next_context_menu', False):
             self._suppress_next_context_menu = False
             event.accept()
@@ -17759,8 +17827,8 @@ class MainWindow(QMainWindow):
         # 编辑组合模式下显示"更新到素材库"
         editing_id = getattr(self.scene, '_editing_group_asset_id', None)
         if editing_id is not None:
-            menu.addAction(f"✅ 更新到素材库（完成编辑）", self.finish_edit_group_asset)
-            menu.addAction("❌ 取消编辑组合", self.cancel_edit_group_asset)
+            menu.addAction(f"✅ 更新到素材库（完成编辑）", lambda: QTimer.singleShot(0, self.finish_edit_group_asset))
+            menu.addAction("❌ 取消编辑组合", lambda: QTimer.singleShot(0, self.cancel_edit_group_asset))
             menu.addSeparator()
         menu.addAction("显示所有隐藏图片", self.show_all_hidden_images)
         menu.addAction("🗑 清空当前画布...", self.clear_current_canvas)
@@ -17791,21 +17859,31 @@ class MainWindow(QMainWindow):
                 self.status_bar.showMessage("请先添加至少一条横向和一条竖向辅助线", 3000)
 
     def _collect_all_session_editing_items(self):
-        """收集当前组合编辑会话在画布上产生的所有临时编辑元素（绝不包含进入编辑前画布已有的组合元素）"""
+        """收集当前组合编辑会话在画布上的所有文字和图片元素（严格排除进入编辑前画布已有的元素）"""
         if not self.scene:
             return []
         pre_existing = getattr(self.scene, '_pre_edit_canvas_items', None) or set()
         session_id = getattr(self.scene, '_editing_group_session_id', None)
         seed_items = []
         for i in getattr(self.scene, '_editing_group_items', []):
-            if i is not None and i.scene() == self.scene and i not in pre_existing and i not in seed_items:
+            if isinstance(i, (VImageItem, VTextItem)) and i.scene() == self.scene and i not in seed_items:
                 seed_items.append(i)
+        iso_mgr = getattr(self.scene, 'isolation_manager', None)
+        if iso_mgr is not None and iso_mgr.has_levels():
+            for lvl in getattr(iso_mgr, '_stack', []):
+                if lvl.get('auto_from_group_edit'):
+                    for r in list(lvl.get('roots', [])) + [lvl.get('primary_owner')]:
+                        if isinstance(r, (VImageItem, VTextItem)) and r.scene() == self.scene and r not in pre_existing and r not in seed_items:
+                            seed_items.append(r)
         for it in self.scene.items():
-            if isinstance(it, (VImageItem, VTextItem)) and it not in pre_existing and it not in seed_items:
-                if session_id is not None and getattr(it, '_editing_group_session', None) == session_id:
+            if isinstance(it, (VImageItem, VTextItem)) and it not in seed_items:
+                if getattr(it, '_is_editing_group_item', False):
                     seed_items.append(it)
-                elif self.scene.is_item_in_active_editing_group(it):
-                    seed_items.append(it)
+                elif it not in pre_existing:
+                    if session_id is not None and getattr(it, '_editing_group_session', None) == session_id:
+                        seed_items.append(it)
+                    elif self.scene.is_item_in_active_editing_group(it):
+                        seed_items.append(it)
         return self._collect_complete_editing_group_items(seed_items)
 
     def _cleanup_editing_group_undo_history(self):
@@ -17819,21 +17897,27 @@ class MainWindow(QMainWindow):
         self.scene._editing_group_undo_index = None
 
     def finish_edit_group_asset(self):
-        """完成编辑，仅把要编辑的那个组合更新到素材库，并将该临时编辑组合从画布彻底移除"""
+        """完成编辑：将编辑后的组合保存到素材库中，然后把该组合在画布上的所有文字和图片彻底销毁"""
         asset_id = getattr(self.scene, '_editing_group_asset_id', None)
         if asset_id is None:
             return
-        # 若编辑组合中有正在内联编辑的文本框，先完成内联编辑保存文本
+        # 1. 结束所有正在进行的临时编辑状态（内联文字编辑、图片缩放模式、盖章会话）
         for it in list(self.scene.items()):
             if isinstance(it, VTextItem) and getattr(it, 'is_editing', False) and getattr(it, 'inline_editor', None):
                 it.inline_editor.finish_editing()
+        if getattr(self.scene, 'resize_mode', False):
+            self.scene.set_resize_mode(False)
+            if hasattr(self, 'btn_resize'):
+                self.btn_resize.setChecked(False)
+        self.scene.stamping_session = None
 
+        # 2. 收集当前正在编辑的组合中的所有图片和文字元素
         items = self._collect_all_session_editing_items()
         if not items:
             QMessageBox.warning(self, "更新失败", "找不到编辑中的元素，请重新操作")
             return
 
-        # 若编辑组合中的元素意外与画布原有元素建立了父子关系，先安全解绑，确保只保存编辑中的组合且不破坏画布原有组合
+        # 若编辑组合中的元素意外与画布原有元素建立了父子关系，先安全解绑
         items_set = set(items)
         for item in items:
             parent = item.parentItem()
@@ -17849,9 +17933,10 @@ class MainWindow(QMainWindow):
                     ch.setParentItem(None)
                     ch.setPos(ch_sp)
 
+        # 3. 将编辑后的组合保存到素材库
         result = self.scene.asset_manager.update_group_asset(asset_id, items, self.scene)
         if result:
-            # 先从画布移除临时编辑组合的所有元素，再清除编辑状态并退出独立模式，确保画布原有图片与文字完全恢复可选可移状态
+            # 4. 保存成功后，立即将该组合在画布上的全部文字、图片、子图元及连线彻底销毁
             self._remove_editing_group_items_from_canvas(items)
             self._cleanup_editing_group_undo_history()
             self.scene._editing_group_asset_id = None
@@ -17869,17 +17954,19 @@ class MainWindow(QMainWindow):
                 self.view.viewport().update()
             self.refresh_ui()
             self.asset_library_dock.refresh_assets()
-            self.show_toast(f"更新成功\n组合「{result['name']}」已更新到素材库并退出独立模式", "✅", 4000)
+            self.show_toast(f"更新成功\n组合「{result['name']}」已保存到素材库并清理画布临时元素", "✅", 4000)
         else:
             QMessageBox.warning(self, "更新失败", "更新素材库失败，请重试")
 
     def _collect_complete_editing_group_items(self, seed_items):
-        """沿父子关系和图文连接收集编辑组合里的新增元素（严格排除画布上原有的其他组合元素）。"""
+        """沿父子关系和图文连接收集编辑组合里的完整图文元素（父级优先排序，严格排除画布原有元素）。"""
         pre_existing = getattr(self.scene, '_pre_edit_canvas_items', None) or set()
 
         def _belongs_to_editing_group(item):
             if item is None or item.scene() != self.scene or not isinstance(item, (VImageItem, VTextItem)):
                 return False
+            if getattr(item, '_is_editing_group_item', False):
+                return True
             if item in pre_existing:
                 return False
             return self.scene.is_item_in_active_editing_group(item)
@@ -17913,42 +18000,169 @@ class MainWindow(QMainWindow):
                         if _belongs_to_editing_group(item) and item not in collected:
                             collected.add(item)
                             changed = True
-        return sorted(collected, key=lambda item: (item.scenePos().y(), item.scenePos().x()))
+        # 父级元素（如 VImageItem）排在子级元素之前，保证层级索引与撤销顺序始终稳定
+        return sorted(
+            collected,
+            key=lambda item: (
+                0 if not isinstance(item.parentItem(), BaseElement) else 1,
+                0 if isinstance(item, VImageItem) else 1,
+                item.scenePos().y(),
+                item.scenePos().x(),
+            )
+        )
 
     def _remove_editing_group_items_from_canvas(self, items):
-        """更新或取消素材库编辑后，彻底移除画布上的临时编辑副本（绝不误删画布原有组合元素）。"""
+        """将编辑组合在画布上的所有文字和图片（含图片底层 SmoothPixmapItem、缩放手柄、连接点及连线）彻底销毁。"""
+        if not self.scene:
+            return
+        if getattr(self.scene, 'resize_mode', False):
+            self.scene.set_resize_mode(False)
+            if hasattr(self, 'btn_resize'):
+                self.btn_resize.setChecked(False)
+        self.scene.stamping_session = None
+
         pre_existing = getattr(self.scene, '_pre_edit_canvas_items', None) or set()
         session_id = getattr(self.scene, '_editing_group_session_id', None)
-        safe_items = [item for item in (items or []) if item is not None and item not in pre_existing]
-        # 兜底扫描场景中所有带当前编辑会话标记或非编辑前画布原有的编辑组合元素
-        for sc_it in list(self.scene.items()):
-            if isinstance(sc_it, BaseElement) and sc_it not in pre_existing and sc_it not in safe_items:
-                if (session_id is not None and getattr(sc_it, '_editing_group_session', None) == session_id) or self.scene.is_item_in_active_editing_group(sc_it):
-                    safe_items.append(sc_it)
 
-        item_set = set(safe_items)
+        # 收集所有待销毁的组合图文元素（包含传入的 items、_editing_group_items 及场景中所有属于本次编辑会话的元素）
+        target_items = []
+        for it in list(items or []) + list(getattr(self.scene, '_editing_group_items', [])):
+            if isinstance(it, BaseElement) and it not in target_items:
+                if getattr(it, '_is_editing_group_item', False) or it not in pre_existing:
+                    target_items.append(it)
+
+        for sc_it in list(self.scene.items()):
+            if isinstance(sc_it, BaseElement) and sc_it not in target_items:
+                if getattr(sc_it, '_is_editing_group_item', False):
+                    target_items.append(sc_it)
+                elif sc_it not in pre_existing:
+                    if (session_id is not None and getattr(sc_it, '_editing_group_session', None) == session_id) or self.scene.is_item_in_active_editing_group(sc_it):
+                        target_items.append(sc_it)
+
+        # 递归纳入这些元素下的子元素（若子元素不属于进入编辑前画布原有的元素）
+        def _collect_children(el):
+            for ch in list(el.childItems()):
+                if isinstance(ch, BaseElement) and ch not in target_items:
+                    if getattr(ch, '_is_editing_group_item', False) or ch not in pre_existing:
+                        target_items.append(ch)
+                        _collect_children(ch)
+
+        for it in list(target_items):
+            _collect_children(it)
+
+        item_set = set(target_items)
+
         # 1. 先保护非本次编辑组合的外部子元素，解绑其父子关系
-        for item in safe_items:
+        for item in target_items:
             for ch in list(item.childItems()):
                 if isinstance(ch, BaseElement) and ch not in item_set:
                     ch_sp = ch.scenePos()
                     self.scene.remove_child_connectors(ch)
                     ch.setParentItem(None)
                     ch.setPos(ch_sp)
-        # 2. 移除所有相关的父子连线与图文连线
-        for item in safe_items:
+
+        # 2. 彻底移除并销毁所有关联的父子连线与图文连线
+        for item in target_items:
             if item.scene() == self.scene:
                 self.scene.remove_all_connectors_for_item(item)
                 self.scene.remove_image_text_connectors(item)
             if item in self.scene.selection_order:
                 self.scene.selection_order = [i for i in self.scene.selection_order if i != item]
-        # 3. 逐个解除父子关系并从场景中彻底移除每一个编辑元素（先子后父，确保无任何残留）
-        for item in safe_items:
-            if item.scene() == self.scene and item.parentItem() is not None:
-                item.setParentItem(None)
-        for item in safe_items:
-            if item.scene() == self.scene:
-                self.scene.removeItem(item)
+
+        for conn in list(self.scene.connectors):
+            if getattr(conn, 'parent_element', None) in item_set or getattr(conn, 'child_element', None) in item_set:
+                conn.setVisible(False)
+                if conn.scene() == self.scene:
+                    self.scene.removeItem(conn)
+                if conn in self.scene.connectors:
+                    self.scene.connectors.remove(conn)
+
+        for conn in list(self.scene.image_text_connectors):
+            i1, i2 = self.scene._image_text_connector_items(conn)
+            if i1 in item_set or i2 in item_set:
+                conn.setVisible(False)
+                if conn.scene() == self.scene:
+                    self.scene.removeItem(conn)
+                if conn in self.scene.image_text_connectors:
+                    self.scene.image_text_connectors.remove(conn)
+
+        # 3. 清理全局/场景与视图悬停缓存引用，防止被移除元素触发 C++ 悬空指针访问
+        if hasattr(self, '_last_selected_images'):
+            self._last_selected_images = [img for img in self._last_selected_images if img not in item_set]
+        if hasattr(self.scene, '_resize_snapshot') and isinstance(self.scene._resize_snapshot, dict):
+            for it in list(self.scene._resize_snapshot.keys()):
+                if it in item_set:
+                    self.scene._resize_snapshot.pop(it, None)
+        if getattr(self.scene, '_pending_selection_click_item', None) in item_set:
+            self.scene._pending_selection_click_item = None
+        if getattr(self.scene, '_horizontal_move_lock_owner', None) in item_set:
+            self.scene._horizontal_move_lock_y = {}
+            self.scene._horizontal_move_lock_x = {}
+            self.scene._horizontal_move_lock_owner = None
+            self.scene._horizontal_move_owner_right_x = None
+        if self.view:
+            hovered_cp = getattr(self.view, '_hovered_connection_point', None)
+            if hovered_cp is not None and (getattr(hovered_cp, 'parent_element', None) in item_set or hovered_cp.parentItem() in item_set):
+                self.view._hovered_connection_point = None
+            if hasattr(self.view, '_marquee_sweep_order'):
+                self.view._marquee_sweep_order = [i for i in self.view._marquee_sweep_order if i not in item_set]
+            if hasattr(self.view, '_pending_perp_items'):
+                self.view._pending_perp_items = [i for i in self.view._pending_perp_items if i not in item_set]
+
+        # 4. 停止内联编辑器与闪烁定时器，隐藏元素（保留内部子图元 p_item/connection_point/_handles 的父子归属，避免解绑触发 C++ 野指针析构）
+        for item in target_items:
+            if isinstance(item, VTextItem):
+                if hasattr(item, '_cursor_timer') and item._cursor_timer:
+                    item._cursor_timer.stop()
+                if getattr(item, 'is_editing', False) and getattr(item, 'inline_editor', None):
+                    try:
+                        item.inline_editor.finish_editing()
+                    except Exception:
+                        pass
+                if getattr(item, 'inline_editor', None) is not None:
+                    try:
+                        item.inline_editor.hide()
+                        item.inline_editor.text_item = None
+                        item.inline_editor.deleteLater()
+                    except Exception:
+                        pass
+                    item.inline_editor = None
+            if getattr(self.scene, 'binding_source', None) is item:
+                self.scene.binding_source = None
+            if getattr(self.scene, 'image_text_source', None) is item:
+                self.scene.image_text_source = None
+            if getattr(self.scene, 'avatar_connect_source', None) is item:
+                self.scene.avatar_connect_source = None
+            for attr in ('_editing_group_session', '_is_editing_group_item'):
+                if hasattr(item, attr):
+                    try:
+                        delattr(item, attr)
+                    except Exception:
+                        setattr(item, attr, None)
+
+        # 5. 先将子级 BaseElement 从父级解绑并隐藏，再由 QGraphicsScene.removeItem 原子移除每个元素及其内部子图元
+        for item in target_items:
+            try:
+                item.setSelected(False)
+                item.setVisible(False)
+                if isinstance(item.parentItem(), BaseElement):
+                    item.setParentItem(None)
+            except Exception:
+                pass
+        for item in target_items:
+            try:
+                if item.scene() == self.scene:
+                    self.scene.removeItem(item)
+            except Exception:
+                pass
+
+        # 6. 将脱离场景的元素暂存于托管池中，防止在 Qt C++ 事件栈尚未完全退栈时被 Python GC 立即析构引发闪退
+        if not hasattr(self, '_retired_editing_items'):
+            self._retired_editing_items = []
+        self._retired_editing_items.extend(target_items)
+        if len(self._retired_editing_items) > 200:
+            self._retired_editing_items = self._retired_editing_items[-200:]
+
         self.scene.clearSelection()
         self.scene.update()
         if self.view:
@@ -17956,13 +18170,12 @@ class MainWindow(QMainWindow):
         self.refresh_ui()
 
     def cancel_edit_group_asset(self):
-        """取消编辑，移除画布上的临时编辑副本，清除编辑状态并退出独立模式"""
+        """取消编辑，彻底销毁画布上的临时编辑副本，清除编辑状态并退出独立模式"""
         for it in list(self.scene.items()):
             if isinstance(it, VTextItem) and getattr(it, 'is_editing', False) and getattr(it, 'inline_editor', None):
                 it.inline_editor.finish_editing()
         edit_items = self._collect_all_session_editing_items()
-        if edit_items:
-            self._remove_editing_group_items_from_canvas(edit_items)
+        self._remove_editing_group_items_from_canvas(edit_items)
         self._cleanup_editing_group_undo_history()
         self.scene._editing_group_asset_id = None
         self.scene._editing_group_items = []
@@ -17978,7 +18191,7 @@ class MainWindow(QMainWindow):
         if self.view:
             self.view.viewport().update()
         self.refresh_ui()
-        self.status_bar.showMessage("已取消编辑组合，已移除临时编辑副本并退出独立模式", 3000)
+        self.status_bar.showMessage("已取消编辑组合，已销毁画布临时编辑元素并退出独立模式", 3000)
 
     def fit_view(self):
         """初始化时适应视图"""
