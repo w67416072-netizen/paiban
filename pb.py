@@ -226,6 +226,7 @@ class ConfigManager:
                     config.get('image_right_edge_snap_enabled', False)
                 )
                 config.setdefault('text_top_edge_snap_enabled', False)
+                config.setdefault('isolation_disable_snap', True)
                                 # 默认框选模式始终为仅图片，且默认开启选父
                 config['marquee_mode'] = "images"
                 config['select_child_selects_parent'] = True
@@ -273,6 +274,7 @@ class ConfigManager:
             'text_right_edge_snap_enabled': False,  # 水平移动文字时吸附右边缘X
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
             'text_top_edge_snap_enabled': False,  # 移动文字时吸附顶部Y
+            'isolation_disable_snap': True,  # 隔离模式下关闭自动吸附
             'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
@@ -4884,6 +4886,9 @@ class ConnectionPoint(QGraphicsEllipseItem):
         if (self._custom_position
                 and change == QGraphicsItem.GraphicsItemChange.ItemPositionChange
                 and self.scene()):
+            if hasattr(self.scene(), 'is_auto_snap_suppressed') and self.scene().is_auto_snap_suppressed():
+                self.scene().hide_temp_alignment_guide()
+                return super().itemChange(change, value)
             parent = self.parentItem()
             scene_pos = parent.mapToScene(value) if parent else value
             threshold = self.scene().snap_threshold
@@ -5374,9 +5379,20 @@ class BaseElement(QGraphicsItem):
                 and bool(QApplication.mouseButtons() & Qt.MouseButton.LeftButton)
             )
             if is_interactive_drag:
-                # 吸附到辅助线
-                if sc.guides:
-                    value = self._snap_to_guides(value)
+                snap_suppressed = hasattr(sc, 'is_auto_snap_suppressed') and sc.is_auto_snap_suppressed()
+                if snap_suppressed:
+                    sc.clear_snap_guides()
+                    sc.hide_temp_alignment_guide()
+                    if getattr(sc, '_image_right_edge_snap_indicator', None) is not None:
+                        sc._image_right_edge_snap_indicator = None
+                        sc.update()
+                    if getattr(sc, '_image_top_edge_snap_indicator', None) is not None:
+                        sc._image_top_edge_snap_indicator = None
+                        sc.update()
+                else:
+                    # 吸附到辅助线
+                    if sc.guides:
+                        value = self._snap_to_guides(value)
                 
                 # 水平移动模式：锁定Y + 右边缘X吸附
                 horizontal_lock = getattr(sc, '_horizontal_move_lock_y', {})
@@ -5431,6 +5447,7 @@ class BaseElement(QGraphicsItem):
                 'image_right_edge_snap_enabled', False
             ) if scene else False
         if (not scene
+                or (hasattr(scene, 'is_auto_snap_suppressed') and scene.is_auto_snap_suppressed())
                 or not snap_enabled
                 or not isinstance(owner, (VImageItem, VTextItem))
                 or owner not in horizontal_lock
@@ -5504,7 +5521,7 @@ class BaseElement(QGraphicsItem):
                 scene._image_top_edge_snap_indicator = indicator
                 scene.update()
 
-        if not scene or getattr(scene, '_batch_importing', False):
+        if not scene or getattr(scene, '_batch_importing', False) or (hasattr(scene, 'is_auto_snap_suppressed') and scene.is_auto_snap_suppressed()):
             set_indicator(None)
             return 0.0
 
@@ -7947,6 +7964,12 @@ class VImageItem(BaseElement):
             menu.addAction("🔙 退出当前独立模式层级 (Esc)").triggered.connect(
                 lambda: self.scene().exit_isolation_level() if self.scene() else None
             )
+            _mw_iso = getattr(self.scene().views()[0], '_main_window', None) if self.scene().views() else None
+            if _mw_iso and hasattr(_mw_iso, 'toggle_isolation_disable_snap'):
+                _iso_snap_act = menu.addAction("🧲 隔离模式下关闭自动吸附")
+                _iso_snap_act.setCheckable(True)
+                _iso_snap_act.setChecked(self.scene().config_manager.get('isolation_disable_snap', True))
+                _iso_snap_act.triggered.connect(lambda checked, mw=_mw_iso: mw.toggle_isolation_disable_snap(checked))
         menu.addSeparator()
 
         main_window = None
@@ -9080,6 +9103,8 @@ class IsolationStateManager:
         self.scene = scene
         self._stack = []
         self._suspended_for_export = False
+        self._pre_isolation_marquee_mode = None
+        self._pre_isolation_select_parent = None
 
     def is_active(self) -> bool:
         return bool(self._stack) and not self._suspended_for_export
@@ -9262,6 +9287,41 @@ class IsolationStateManager:
 
         return True
 
+    def _get_main_window(self):
+        if self.scene and self.scene.views():
+            return getattr(self.scene.views()[0], '_main_window', None) or self.scene.views()[0].window()
+        return None
+
+    def _switch_to_all_marquee_for_isolation(self):
+        if not self.scene:
+            return
+        if self._pre_isolation_marquee_mode is None:
+            self._pre_isolation_marquee_mode = self.scene.config_manager.get('marquee_mode', 'images')
+            self._pre_isolation_select_parent = self.scene.config_manager.get('select_child_selects_parent', True)
+        mw = self._get_main_window()
+        if mw and hasattr(mw, 'set_marquee_mode'):
+            mw.set_marquee_mode('all')
+        else:
+            self.scene.config_manager.set('marquee_mode', 'all')
+            self.scene.config_manager.set('select_child_selects_parent', False)
+
+    def _restore_marquee_after_isolation(self):
+        if not self.scene or self._pre_isolation_marquee_mode is None:
+            return
+        prev_mode = self._pre_isolation_marquee_mode
+        prev_parent = self._pre_isolation_select_parent
+        self._pre_isolation_marquee_mode = None
+        self._pre_isolation_select_parent = None
+        mw = self._get_main_window()
+        if mw and hasattr(mw, 'set_marquee_mode'):
+            mw.set_marquee_mode(prev_mode)
+            if prev_parent is not None and hasattr(mw, 'toggle_select_child_selects_parent'):
+                mw.toggle_select_child_selects_parent(bool(prev_parent))
+        else:
+            self.scene.config_manager.set('marquee_mode', prev_mode)
+            if prev_parent is not None:
+                self.scene.config_manager.set('select_child_selects_parent', bool(prev_parent))
+
     def enter_level(self, items, auto_from_group_edit=False, label=None) -> bool:
         valid = [
             it for it in (items or [])
@@ -9298,6 +9358,7 @@ class IsolationStateManager:
                     if (i1 in scope) or (i2 in scope):
                         free_pts.add(pt)
 
+        was_empty = (len(self._stack) == 0)
         self._stack.append({
             'roots': roots,
             'primary_owner': primary_owner,
@@ -9305,6 +9366,12 @@ class IsolationStateManager:
             'label': level_label,
             'free_points': free_pts,
         })
+        if was_empty:
+            self._switch_to_all_marquee_for_isolation()
+        self.scene._image_right_edge_snap_indicator = None
+        self.scene._image_top_edge_snap_indicator = None
+        self.scene.clear_snap_guides()
+        self.scene.hide_temp_alignment_guide()
         self.sync_permissions_and_visuals()
 
         self.scene.clearSelection()
@@ -9326,6 +9393,10 @@ class IsolationStateManager:
             return False
         popped = self._stack.pop()
         self._prune_stale_items()
+        self.scene._image_right_edge_snap_indicator = None
+        self.scene._image_top_edge_snap_indicator = None
+        self.scene.clear_snap_guides()
+        self.scene.hide_temp_alignment_guide()
         self.sync_permissions_and_visuals()
 
         self.scene.clearSelection()
@@ -9333,6 +9404,8 @@ class IsolationStateManager:
             if r is not None and r.scene() == self.scene and self.can_interact(r):
                 r.setSelected(True)
 
+        if not self._stack:
+            self._restore_marquee_after_isolation()
         self._notify_ui_state_changed()
         if not silent:
             if self._stack:
@@ -9351,11 +9424,16 @@ class IsolationStateManager:
             return False
         last_roots = self._stack[0].get('roots', [])
         self._stack.clear()
+        self.scene._image_right_edge_snap_indicator = None
+        self.scene._image_top_edge_snap_indicator = None
+        self.scene.clear_snap_guides()
+        self.scene.hide_temp_alignment_guide()
         self.sync_permissions_and_visuals()
         self.scene.clearSelection()
         for r in last_roots:
             if r is not None and r.scene() == self.scene and not getattr(r, 'locked', False):
                 r.setSelected(True)
+        self._restore_marquee_after_isolation()
         self._notify_ui_state_changed()
         if not silent:
             ToastNotification.notify("已完全退出独立模式", "✅", 2600)
@@ -12154,6 +12232,13 @@ class LayoutScene(QGraphicsScene):
     def is_isolation_active(self) -> bool:
         return getattr(self, 'isolation_manager', None) is not None and self.isolation_manager.is_active()
 
+    def is_auto_snap_suppressed(self) -> bool:
+        """隔离模式下若开启了「关闭自动吸附」，则屏蔽辅助线与边缘自动吸附"""
+        return bool(
+            self.is_isolation_active()
+            and self.config_manager.get('isolation_disable_snap', True)
+        )
+
     def can_interact_with_item(self, item) -> bool:
         if getattr(self, 'isolation_manager', None) is None:
             return not (isinstance(item, VImageItem) and getattr(item, 'locked', False))
@@ -12785,56 +12870,69 @@ class LayoutScene(QGraphicsScene):
             self._show_status_message("已取消对齐基准选择", 2500)
 
     def _execute_alignment_with_reference(self, align_mode, ref, items, mode_hint=None):
-        # 收集所有移动命令
+        # 收集所有移动命令（按父级优先顺序执行，并在需要时保持基准子对象位置不变）
         move_commands = []
-        
+        ref_orig_scene_pos = ref.scenePos()
+
+        def _depth(el):
+            d = 0
+            p = el.parentItem()
+            while isinstance(p, BaseElement):
+                d += 1
+                p = p.parentItem()
+            return d
+
+        ordered_items = sorted(items, key=_depth)
+
         if align_mode == 'top':
-            ref_value = ref.scenePos().y()
-            for item in items:
+            ref_value = ref_orig_scene_pos.y()
+            for item in ordered_items:
                 if item == ref:  # 跳过基准对象本身
                     continue
                 current_pos = item.scenePos()
                 new_scene_pos = QPointF(current_pos.x(), ref_value)
-                # 创建移动命令
                 cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
-                cmd.execute()  # 执行移动
+                cmd.execute()
                 move_commands.append(cmd)
         elif align_mode == 'right':
-            ref_value = ref.scenePos().x() + ref.boundingRect().width()
-            for item in items:
-                if item == ref:  # 跳过基准对象本身
+            ref_value = ref_orig_scene_pos.x() + ref.boundingRect().width()
+            for item in ordered_items:
+                if item == ref:
                     continue
                 current_pos = item.scenePos()
                 new_x = ref_value - item.boundingRect().width()
                 new_scene_pos = QPointF(new_x, current_pos.y())
-                # 创建移动命令
                 cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
-                cmd.execute()  # 执行移动
+                cmd.execute()
                 move_commands.append(cmd)
         elif align_mode == 'center_h':
-            ref_value = ref.scenePos().x() + ref.boundingRect().width() / 2
-            for item in items:
-                if item == ref:  # 跳过基准对象本身
+            ref_value = ref_orig_scene_pos.x() + ref.boundingRect().width() / 2
+            for item in ordered_items:
+                if item == ref:
                     continue
                 current_pos = item.scenePos()
                 new_x = ref_value - item.boundingRect().width() / 2
                 new_scene_pos = QPointF(new_x, current_pos.y())
-                # 创建移动命令
                 cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
-                cmd.execute()  # 执行移动
+                cmd.execute()
                 move_commands.append(cmd)
         elif align_mode == 'center_v':
-            ref_value = ref.scenePos().y() + ref.boundingRect().height() / 2
-            for item in items:
-                if item == ref:  # 跳过基准对象本身
+            ref_value = ref_orig_scene_pos.y() + ref.boundingRect().height() / 2
+            for item in ordered_items:
+                if item == ref:
                     continue
                 current_pos = item.scenePos()
                 new_y = ref_value - item.boundingRect().height() / 2
                 new_scene_pos = QPointF(current_pos.x(), new_y)
-                # 创建移动命令
                 cmd = MoveItemCommand(self, item, current_pos, new_scene_pos)
-                cmd.execute()  # 执行移动
+                cmd.execute()
                 move_commands.append(cmd)
+
+        # 若基准对象是某已移动父对象的子级，父级移动会连带偏移它，此处将其恢复到原始场景位置
+        if (ref.scenePos() - ref_orig_scene_pos).manhattanLength() > 1e-4:
+            restore_cmd = MoveItemCommand(self, ref, ref.scenePos(), ref_orig_scene_pos)
+            restore_cmd.execute()
+            move_commands.append(restore_cmd)
 
         # 将所有移动命令打包为一个宏命令，以便一次撤销
         if move_commands:
@@ -12878,7 +12976,11 @@ class LayoutScene(QGraphicsScene):
 
     def _trigger_alignment(self, align_type, items=None, target_mode=None):
         """根据当前对齐模式执行对第一个选中对象对齐，或进入点选指定对象对齐模式"""
-        items = self._top_level_selected(items)
+        raw_items = self.selectedItems() if items is None else items
+        all_selected = [item for item in raw_items if isinstance(item, BaseElement)]
+        top_items = self._top_level_selected(all_selected)
+        # 若顶层不足2个但选中了父子组合内的多个元素（如图片+子文字），则允许组内元素互相对齐
+        items = top_items if len(top_items) >= 2 else all_selected
         if len(items) < 2:
             self._show_status_message("请至少选中两个对象后再执行对齐", 3000)
             return
@@ -15664,6 +15766,12 @@ class MainWindow(QMainWindow):
                 self.scene.config_manager.get('text_top_edge_snap_enabled', False)
             )
             self.text_top_edge_snap_action.blockSignals(False)
+        if hasattr(self, 'isolation_disable_snap_action'):
+            self.isolation_disable_snap_action.blockSignals(True)
+            self.isolation_disable_snap_action.setChecked(
+                self.scene.config_manager.get('isolation_disable_snap', True)
+            )
+            self.isolation_disable_snap_action.blockSignals(False)
         if hasattr(self, 'text_preset_combo'):
             self._refresh_text_preset_combo()
         if hasattr(self, 'btn_avatar_connect'):
@@ -17141,6 +17249,15 @@ class MainWindow(QMainWindow):
         snap_submenu.addAction(self.text_top_edge_snap_action)
 
         snap_submenu.addSeparator()
+        self.isolation_disable_snap_action = QAction('隔离模式下关闭自动吸附', self)
+        self.isolation_disable_snap_action.setCheckable(True)
+        self.isolation_disable_snap_action.setChecked(
+            self.scene.config_manager.get('isolation_disable_snap', True)
+        )
+        self.isolation_disable_snap_action.toggled.connect(self.toggle_isolation_disable_snap)
+        snap_submenu.addAction(self.isolation_disable_snap_action)
+
+        snap_submenu.addSeparator()
         snap_threshold_action = QAction('设置吸附触发距离...', self)
         snap_threshold_action.triggered.connect(self.set_snap_threshold)
         snap_submenu.addAction(snap_threshold_action)
@@ -17524,6 +17641,27 @@ class MainWindow(QMainWindow):
             else:
                 self.status_bar.showMessage('已关闭：文字顶部Y自动吸附', 3000)
 
+    def toggle_isolation_disable_snap(self, enabled):
+        """切换在独立模式（隔离模式）下是否自动关闭辅助线与边缘吸附。"""
+        enabled = bool(enabled)
+        for document in self._documents:
+            document.scene.config_manager.set('isolation_disable_snap', enabled)
+        if hasattr(self, 'isolation_disable_snap_action') and self.isolation_disable_snap_action.isChecked() != enabled:
+            self.isolation_disable_snap_action.blockSignals(True)
+            self.isolation_disable_snap_action.setChecked(enabled)
+            self.isolation_disable_snap_action.blockSignals(False)
+        if self.scene and enabled and self.scene.is_isolation_active():
+            self.scene._image_right_edge_snap_indicator = None
+            self.scene._image_top_edge_snap_indicator = None
+            self.scene.clear_snap_guides()
+            self.scene.hide_temp_alignment_guide()
+            self.scene.update()
+        if hasattr(self, 'status_bar'):
+            if enabled:
+                self.status_bar.showMessage('已开启：隔离模式下自动关闭图片/文字与辅助线吸附', 3000)
+            else:
+                self.status_bar.showMessage('已关闭：隔离模式下保持图片/文字与辅助线自动吸附', 3000)
+
     def on_marquee_button_toggled(self, checked):
         """工具栏框选按钮切换：未按下=仅图片（默认），按下=全选"""
         self.set_marquee_mode('all' if checked else 'images')
@@ -17811,6 +17949,10 @@ class MainWindow(QMainWindow):
             menu.addAction(f"🔙 退出当前独立模式层级 (第{lvl_cnt}层) [Esc]", self.scene.exit_isolation_level)
             if lvl_cnt > 1:
                 menu.addAction("❌ 完全退出独立模式", self.scene.exit_all_isolation_modes)
+            snap_off_act = menu.addAction("🧲 隔离模式下关闭自动吸附")
+            snap_off_act.setCheckable(True)
+            snap_off_act.setChecked(self.scene.config_manager.get('isolation_disable_snap', True))
+            snap_off_act.triggered.connect(lambda checked: self.toggle_isolation_disable_snap(checked))
             menu.addSeparator()
         move_mode_action = None
         connect_mode_action = None
