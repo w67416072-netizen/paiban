@@ -2385,6 +2385,100 @@ class GroupAssetPreviewPopup(QWidget):
         self.show()
 
 
+class GroupAssetItemDelegate(QStyledItemDelegate):
+    """组合素材列表项自定义绘制器：左侧缩略图卡片 + 右侧名称与「X图 · X字」数量标签"""
+
+    THUMB_SIZE = 44
+    ROW_HEIGHT = 58
+
+    def sizeHint(self, option, index):
+        return QSize(max(180, option.rect.width()), self.ROW_HEIGHT)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        rect = QRectF(option.rect).adjusted(2, 2, -2, -2)
+        is_selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        is_hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
+
+        # 行背景与边框
+        if is_selected:
+            painter.setBrush(QBrush(QColor(221, 244, 255)))
+            painter.setPen(QPen(QColor(59, 130, 246, 170), 1))
+            painter.drawRoundedRect(rect, 7, 7)
+        elif is_hover:
+            painter.setBrush(QBrush(QColor(246, 248, 250)))
+            painter.setPen(QPen(QColor(208, 215, 222), 1))
+            painter.drawRoundedRect(rect, 7, 7)
+        else:
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(238, 242, 246), 1))
+            painter.drawRoundedRect(rect, 7, 7)
+
+        # 左侧缩略图卡片
+        thumb_x = rect.left() + 6
+        thumb_y = rect.top() + (rect.height() - self.THUMB_SIZE) / 2.0
+        thumb_rect = QRectF(thumb_x, thumb_y, self.THUMB_SIZE, self.THUMB_SIZE)
+        painter.setBrush(QBrush(QColor(250, 250, 245)))
+        painter.setPen(QPen(QColor(208, 215, 222), 1))
+        painter.drawRoundedRect(thumb_rect, 5, 5)
+
+        pix = index.data(Qt.ItemDataRole.UserRole + 2)
+        if isinstance(pix, QPixmap) and not pix.isNull():
+            inner = thumb_rect.adjusted(3, 3, -3, -3)
+            scaled = pix.scaled(
+                int(inner.width()),
+                int(inner.height()),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            px = inner.left() + (inner.width() - scaled.width()) / 2.0
+            py = inner.top() + (inner.height() - scaled.height()) / 2.0
+            painter.drawPixmap(int(px), int(py), scaled)
+        else:
+            ph_font = QFont("Microsoft YaHei", 8)
+            painter.setFont(ph_font)
+            painter.setPen(QColor(148, 163, 184))
+            painter.drawText(thumb_rect, Qt.AlignmentFlag.AlignCenter, "组合")
+
+        # 右侧名称 + 数量标签
+        text_left = thumb_rect.right() + 10
+        text_w = max(40.0, rect.right() - text_left - 8)
+
+        name = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        name_font = QFont("Microsoft YaHei", 9, QFont.Weight.DemiBold)
+        painter.setFont(name_font)
+        fm_name = QFontMetrics(name_font)
+        elided_name = fm_name.elidedText(name, Qt.TextElideMode.ElideRight, int(text_w))
+        painter.setPen(QColor(13, 110, 253) if is_selected else QColor(30, 41, 59))
+        name_rect = QRectF(text_left, rect.top() + 7, text_w, 20)
+        painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided_name)
+
+        meta = index.data(Qt.ItemDataRole.UserRole + 1) or {}
+        img_cnt = int(meta.get('image_count', 0))
+        txt_cnt = int(meta.get('text_count', 0))
+        conn_cnt = int(meta.get('conn_count', 0))
+        badge_text = f"{img_cnt}图 · {txt_cnt}字"
+        if conn_cnt > 0:
+            badge_text += f" · {conn_cnt}线"
+
+        badge_font = QFont("Microsoft YaHei", 8)
+        painter.setFont(badge_font)
+        fm_badge = QFontMetrics(badge_font)
+        bw = min(text_w, fm_badge.horizontalAdvance(badge_text) + 12)
+        bh = 18.0
+        badge_rect = QRectF(text_left, rect.bottom() - bh - 7, bw, bh)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(191, 219, 254, 170) if is_selected else QColor(238, 242, 246)))
+        painter.drawRoundedRect(badge_rect, 4, 4)
+        painter.setPen(QColor(29, 78, 216) if is_selected else QColor(71, 85, 105))
+        painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, badge_text)
+
+        painter.restore()
+
+
 class AssetLibraryDockWidget(QDockWidget):
     """素材库停靠面板"""
     def __init__(self, asset_manager, main_window):
@@ -2413,6 +2507,9 @@ class AssetLibraryDockWidget(QDockWidget):
         gl.setContentsMargins(8, 8, 8, 8)
         gl.setSpacing(10)
         self.group_list = QListWidget()
+        self.group_list.setItemDelegate(GroupAssetItemDelegate(self.group_list))
+        self.group_list.setSpacing(2)
+        self.group_list.setUniformItemSizes(True)
         self.group_list.setDragEnabled(True)
         self.group_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self.group_list.setDefaultDropAction(Qt.DropAction.CopyAction)
@@ -2578,15 +2675,44 @@ class AssetLibraryDockWidget(QDockWidget):
         self._preview_asset = None
         self._preview_popup.hide()
 
+    def _load_group_thumb_pixmap(self, asset):
+        """加载组合素材缩略图；若无缩略图则回退到组合内首张图片"""
+        candidates = []
+        thumb = asset.get('thumb_path', '')
+        if thumb:
+            candidates.append(thumb)
+            if not os.path.isabs(thumb):
+                candidates.append(os.path.join(APP_DIR, thumb))
+        for d in asset.get('items', []):
+            if d.get('type') == 'VImageItem' and d.get('path'):
+                p = d['path']
+                candidates.append(p)
+                if not os.path.isabs(p):
+                    candidates.append(os.path.join(APP_DIR, p))
+                break
+        for p in candidates:
+            if p and os.path.exists(p):
+                pix = QPixmap(p)
+                if not pix.isNull():
+                    return pix
+        return QPixmap()
+
     def refresh_assets(self):
         self.asset_manager.load_assets()
         self.group_list.clear()
         for asset in self.asset_manager.get_group_assets():
             item = QListWidgetItem(asset['name'])
             item.setData(Qt.ItemDataRole.UserRole, asset)
-            text_count = sum(1 for d in asset['items'] if d['type'] == 'VTextItem')
-            image_count = sum(1 for d in asset['items'] if d['type'] == 'VImageItem')
-            item.setToolTip(f"文字: {text_count}  图片: {image_count}  连接: {len(asset['image_text_connections'])} 条")
+            text_count = sum(1 for d in asset.get('items', []) if d.get('type') == 'VTextItem')
+            image_count = sum(1 for d in asset.get('items', []) if d.get('type') == 'VImageItem')
+            conn_count = len(asset.get('image_text_connections', []))
+            item.setData(Qt.ItemDataRole.UserRole + 1, {
+                'image_count': image_count,
+                'text_count': text_count,
+                'conn_count': conn_count,
+            })
+            item.setData(Qt.ItemDataRole.UserRole + 2, self._load_group_thumb_pixmap(asset))
+            item.setToolTip(f"{asset['name']}  |  {image_count}图 · {text_count}字 · {conn_count}条连线")
             self.group_list.addItem(item)
 
     def use_group_asset(self, item):
@@ -13060,6 +13186,7 @@ class LayoutView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         # --- 在这里插入/确保这两行存在 ---
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -15595,6 +15722,8 @@ class MainWindow(QMainWindow):
         self._eye_visible_icon = self._make_eye_icon(True)
         self._eye_hidden_icon = self._make_eye_icon(False)
         self.tree_widget = QTreeWidget()
+        self.tree_widget.setObjectName("hierarchy_tree")
+        self.tree_widget.setFrameShape(QFrame.Shape.NoFrame)
         self.tree_widget.setHeaderLabels(["", "排版元素", "位置"])
         self.tree_widget.setColumnWidth(0, 50)
         self.tree_widget.setColumnWidth(1, 180)
@@ -15603,6 +15732,8 @@ class MainWindow(QMainWindow):
         self.tree_widget.itemClicked.connect(self._on_tree_item_clicked)
         self.sidebar_tabs = QTabWidget()
         self.sidebar_tabs.setObjectName("sidebar_tabs")
+        self.sidebar_tabs.setContentsMargins(0, 0, 0, 0)
+        self.sidebar_tabs.tabBar().setDrawBase(False)
         self.sidebar_tabs.setMovable(True)  # 允许用户直接用鼠标左右拖动调整 4 个标签的先后顺序
         self.property_panel = self.create_property_panel()
 
@@ -15643,8 +15774,10 @@ class MainWindow(QMainWindow):
         self.document_tabs = QTabWidget()
         self.document_tabs.setObjectName("document_tabs")
         self.document_tabs.setDocumentMode(False)
+        self.document_tabs.setContentsMargins(0, 0, 0, 0)
         # 使用自定义标签栏，+ 按钮紧跟在标签后面
         plus_tab_bar = PlusTabBar()
+        plus_tab_bar.setDrawBase(False)
         plus_tab_bar.addTabRequested.connect(self.new_document)
         plus_tab_bar.setTabsClosable(True)
         plus_tab_bar.setMovable(True)
@@ -21990,6 +22123,134 @@ class MainWindow(QMainWindow):
         QTabBar::tab:hover:!selected {
             background: #eef2f6;
             color: #0d6efd;
+        }
+
+        /* 顶部 MDI 文档标签栏与工作区无缝贴合（浏览器标签页融合风格） */
+        QTabWidget#document_tabs {
+            background: #f4f6f9;
+            border: none;
+            margin: 0px;
+            padding: 0px;
+        }
+
+        QTabWidget#document_tabs::pane {
+            border: none;
+            border-top: 1px solid #cbd5e1;
+            border-radius: 0px;
+            background: #ffffff;
+            top: -1px;
+            margin: 0px;
+            padding: 0px;
+        }
+
+        QTabWidget#document_tabs::tab-bar {
+            left: 0px;
+        }
+
+        QTabWidget#document_tabs QTabBar {
+            qproperty-drawBase: 0;
+            background: transparent;
+            border: none;
+        }
+
+        QTabWidget#document_tabs QTabBar::tab {
+            background: #e2e6ec;
+            border: 1px solid #cfd6e0;
+            border-bottom: none;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            padding: 6px 15px;
+            margin-right: 4px;
+            margin-top: 3px;
+            margin-bottom: 0px;
+            color: #334155;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        QTabWidget#document_tabs QTabBar::tab:selected {
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-bottom: 1px solid #ffffff;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            margin-top: 0px;
+            margin-bottom: -1px;
+            padding: 7px 16px;
+            color: #0d6efd;
+            font-weight: 700;
+        }
+
+        QTabWidget#document_tabs QTabBar::tab:hover:!selected {
+            background: #eef2f6;
+            color: #0d6efd;
+        }
+
+        /* 右侧四合一面板标签栏与内容区无缝贴合（与顶部文档标签统一风格） */
+        QTabWidget#sidebar_tabs {
+            background: #f4f6f9;
+            border: none;
+            margin: 0px;
+            padding: 0px;
+        }
+
+        QTabWidget#sidebar_tabs::pane {
+            border: none;
+            border-top: 1px solid #cbd5e1;
+            border-radius: 0px;
+            background: #ffffff;
+            top: -1px;
+            margin: 0px;
+            padding: 0px;
+        }
+
+        QTabWidget#sidebar_tabs::tab-bar {
+            left: 0px;
+        }
+
+        QTabWidget#sidebar_tabs QTabBar {
+            qproperty-drawBase: 0;
+            background: transparent;
+            border: none;
+        }
+
+        QTabWidget#sidebar_tabs QTabBar::tab {
+            background: #e2e6ec;
+            border: 1px solid #cfd6e0;
+            border-bottom: none;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            padding: 6px 11px;
+            margin-right: 3px;
+            margin-top: 3px;
+            margin-bottom: 0px;
+            color: #334155;
+            font-size: 12.5px;
+            font-weight: 500;
+        }
+
+        QTabWidget#sidebar_tabs QTabBar::tab:selected {
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-bottom: 1px solid #ffffff;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+            margin-top: 0px;
+            margin-bottom: -1px;
+            padding: 7px 12px;
+            color: #0d6efd;
+            font-weight: 700;
+        }
+
+        QTabWidget#sidebar_tabs QTabBar::tab:hover:!selected {
+            background: #eef2f6;
+            color: #0d6efd;
+        }
+
+        QTreeWidget#hierarchy_tree {
+            border: none;
+            border-radius: 0px;
+            background: #ffffff;
         }
 
         QListWidget, QTreeWidget {
