@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*- 测试1
-# 测试单文件上传
+# -*- coding: utf-8 -*-
 import sys
 import json
 import math
@@ -228,6 +227,7 @@ class ConfigManager:
                 )
                 config.setdefault('text_top_edge_snap_enabled', False)
                 config.setdefault('isolation_disable_snap', True)
+                config.setdefault('isolation_auto_bind_new_item', True)
                                 # 默认框选模式始终为仅图片，且默认开启选父
                 config['marquee_mode'] = "images"
                 config['select_child_selects_parent'] = True
@@ -276,6 +276,7 @@ class ConfigManager:
             'image_top_edge_snap_enabled': False,  # 移动图片时吸附顶部Y
             'text_top_edge_snap_enabled': False,  # 移动文字时吸附顶部Y
             'isolation_disable_snap': True,  # 隔离模式下关闭自动吸附
+            'isolation_auto_bind_new_item': True,  # 隔离模式下新建对象自动归属当前子集
             'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
@@ -3634,7 +3635,8 @@ class AddItemCommand(UndoCommand):
                 and self._explicit_parent is None
                 and isinstance(item, BaseElement)
                 and getattr(scene, 'isolation_manager', None) is not None
-                and scene.isolation_manager.is_active()):
+                and scene.isolation_manager.is_active()
+                and scene.config_manager.get('isolation_auto_bind_new_item', True)):
             self._isolation_parent = scene.isolation_manager.get_active_parent_for_new_item(exclude=item)
         self._saved_scene_pos = None
         self._added_to_editing_group = False
@@ -13085,6 +13087,8 @@ class LayoutView(QGraphicsView):
         self._guide_preview = None         # 预览辅助线对象
         # 为标尺留出边距
         self._hovered_connection_point = None
+        self._isolation_banner_buttons = []
+        self._hovered_isolation_btn = None
         self.setViewportMargins(self.RULER_SIZE, self.RULER_SIZE, 0, 0)
         # CorelDRAW 风格右下角小方框导航按钮与悬浮小导航器
         self._cdr_nav_popup = None
@@ -13399,13 +13403,17 @@ class LayoutView(QGraphicsView):
         self.viewport().update()
 
     def _draw_isolation_banner(self, painter):
-        """在画布视口顶部绘制类似 Adobe Illustrator 的独立模式状态指示条与外框"""
+        """在画布视口顶部绘制类似 Adobe Illustrator 的独立模式可点击交互胶囊条与外框"""
         sc = self.scene()
         if not sc or not sc.is_isolation_active():
+            self._isolation_banner_buttons = []
+            self._hovered_isolation_btn = None
             return
         mgr = sc.isolation_manager
         lvl = mgr.current_level()
         if not lvl:
+            self._isolation_banner_buttons = []
+            self._hovered_isolation_btn = None
             return
         R = self.RULER_SIZE
         vp = self.viewport().rect()
@@ -13418,21 +13426,73 @@ class LayoutView(QGraphicsView):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(R + 1, R + 1, max(1, vp.width() - R - 2), max(1, vp.height() - R - 2)))
 
-        # 绘制顶部居中胶囊提示条
-        text = f"🔒 独立模式 [层级 {mgr.level_count()}: {lvl.get('label', '')}]  —  新建归属当前子集  |  按 I 深入子级  |  按 ESC 退出"
         font = QFont("Microsoft YaHei", 9, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
-        tw = fm.horizontalAdvance(text) + 28
-        th = fm.height() + 10
-        bx = R + max(8.0, (vp.width() - R - tw) / 2.0)
+
+        auto_bind = bool(sc.config_manager.get('isolation_auto_bind_new_item', True))
+        prefix_text = f"🔒 独立模式 [层级 {mgr.level_count()}: {lvl.get('label', '')}]"
+        btn_specs = [
+            (
+                'toggle_auto_bind',
+                "✓ 新建归属当前子集" if auto_bind else "○ 新建不归属子集",
+                'active' if auto_bind else 'inactive',
+            ),
+            ('enter_sublevel', "按 I 深入子级", 'normal'),
+            ('exit_level', "按 ESC 退出", 'danger'),
+        ]
+
+        pad_x = 14.0
+        btn_pad_x = 10.0
+        btn_gap = 6.0
+        prefix_gap = 10.0
+        prefix_w = fm.horizontalAdvance(prefix_text)
+        btn_widths = [fm.horizontalAdvance(lbl) + btn_pad_x * 2 for _, lbl, _ in btn_specs]
+        total_w = pad_x * 2 + prefix_w + prefix_gap + sum(btn_widths) + btn_gap * (len(btn_specs) - 1)
+        th = fm.height() + 14.0
+        bx = R + max(8.0, (vp.width() - R - total_w) / 2.0)
         by = R + 8.0
-        pill_rect = QRectF(bx, by, tw, th)
+        pill_rect = QRectF(bx, by, total_w, th)
+
         painter.setPen(QPen(QColor(59, 130, 246, 220), 1))
-        painter.setBrush(QBrush(QColor(15, 23, 42, 225)))
+        painter.setBrush(QBrush(QColor(15, 23, 42, 230)))
         painter.drawRoundedRect(pill_rect, th / 2.0, th / 2.0)
-        painter.setPen(QColor(255, 255, 255))
-        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, text)
+
+        # 绘制左侧状态文字
+        cur_x = bx + pad_x
+        painter.setPen(QColor(226, 232, 240))
+        painter.drawText(QRectF(cur_x, by, prefix_w, th), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, prefix_text)
+        cur_x += prefix_w + prefix_gap
+
+        # 绘制三个可点击的胶囊功能按钮
+        btn_h = th - 6.0
+        btn_y = by + 3.0
+        hovered_id = getattr(self, '_hovered_isolation_btn', None)
+        buttons_hit = []
+        for (btn_id, lbl, kind), bw in zip(btn_specs, btn_widths):
+            brect = QRectF(cur_x, btn_y, bw, btn_h)
+            is_hover = (hovered_id == btn_id)
+            if kind == 'active':
+                bg = QColor(22, 163, 74, 230) if is_hover else QColor(21, 128, 61, 195)
+                bd = QColor(74, 222, 128, 220)
+            elif kind == 'inactive':
+                bg = QColor(71, 85, 105, 225) if is_hover else QColor(51, 65, 85, 180)
+                bd = QColor(148, 163, 184, 170)
+            elif kind == 'danger':
+                bg = QColor(220, 38, 38, 230) if is_hover else QColor(153, 27, 27, 190)
+                bd = QColor(248, 113, 113, 200)
+            else:
+                bg = QColor(37, 99, 235, 230) if is_hover else QColor(30, 58, 138, 185)
+                bd = QColor(96, 165, 250, 200)
+            painter.setPen(QPen(bd, 1))
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(brect, btn_h / 2.0, btn_h / 2.0)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(brect, Qt.AlignmentFlag.AlignCenter, lbl)
+            buttons_hit.append((brect, btn_id))
+            cur_x += bw + btn_gap
+
+        self._isolation_banner_buttons = buttons_hit
         painter.restore()
 
     def _draw_rulers(self, painter):
@@ -13631,6 +13691,27 @@ class LayoutView(QGraphicsView):
 
         if event.button() == Qt.MouseButton.LeftButton and self.scene():
             sc = self.scene()
+            if sc and sc.is_isolation_active():
+                pos_f = QPointF(pos)
+                for brect, btn_id in getattr(self, '_isolation_banner_buttons', []):
+                    if brect.contains(pos_f):
+                        if btn_id == 'toggle_auto_bind':
+                            cur = bool(sc.config_manager.get('isolation_auto_bind_new_item', True))
+                            new_val = not cur
+                            sc.config_manager.set('isolation_auto_bind_new_item', new_val)
+                            msg = (
+                                "已开启：独立模式下新建对象自动归属当前子集"
+                                if new_val
+                                else "已关闭：独立模式下新建对象保持独立（不自动归属子集）"
+                            )
+                            sc._show_status_message(msg, 3000)
+                            self.viewport().update()
+                        elif btn_id == 'enter_sublevel':
+                            sc.handle_isolation_shortcut()
+                        elif btn_id == 'exit_level':
+                            sc.exit_isolation_level()
+                        event.accept()
+                        return
             # 0a) 若点击在图片缩放控制点（ResizeHandle）上，最高优先级直接交由控制点处理（支持按住Shift自由拉伸、Alt中心缩放，不触发任何连线）
             if not (self._in_h_ruler(pos) or self._in_v_ruler(pos)):
                 raw_top = self.itemAt(pos)
@@ -13822,6 +13903,26 @@ class LayoutView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        sc = self.scene()
+        if sc and sc.is_isolation_active() and not (event.buttons() & Qt.MouseButton.LeftButton):
+            pos_f = QPointF(event.pos())
+            hit_btn = None
+            for brect, btn_id in getattr(self, '_isolation_banner_buttons', []):
+                if brect.contains(pos_f):
+                    hit_btn = btn_id
+                    break
+            if hit_btn != getattr(self, '_hovered_isolation_btn', None):
+                self._hovered_isolation_btn = hit_btn
+                self.viewport().update()
+            if hit_btn is not None:
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+                event.accept()
+                return
+            elif not self._smart_brush_enabled:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+        elif getattr(self, '_hovered_isolation_btn', None) is not None:
+            self._hovered_isolation_btn = None
+            self.viewport().update()
         # 智能笔刷模式下不需要连接点悬停扫描；该扫描会遍历整个场景。
         if not self._smart_brush_enabled:
             self._sync_connection_point_hover(event.pos())
