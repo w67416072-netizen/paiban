@@ -228,6 +228,14 @@ class ConfigManager:
                 config.setdefault('text_top_edge_snap_enabled', False)
                 config.setdefault('isolation_disable_snap', True)
                 config.setdefault('isolation_auto_bind_new_item', True)
+                config.setdefault('canvas_dpi', 600)
+                config.setdefault('bleed_mm', 3.0)
+                config.setdefault('show_bleed_guide', False)
+                global CORELDRAW_EXPORT_DPI
+                try:
+                    CORELDRAW_EXPORT_DPI = max(72, min(2400, int(config.get('canvas_dpi', 600))))
+                except (TypeError, ValueError):
+                    CORELDRAW_EXPORT_DPI = 600
                                 # 默认框选模式始终为仅图片，且默认开启选父
                 config['marquee_mode'] = "images"
                 config['select_child_selects_parent'] = True
@@ -277,6 +285,9 @@ class ConfigManager:
             'text_top_edge_snap_enabled': False,  # 移动文字时吸附顶部Y
             'isolation_disable_snap': True,  # 隔离模式下关闭自动吸附
             'isolation_auto_bind_new_item': True,  # 隔离模式下新建对象自动归属当前子集
+            'canvas_dpi': 600,  # 画布与导出换算 DPI
+            'bleed_mm': 3.0,  # 印刷出血宽度（毫米）
+            'show_bleed_guide': False,  # 画布显示红色虚线出血框
             'startup_horizontal_guides_enabled': False,  # 启动/新建画布时添加默认横向辅助线
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
@@ -10064,6 +10075,27 @@ class LayoutScene(QGraphicsScene):
             # 只绘制两端连接点之间的水平提示线，不再绘制圆点。
             painter.drawLine(owner_anchor, target_anchor)
 
+        # 绘制印刷出血参考线（画布成品边缘外扩 bleed_mm 的红色虚线框，导出/缩略图时不绘制）
+        if (not getattr(self, '_rendering_pdf', False)
+                and not getattr(self, '_rendering_export', False)
+                and not getattr(self, '_rendering_thumb', False)
+                and self.config_manager.get('show_bleed_guide', False)):
+            try:
+                bleed_mm = float(self.config_manager.get('bleed_mm', 3.0))
+            except (TypeError, ValueError):
+                bleed_mm = 3.0
+            if bleed_mm > 0:
+                bleed_px = bleed_mm * CORELDRAW_EXPORT_DPI / 25.4
+                bleed_rect = self.sceneRect().adjusted(-bleed_px, -bleed_px, bleed_px, bleed_px)
+                painter.save()
+                bleed_pen = QPen(QColor(220, 38, 38, 220), 1.5, Qt.PenStyle.DashLine)
+                bleed_pen.setCosmetic(True)
+                painter.setOpacity(1.0)
+                painter.setPen(bleed_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(bleed_rect)
+                painter.restore()
+
         # 绘制智能连线/连接点连线的实时动态预览与a/b点高亮
         if not getattr(self, '_rendering_pdf', False) and not getattr(self, '_rendering_thumb', False):
             self._draw_smart_connection_preview(painter)
@@ -17670,6 +17702,17 @@ class MainWindow(QMainWindow):
         canvas_size_action.triggered.connect(self.set_canvas_size)
         canvas_bg_submenu.addAction(canvas_size_action)
 
+        dpi_bleed_action = QAction('画布 DPI 与出血设置...', self)
+        dpi_bleed_action.setToolTip('设置画布换算 DPI 与印刷出血参考线宽度')
+        dpi_bleed_action.triggered.connect(self.open_dpi_bleed_dialog)
+        canvas_bg_submenu.addAction(dpi_bleed_action)
+
+        self.show_bleed_guide_action = QAction('显示出血线', self)
+        self.show_bleed_guide_action.setCheckable(True)
+        self.show_bleed_guide_action.setChecked(bool(self.scene.config_manager.get('show_bleed_guide', False)))
+        self.show_bleed_guide_action.toggled.connect(self.toggle_bleed_guide)
+        canvas_bg_submenu.addAction(self.show_bleed_guide_action)
+
         clear_canvas_view_action = QAction('清空画布...', self)
         clear_canvas_view_action.triggered.connect(self.clear_current_canvas)
         canvas_bg_submenu.addAction(clear_canvas_view_action)
@@ -18989,6 +19032,8 @@ class MainWindow(QMainWindow):
         '批量复制': '步长 重复 阵列 克隆 ctrl+shift+d',
         '清空': '清空当前画布 清空画布 清除全部 删除全部 重置画布 清屏 clean clear ctrl+shift+delete',
         '独立模式': '隔离模式 单独编辑 聚焦 遮罩 子集 退出隔离 isolation i esc',
+        'DPI': '分辨率 像素 毫米 出血 出血线 裁切 裁切标记 印刷 印前',
+        '出血': '出血线 裁切 裁切标记 印刷 印前 dpi 分辨率',
     }
 
     def _setup_command_palette(self):
@@ -20190,6 +20235,110 @@ class MainWindow(QMainWindow):
         h, ok2 = MinimalInputDialog.getInt(self, "画布高度", "高度:", int(current_rect.height()), 100, 10000)
         if ok1 and ok2: self.scene.setSceneRect(0, 0, w, h)
 
+    def toggle_bleed_guide(self, enabled):
+        """切换画布出血参考线显示"""
+        enabled = bool(enabled)
+        self._set_shared_config('show_bleed_guide', enabled)
+        if hasattr(self, 'show_bleed_guide_action') and self.show_bleed_guide_action.isChecked() != enabled:
+            self.show_bleed_guide_action.blockSignals(True)
+            self.show_bleed_guide_action.setChecked(enabled)
+            self.show_bleed_guide_action.blockSignals(False)
+        for doc in self._documents:
+            doc.scene.update()
+        bleed_mm = float(self.scene.config_manager.get('bleed_mm', 3.0))
+        if hasattr(self, 'status_bar') and self.status_bar:
+            msg = f"已显示画布出血线（{bleed_mm:g} mm）" if enabled else "已隐藏画布出血线"
+            self.status_bar.showMessage(msg, 3000)
+
+    def open_dpi_bleed_dialog(self):
+        """打开画布 DPI 与印刷出血参考线设置对话框"""
+        global CORELDRAW_EXPORT_DPI
+        cur_dpi = int(self.scene.config_manager.get('canvas_dpi', CORELDRAW_EXPORT_DPI))
+        cur_bleed = float(self.scene.config_manager.get('bleed_mm', 3.0))
+        cur_show_bleed = bool(self.scene.config_manager.get('show_bleed_guide', False))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("画布 DPI 与出血设置")
+        dlg.setMinimumWidth(380)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(18, 16, 18, 16)
+        vbox.setSpacing(12)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        dpi_row = QHBoxLayout()
+        dpi_spin = MinimalSpinBox(dlg, suffix="DPI")
+        dpi_spin.setRange(72, 2400)
+        dpi_spin.setValue(cur_dpi)
+        dpi_row.addWidget(dpi_spin, 1)
+        for preset in (300, 600, 1200):
+            pbtn = QPushButton(f"{preset}", dlg)
+            pbtn.setFixedWidth(52)
+            pbtn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pbtn.clicked.connect(lambda _=False, v=preset: dpi_spin.setValue(v))
+            dpi_row.addWidget(pbtn)
+        form.addRow("画布 DPI：", dpi_row)
+
+        size_preview_lbl = QLabel(dlg)
+        size_preview_lbl.setStyleSheet("color: #475569; font-size: 12px;")
+        rect = self.scene.sceneRect()
+
+        def _update_preview():
+            d = max(72, dpi_spin.value())
+            w_mm = rect.width() * 25.4 / d
+            h_mm = rect.height() * 25.4 / d
+            size_preview_lbl.setText(f"当前画布成品尺寸：{w_mm:.1f} × {h_mm:.1f} mm（{int(rect.width())} × {int(rect.height())} px）")
+
+        dpi_spin.valueChanged.connect(lambda _v: _update_preview())
+        _update_preview()
+        form.addRow("", size_preview_lbl)
+
+        bleed_spin = MinimalDoubleSpinBox(dlg, suffix="mm")
+        bleed_spin.setRange(0.0, 50.0)
+        bleed_spin.setDecimals(1)
+        bleed_spin.setSingleStep(0.5)
+        bleed_spin.setValue(cur_bleed)
+        form.addRow("出血宽度：", bleed_spin)
+        vbox.addLayout(form)
+
+        chk_show_bleed = QCheckBox("在画布边缘显示红色虚线出血框（参考用，不印出）", dlg)
+        chk_show_bleed.setChecked(cur_show_bleed)
+        vbox.addWidget(chk_show_bleed)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        vbox.addWidget(btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_dpi = int(dpi_spin.value())
+        new_bleed = round(float(bleed_spin.value()), 2)
+        new_show_bleed = chk_show_bleed.isChecked()
+
+        CORELDRAW_EXPORT_DPI = new_dpi
+        self._set_shared_configs({
+            'canvas_dpi': new_dpi,
+            'bleed_mm': new_bleed,
+            'show_bleed_guide': new_show_bleed,
+        })
+        if hasattr(self, 'show_bleed_guide_action'):
+            self.show_bleed_guide_action.blockSignals(True)
+            self.show_bleed_guide_action.setChecked(new_show_bleed)
+            self.show_bleed_guide_action.blockSignals(False)
+        for doc in self._documents:
+            doc.scene.update()
+            doc.view.viewport().update()
+        self.on_selection_changed()
+        self.show_toast(
+            f"画布参数已更新\nDPI：{new_dpi}  |  出血：{new_bleed:g} mm",
+            "✅", 3500
+        )
+
     def _make_eye_icon(self, visible, color=None):
         """创建图层列表用的眼睛图标，支持自定义颜色。"""
         pixmap = QPixmap(22, 22)
@@ -20869,8 +21018,26 @@ class MainWindow(QMainWindow):
         )
         self.show_toast(f"多文档 PDF 导出方式已切换为：\n{mode_desc}", "✅", 3500)
 
+    def _get_pdf_page_metrics(self, scene):
+        """按当前画布 DPI 计算 PDF 导出页面物理尺寸"""
+        dpi = max(72, int(scene.config_manager.get('canvas_dpi', CORELDRAW_EXPORT_DPI)))
+        rect = scene.sceneRect()
+        trim_w_mm = rect.width() * 25.4 / dpi
+        trim_h_mm = rect.height() * 25.4 / dpi
+        return {
+            'dpi': dpi,
+            'trim_rect': rect,
+            'trim_w_mm': trim_w_mm,
+            'trim_h_mm': trim_h_mm,
+            'use_marks': False,
+            'bleed_mm': 0.0,
+            'extra_mm': 0.0,
+            'page_w_mm': trim_w_mm,
+            'page_h_mm': trim_h_mm,
+        }
+
     def _render_single_scene_to_pdf_page(self, painter, printer, scene):
-        """将单个文档 scene 渲染到当前 PDF 页面（供单页导出与多页合并导出共用）"""
+        """将单个文档 scene 渲染到当前 PDF 页面（供单页导出与多页合并导出共用，支持出血与裁切标记）"""
         original_show_grid = scene.show_grid
         original_show_connectors = scene.show_connectors
         original_show_image_text_connectors = scene.show_image_text_connectors
@@ -20886,9 +21053,16 @@ class MainWindow(QMainWindow):
             scene.set_guides_visible(False)
             scene.clearSelection()
 
-            rect = scene.sceneRect()
+            metrics = self._get_pdf_page_metrics(scene)
+            rect = metrics['trim_rect']
+            px_per_mm = metrics['dpi'] / 25.4
+            bleed_px = metrics['bleed_mm'] * px_per_mm
+            extra_px = metrics['extra_mm'] * px_per_mm
+            total_w_px = rect.width() + 2.0 * extra_px
+            total_h_px = rect.height() + 2.0 * extra_px
+
             target_rect = printer.pageRect(QPrinter.Unit.DevicePixel)
-            scale = min(target_rect.width() / rect.width(), target_rect.height() / rect.height())
+            scale = min(target_rect.width() / total_w_px, target_rect.height() / total_h_px)
 
             painter.save()
             painter.scale(scale, scale)
@@ -20904,8 +21078,23 @@ class MainWindow(QMainWindow):
             for p_it in zero_op_p_items:
                 p_it.setVisible(False)
             try:
-                painter.fillRect(QRectF(0, 0, rect.width(), rect.height()), QColor(255, 255, 255))
-                scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
+                painter.fillRect(QRectF(0, 0, total_w_px, total_h_px), QColor(255, 255, 255))
+                if metrics['use_marks']:
+                    src_bleed_rect = rect.adjusted(-bleed_px, -bleed_px, bleed_px, bleed_px)
+                    dst_bleed_rect = QRectF(
+                        extra_px - bleed_px,
+                        extra_px - bleed_px,
+                        rect.width() + 2.0 * bleed_px,
+                        rect.height() + 2.0 * bleed_px,
+                    )
+                    painter.save()
+                    painter.setClipRect(dst_bleed_rect)
+                    scene.render(painter, dst_bleed_rect, src_bleed_rect)
+                    painter.restore()
+                    trim_box = QRectF(extra_px, extra_px, rect.width(), rect.height())
+                    self._draw_pdf_crop_marks(painter, trim_box, metrics)
+                else:
+                    scene.render(painter, QRectF(0, 0, rect.width(), rect.height()), rect)
             finally:
                 for p_it in zero_op_p_items:
                     p_it.setVisible(True)
@@ -20933,11 +21122,11 @@ class MainWindow(QMainWindow):
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
 
-        rect = scene.sceneRect()
-        width_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
-        height_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
+        metrics = self._get_pdf_page_metrics(scene)
+        width_mm = metrics['trim_w_mm']
+        height_mm = metrics['trim_h_mm']
 
-        page_size = QPageSize(QSizeF(width_mm, height_mm), QPageSize.Unit.Millimeter)
+        page_size = QPageSize(QSizeF(metrics['page_w_mm'], metrics['page_h_mm']), QPageSize.Unit.Millimeter)
         printer.setPageSize(page_size)
         printer.setPageOrientation(QPageLayout.Orientation.Portrait)
         printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
@@ -20965,8 +21154,9 @@ class MainWindow(QMainWindow):
         scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"PDF已导出: {path}")
         if show_dialog:
+            extra_info = f"（含 {metrics['bleed_mm']:g}mm 出血与裁切标记）" if metrics['use_marks'] else ""
             self.show_toast(
-                f"PDF 导出完成：{os.path.basename(path)}\n画布尺寸：{int(width_mm)} × {int(height_mm)} mm",
+                f"PDF 导出完成：{os.path.basename(path)}\n成品尺寸：{int(round(width_mm))} × {int(round(height_mm))} mm @ {metrics['dpi']} DPI{extra_info}",
                 "✅", 4000
             )
 
@@ -20980,10 +21170,8 @@ class MainWindow(QMainWindow):
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
 
-        first_rect = documents[0].scene.sceneRect()
-        first_w_mm = first_rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
-        first_h_mm = first_rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
-        printer.setPageSize(QPageSize(QSizeF(first_w_mm, first_h_mm), QPageSize.Unit.Millimeter))
+        first_metrics = self._get_pdf_page_metrics(documents[0].scene)
+        printer.setPageSize(QPageSize(QSizeF(first_metrics['page_w_mm'], first_metrics['page_h_mm']), QPageSize.Unit.Millimeter))
         printer.setPageOrientation(QPageLayout.Orientation.Portrait)
         printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
 
@@ -20995,11 +21183,9 @@ class MainWindow(QMainWindow):
 
         try:
             for idx, doc in enumerate(documents):
-                rect = doc.scene.sceneRect()
-                w_mm = rect.width() * 25.4 / CORELDRAW_EXPORT_DPI
-                h_mm = rect.height() * 25.4 / CORELDRAW_EXPORT_DPI
+                m = self._get_pdf_page_metrics(doc.scene)
                 if idx > 0:
-                    printer.setPageSize(QPageSize(QSizeF(w_mm, h_mm), QPageSize.Unit.Millimeter))
+                    printer.setPageSize(QPageSize(QSizeF(m['page_w_mm'], m['page_h_mm']), QPageSize.Unit.Millimeter))
                     printer.setPageOrientation(QPageLayout.Orientation.Portrait)
                     printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
                     printer.newPage()
