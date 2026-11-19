@@ -19860,8 +19860,14 @@ class MainWindow(QMainWindow):
             count_a += 1
             count_d += len([t for t in extra_texts if t])
 
+            is_gen_one = (generation_idx == 0 and bool(str(record.get('generation', '')).strip()))
+
             if template_asset:
                 new_items, cloned_by_asset_index, new_commands = clone_group_asset(template_asset, base_pos)
+                if is_gen_one:
+                    for item in new_items:
+                        if isinstance(item, VImageItem):
+                            item.set_opacity(0.0)
                 slot_items = apply_template_text(new_items, cloned_by_asset_index, main_text, sub_text1, sub_text2)
                 imported_items.extend(new_items)
                 commands.extend(new_commands)
@@ -19900,6 +19906,8 @@ class MainWindow(QMainWindow):
                     image_path = os.path.join(base_dir, image_path)
                 if os.path.exists(image_path):
                     image_item = VImageItem(image_path, params['img_width'])
+                    if is_gen_one:
+                        image_item.set_opacity(0.0)
                     image_item.setPos(base_pos)
                     image_cmd = AddItemCommand(self.scene, image_item)
                     image_cmd.execute()
