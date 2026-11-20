@@ -80,6 +80,26 @@ DEFAULT_FONT_SIZE = 24
 COLUMN_SPACING = 10
 LINE_HEIGHT_RATIO = 1.2
 CORELDRAW_EXPORT_DPI = 600  # Scene pixels to millimeters for CorelDRAW SVG export.
+
+def pt_to_scene_px_f(font_size_pt, dpi=None):
+    """严格按国际印刷 PostScript 点（1 pt = 1/72 英寸）与当前画布 DPI 换算浮点场景像素"""
+    d = float(dpi if dpi is not None else CORELDRAW_EXPORT_DPI)
+    return max(1.0, float(font_size_pt) * d / 72.0)
+
+def pt_to_scene_px(font_size_pt, dpi=None):
+    return max(1, int(round(pt_to_scene_px_f(font_size_pt, dpi))))
+
+def make_dtp_vector_font(family, exact_px):
+    """构建遵循 Em 字身框（unitsPerEm）的无微调纯矢量 QFont，返回 (QFont, scale_factor)"""
+    base_px = max(1, int(round(exact_px)))
+    font = QFont(family)
+    font.setPixelSize(base_px)
+    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+    font.setStyleStrategy(
+        QFont.StyleStrategy.PreferAntialias | QFont.StyleStrategy.ForceOutline
+    )
+    scale_factor = float(exact_px) / float(base_px)
+    return font, scale_factor
 def _get_app_dir():
     """获取应用程序目录：打包后返回 exe 所在目录，开发时返回脚本所在目录。"""
     if getattr(sys, 'frozen', False):
@@ -547,10 +567,10 @@ class AssetManager:
         thumb_path = ''
         try:
             if scene and scene.views():
-                # 计算所有元素的包围盒（场景坐标）
+                # 计算所有元素的精确场景包围盒（兼容编辑后局部坐标偏移的文字/图片）
                 combined = QRectF()
                 for item in items:
-                    r = QRectF(item.scenePos(), item.boundingRect().size())
+                    r = item.mapRectToScene(item.boundingRect())
                     combined = combined.united(r)
                 if not combined.isEmpty():
                     margin = 10
@@ -631,8 +651,10 @@ class AssetManager:
                     import time
                     timestamp = int(time.time() * 1000)
                     thumb_path = os.path.join(ASSETS_DIR, f"group_{timestamp}_thumb.png")
-                    img.save(thumb_path)
-                    print(f"缩略图已保存: {thumb_path}")
+                    if not img.save(thumb_path, "PNG"):
+                        thumb_path = ''
+                    else:
+                        print(f"缩略图已保存: {thumb_path}")
         except Exception as e:
             print(f"生成缩略图失败: {e}")
             thumb_path = ''
@@ -2323,10 +2345,13 @@ class GroupAssetPreviewPopup(QWidget):
         self.setFixedWidth(260)
 
     def show_asset(self, asset, global_pos):
-        # 清空旧图片
+        # 立即彻底移除并隐藏旧图片控件（避免 deleteLater 延迟导致旧图残留叠加）
         while self._img_row.count():
-            w = self._img_row.takeAt(0).widget()
-            if w:
+            layout_item = self._img_row.takeAt(0)
+            w = layout_item.widget() if layout_item is not None else None
+            if w is not None:
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
 
         name = asset.get('name', '')
@@ -2335,10 +2360,13 @@ class GroupAssetPreviewPopup(QWidget):
         image_count = sum(1 for d in items if d['type'] == 'VImageItem')
         self._title.setText(f"{name}  ({image_count}图 {text_count}文)")
 
-        # 优先显示缩略图
+        # 优先显示缩略图（通过 QImage 直接从磁盘读取，绕过 Qt QPixmapCache 防止显示旧缓存图）
         thumb_path = asset.get('thumb_path', '')
+        if thumb_path and not os.path.isabs(thumb_path):
+            thumb_path = os.path.join(APP_DIR, thumb_path)
         if thumb_path and os.path.exists(thumb_path):
-            pix = QPixmap(thumb_path)
+            _img = QImage(thumb_path)
+            pix = QPixmap.fromImage(_img) if not _img.isNull() else QPixmap(thumb_path)
             if not pix.isNull():
                 lbl = QLabel()
                 scaled = pix.scaled(220, 300,
@@ -2703,12 +2731,15 @@ class AssetLibraryDockWidget(QDockWidget):
                 break
         for p in candidates:
             if p and os.path.exists(p):
-                pix = QPixmap(p)
+                _img = QImage(p)
+                pix = QPixmap.fromImage(_img) if not _img.isNull() else QPixmap(p)
                 if not pix.isNull():
                     return pix
         return QPixmap()
 
     def refresh_assets(self):
+        self._hide_preview()
+        QPixmapCache.clear()
         self.asset_manager.load_assets()
         self.group_list.clear()
         for asset in self.asset_manager.get_group_assets():
@@ -6621,20 +6652,21 @@ class VTextItem(BaseElement):
                 if scene: scene.removeItem(child)
                 else: child.setParentItem(None)
             
-        # 2. 准备基础字体
-        main_font = QFont(self.font_family)
-        main_font.setPointSize(self.font_size)
-        small_font = QFont(self.font_family)
-        small_font.setPointSize(max(1, int(self.font_size * 0.5)))
+        # 2. 准备基础字体（严格按 1 pt = 1/72 英寸与字体 Em 字身框无微调纯矢量缩放，与 CDR / AI 1:1 一致）
+        dpi = scene.config_manager.get('canvas_dpi', CORELDRAW_EXPORT_DPI) if (scene and hasattr(scene, 'config_manager')) else CORELDRAW_EXPORT_DPI
+        main_px = pt_to_scene_px_f(self.font_size, dpi)
+        small_px = max(1.0, main_px * 0.5)
+        main_font, main_scale = make_dtp_vector_font(self.font_family, main_px)
+        small_font, small_scale = make_dtp_vector_font(self.font_family, small_px)
         
-        main_fm = QFontMetrics(main_font)
-        small_fm = QFontMetrics(small_font)
+        main_fm = QFontMetricsF(main_font)
+        small_fm = QFontMetricsF(small_font)
         
-        char_h_main = main_fm.height()
-        char_h_small = small_fm.height()
+        char_h_main = main_fm.height() * main_scale
+        char_h_small = small_fm.height() * small_scale
         
-        # 列宽依然以主字号为准
-        col_step = self.font_size + self.column_spacing
+        # 列宽以实际物理 Em 像素为准
+        col_step = main_px + self.column_spacing
         
         # 换行高度限制（默认仅按回车符手动换列，不再按每列字数强行截断）
         effective_height = float('inf') if self.auto_height else self.box_height
@@ -6665,12 +6697,14 @@ class VTextItem(BaseElement):
             elif i > 0 and text_content[i-1:i+1] in SPECIAL_WORDS:
                 is_special = True
 
-            # 根据是否是特殊字符选择字体和高度
+            # 根据是否是特殊字符选择字体、浮点补偿缩放和高度
             if is_special:
                 current_font = small_font
+                current_scale = small_scale
                 current_h = char_h_small
             else:
                 current_font = main_font
+                current_scale = main_scale
                 current_h = char_h_main
 
             # 换列判断（仅当非 auto_height 定高框时才按高度换列）
@@ -6681,6 +6715,8 @@ class VTextItem(BaseElement):
             # 创建字符项
             t = QGraphicsSimpleTextItem(char)
             t.setFont(current_font)
+            if abs(current_scale - 1.0) > 1e-4:
+                t.setScale(current_scale)
             t.setBrush(QBrush(self.text_color))
             
             # 计算 X 偏移（相对于右侧第一列）
@@ -6697,13 +6733,13 @@ class VTextItem(BaseElement):
             
             # 标点符号偏移
             if char in OFFSET_CHARS:
-                final_x += self.font_size * 0.4
-                final_y -= self.font_size * 0.4
+                final_x += main_px * 0.4
+                final_y -= main_px * 0.4
                 
             # --- 关键：缩小字号后的居中修正 ---
             if is_special:
                 # 使缩小的字在当前列的横向中间
-                final_x += (self.font_size - t.boundingRect().width()) / 2
+                final_x += (main_px - t.boundingRect().width() * current_scale) / 2
 
             t.setParentItem(self)
             t.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
@@ -7297,11 +7333,13 @@ class VTextItem(BaseElement):
 
     def _editing_layout(self, text):
         """返回竖排编辑预览的字符位置，供绘制光标和双击定位复用"""
-        main_font = QFont(self.font_family)
-        main_font.setPointSize(self.font_size)
-        main_fm = QFontMetrics(main_font)
-        char_h = main_fm.height()
-        col_step = self.font_size + self.column_spacing
+        scene = self.scene()
+        dpi = scene.config_manager.get('canvas_dpi', CORELDRAW_EXPORT_DPI) if (scene and hasattr(scene, 'config_manager')) else CORELDRAW_EXPORT_DPI
+        main_px = pt_to_scene_px_f(self.font_size, dpi)
+        main_font, main_scale = make_dtp_vector_font(self.font_family, main_px)
+        main_fm = QFontMetricsF(main_font)
+        char_h = main_fm.height() * main_scale
+        col_step = main_px + self.column_spacing
         char_step = max(1.0, char_h * LINE_HEIGHT_RATIO + self.character_spacing)
         effective_height = float('inf') if self.auto_height else self.box_height
         # 去掉 rebuild 里 adjusted(-2,-2,2,2) 带来的 2px 右边偏移，保持与非编辑状态对齐
@@ -7330,7 +7368,7 @@ class VTextItem(BaseElement):
                 col_idx += 1
 
             col_x_left = right_edge - (col_idx + 1) * col_step
-            x = col_x_left + (col_step - self.font_size) / 2
+            x = col_x_left + (col_step - main_px) / 2
             positions.append({
                 'index': index,
                 'char': ch,
@@ -16364,6 +16402,66 @@ class MainWindow(QMainWindow):
         self._save_window_state()
         event.accept()
 
+    def _setup_searchable_font_combo(self, combo, default_font):
+        """为字体下拉框启用关键词模糊搜索（输入任意中文/英文片段即可下拉匹配对应字体并一键应用）"""
+        if not hasattr(self, '_all_font_families') or not self._all_font_families:
+            self._all_font_families = list(QFontDatabase.families())
+            self._all_font_families_lower = {f.lower(): f for f in self._all_font_families}
+        families = self._all_font_families
+
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.addItems(families)
+
+        idx = combo.findText(default_font)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.setCurrentText(default_font)
+
+        completer = QCompleter(families, combo)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setMaxVisibleItems(12)
+        combo.setCompleter(completer)
+
+        le = combo.lineEdit()
+        if le is not None:
+            le.setPlaceholderText("输入关键词搜字体...")
+
+        def _apply_font_name(name):
+            name_str = (name or "").strip()
+            if not name_str:
+                return
+            exact = self._all_font_families_lower.get(name_str.lower())
+            if exact:
+                self.change_selected_font(QFont(exact))
+                if hasattr(self, 'view') and self.view:
+                    self.view.setFocus()
+
+        def _on_return_pressed():
+            kw = (combo.currentText() or "").strip()
+            if not kw:
+                return
+            exact = self._all_font_families_lower.get(kw.lower())
+            if exact:
+                _apply_font_name(exact)
+                return
+            # 未输全时按回车直接采用首条匹配字体
+            kw_low = kw.lower()
+            matched = next((f for f in families if kw_low in f.lower()), None)
+            if matched:
+                combo.blockSignals(True)
+                combo.setCurrentText(matched)
+                combo.blockSignals(False)
+                _apply_font_name(matched)
+
+        combo.activated.connect(lambda i: _apply_font_name(combo.itemText(i)) if i >= 0 else None)
+        completer.activated.connect(_apply_font_name)
+        if le is not None:
+            le.returnPressed.connect(_on_return_pressed)
+
     def create_property_panel(self):
         panel = QWidget()
         panel.setObjectName("property_panel")
@@ -16384,22 +16482,12 @@ class MainWindow(QMainWindow):
 
         self.font_combo = QComboBox()
         self.font_combo.setMinimumWidth(120)
-        self.font_combo.setEditable(True)
-        for f in QFontDatabase.families():
-            self.font_combo.addItem(f)
         default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
-        idx = self.font_combo.findText(default_font)
-        if idx >= 0:
-            self.font_combo.setCurrentIndex(idx)
-        else:
-            self.font_combo.setCurrentText(default_font)
-        self.font_combo.currentTextChanged.connect(
-            lambda name: self.change_selected_font(QFont(name))
-        )
+        self._setup_searchable_font_combo(self.font_combo, default_font)
         text_layout.addRow("字体", self.font_combo)
 
         self.font_size_spin = MinimalSpinBox()
-        self.font_size_spin.setRange(8, 200)
+        self.font_size_spin.setRange(4, 200)
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
         self.font_size_spin.setValue(default_font_size)
         self.font_size_spin.setSuffix("pt")
@@ -16787,7 +16875,7 @@ class MainWindow(QMainWindow):
         
         main_toolbar.addWidget(QLabel("大小:"))
         self.font_size_spin = MinimalSpinBox()
-        self.font_size_spin.setRange(8, 200)
+        self.font_size_spin.setRange(4, 200)
         # 从配置加载默认字体大小
         default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
         self.font_size_spin.setValue(default_font_size)
@@ -16904,6 +16992,48 @@ class MainWindow(QMainWindow):
         toolbar.addAction(action)
         return action
 
+    def _make_ps_align_icon(self, kind):
+        """绘制 Photoshop 风格紧凑对齐图标（顶对齐 / 垂直居中 / 右对齐 / 水平居中）"""
+        pix = QPixmap(18, 18)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        axis_pen = QPen(QColor("#0d6efd"), 1.6)
+        fill_brush = QBrush(QColor("#334155"))
+        outline_pen = QPen(QColor("#334155"), 1.2)
+
+        if kind == 'top':
+            p.setPen(axis_pen)
+            p.drawLine(2, 2, 16, 2)
+            p.setPen(outline_pen)
+            p.setBrush(fill_brush)
+            p.drawRect(4, 4, 4, 11)
+            p.drawRect(10, 4, 4, 7)
+        elif kind == 'center_v':
+            p.setPen(axis_pen)
+            p.drawLine(2, 9, 16, 9)
+            p.setPen(outline_pen)
+            p.setBrush(fill_brush)
+            p.drawRect(4, 3, 4, 12)
+            p.drawRect(10, 5, 4, 8)
+        elif kind == 'right':
+            p.setPen(axis_pen)
+            p.drawLine(16, 2, 16, 16)
+            p.setPen(outline_pen)
+            p.setBrush(fill_brush)
+            p.drawRect(3, 4, 11, 4)
+            p.drawRect(7, 10, 7, 4)
+        elif kind == 'center_h':
+            p.setPen(axis_pen)
+            p.drawLine(9, 2, 9, 16)
+            p.setPen(outline_pen)
+            p.setBrush(fill_brush)
+            p.drawRect(3, 4, 12, 4)
+            p.drawRect(5, 10, 8, 4)
+
+        p.end()
+        return QIcon(pix)
+
     def create_toolbars(self):
         # ══════════════════════════════════════════════════════════════════
         # 1. 顶部快捷与排版工具栏（放置全局操作、对齐排布、常驻约束开关与数值参数）
@@ -16928,29 +17058,29 @@ class MainWindow(QMainWindow):
             "清空当前画布上的所有内容（支持 Ctrl+Z 撤销）"
         )
 
-        # [顶部组2] 对齐与基准模式组（横向展开，符合视线直觉）
+        # [顶部组2] Photoshop 风格紧凑图标对齐组（节省横向空间，一键直达 4 种对齐）
         top_toolbar.addSeparator()
-        align_toolbar_menu = QMenu(self)
-        align_toolbar_menu.addAction("顶部对齐", self.align_top)
-        align_toolbar_menu.addAction("右对齐", self.align_right)
-        align_toolbar_menu.addAction("水平居中对齐", self.align_center_horizontal)
-        align_toolbar_menu.addAction("垂直居中对齐", self.align_center_vertical)
-        align_toolbar_menu.addSeparator()
-        align_toolbar_menu.addAction("切换对齐基准模式 (Alt+A)", self.cycle_align_mode)
-        align_btn = QToolButton()
-        align_btn.setText("📐对齐 ▾")
-        align_btn.setMenu(align_toolbar_menu)
-        align_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        align_btn.setToolTip("多选对象对齐（顶部 / 右边缘 / 水平居中 / 垂直居中）")
-        align_act = top_toolbar.addWidget(align_btn)
-        align_act.setText("对齐")
-        align_act.setMenu(align_toolbar_menu)
+        for kind, tip, slot in [
+            ('top', "顶部对齐", self.align_top),
+            ('center_v', "垂直居中对齐", self.align_center_vertical),
+            ('right', "右对齐", self.align_right),
+            ('center_h', "水平居中对齐", self.align_center_horizontal),
+        ]:
+            btn = QToolButton()
+            btn.setObjectName("psAlignBtn")
+            btn.setIcon(self._make_ps_align_icon(kind))
+            btn.setIconSize(QSize(18, 18))
+            btn.setFixedSize(28, 28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.setStatusTip(tip)
+            btn.clicked.connect(lambda _=False, s=slot: s())
+            act = top_toolbar.addWidget(btn)
+            act.setText(tip)
 
-        self._add_toolbar_action(top_toolbar, "⤒顶对齐", self.align_top, "按顶部边缘对齐选中对象")
-        self._add_toolbar_action(top_toolbar, "⇥右对齐", self.align_right, "按右边缘对齐选中对象")
         self.btn_align_mode = self._add_toolbar_action(
             top_toolbar,
-            "🎯基准:首",
+            "🎯首",
             self.on_align_mode_button_toggled,
             "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
             checkable=True
@@ -17013,6 +17143,31 @@ class MainWindow(QMainWindow):
         self.smart_brush_size_spin.setToolTip("智能笔刷半径大小（快捷键 [ 缩小 / ] 放大）")
         self.smart_brush_size_spin.valueChanged.connect(self.view.set_smart_brush_radius)
         top_toolbar.addWidget(self.smart_brush_size_spin)
+
+        # [顶部组5] 紧凑字体与字号控件（直接置于单行顶栏，与右侧属性面板实时双向同步）
+        top_toolbar.addSeparator()
+        font_lbl = QLabel("字体:")
+        font_lbl.setObjectName("toolbarHint")
+        top_toolbar.addWidget(font_lbl)
+        self.toolbar_font_combo = QComboBox()
+        self.toolbar_font_combo.setObjectName("toolbarFontCombo")
+        self.toolbar_font_combo.setFixedWidth(132)
+        self.toolbar_font_combo.setToolTip("字体：输入中文/英文关键词即可模糊搜索并切换选中文字字体")
+        default_font_tb = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
+        self._setup_searchable_font_combo(self.toolbar_font_combo, default_font_tb)
+        top_toolbar.addWidget(self.toolbar_font_combo)
+
+        size_lbl = QLabel("字号:")
+        size_lbl.setObjectName("toolbarHint")
+        top_toolbar.addWidget(size_lbl)
+        self.toolbar_font_size_spin = MinimalSpinBox()
+        self.toolbar_font_size_spin.setRange(4, 200)
+        self.toolbar_font_size_spin.setValue(int(self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)))
+        self.toolbar_font_size_spin.setSuffix("pt")
+        self.toolbar_font_size_spin.setFixedWidth(56)
+        self.toolbar_font_size_spin.setToolTip("字号：设置选中文字（或选中图片的子文字）的字号（与 CorelDRAW 1:1 物理尺寸一致）")
+        self.toolbar_font_size_spin.valueChanged.connect(self.change_selected_font_size)
+        top_toolbar.addWidget(self.toolbar_font_size_spin)
 
         # ══════════════════════════════════════════════════════════════════
         # 2. 左侧画布工具箱（仅保留高频创建、选区变形与族谱连线工具，手不离画布）
@@ -18063,7 +18218,7 @@ class MainWindow(QMainWindow):
             is_pick = (current == 'pick_reference')
             self.btn_align_mode.blockSignals(True)
             self.btn_align_mode.setChecked(is_pick)
-            self.btn_align_mode.setText("🎯点选" if is_pick else "🎯基准:首")
+            self.btn_align_mode.setText("🎯选" if is_pick else "🎯首")
             self.btn_align_mode.blockSignals(False)
 
     def toggle_insert_image_to_bottom(self, enabled):
@@ -20069,13 +20224,30 @@ class MainWindow(QMainWindow):
                         child_texts.append(ch)
         return child_texts
 
+    def _sync_font_family_widgets(self, family_name):
+        for combo in (getattr(self, 'font_combo', None), getattr(self, 'toolbar_font_combo', None)):
+            if combo is not None and combo.currentText() != family_name:
+                combo.blockSignals(True)
+                combo.setCurrentText(family_name)
+                combo.blockSignals(False)
+
+    def _sync_font_size_widgets(self, size_val):
+        for spin in (getattr(self, 'font_size_spin', None), getattr(self, 'toolbar_font_size_spin', None)):
+            if spin is not None and spin.value() != size_val:
+                spin.blockSignals(True)
+                spin.setValue(size_val)
+                spin.blockSignals(False)
+
     def change_selected_font(self, font):
+        family_name = font.family()
+        self._sync_font_family_widgets(family_name)
         selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
-            item.font_family = font.family()
+            item.font_family = family_name
             item.rebuild()
     
     def change_selected_font_size(self, size):
+        self._sync_font_size_widgets(size)
         selected_items = self._get_target_text_items_for_property()
         for item in selected_items:
             item.font_size = size
@@ -20136,6 +20308,8 @@ class MainWindow(QMainWindow):
                 self.column_spacing_spin.setValue(item.column_spacing)
                 self.character_spacing_spin.setValue(item.character_spacing)
                 self._set_color_button_color(item.text_color)
+                self._sync_font_family_widgets(item.font_family)
+                self._sync_font_size_widgets(item.font_size)
                 
                 self.font_combo.blockSignals(False)
                 self.font_size_spin.blockSignals(False)
@@ -20339,6 +20513,10 @@ class MainWindow(QMainWindow):
             self.show_bleed_guide_action.setChecked(new_show_bleed)
             self.show_bleed_guide_action.blockSignals(False)
         for doc in self._documents:
+            if new_dpi != cur_dpi:
+                for it in doc.scene.items():
+                    if isinstance(it, VTextItem):
+                        it.rebuild(preserve_position=True)
             doc.scene.update()
             doc.view.viewport().update()
         self.on_selection_changed()
@@ -20802,7 +20980,7 @@ class MainWindow(QMainWindow):
                     char_index,
                     char_text,
                     child_font.family(),
-                    child_font.pointSize(),
+                    child_font.pointSize() if child_font.pointSize() > 0 else round(child_font.pixelSize() * child.scale() * 72.0 / DPI, 2),
                     child_color,
                     round(child.rotation(), 4),
                     char_x,
@@ -21123,21 +21301,31 @@ class MainWindow(QMainWindow):
             scene._rendering_pdf = False
             scene._rendering_export = False
 
-    def _do_export_pdf(self, path, show_dialog=False, scene=None):
-        """实际执行单文档PDF导出 - 用scene.render保证文字位置正确，图片/连线独立对象"""
-        scene = scene or self.scene
-        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
-        printer.setOutputFileName(path)
+    def _apply_pdf_page_layout(self, printer, page_w_mm, page_h_mm):
+        """严格按实际宽高配置 PDF 页面方向（宽>高时用 Landscape，避免 Qt 强制竖向导致的二次缩放）"""
+        if page_w_mm > page_h_mm:
+            page_size = QPageSize(QSizeF(page_h_mm, page_w_mm), QPageSize.Unit.Millimeter)
+            orientation = QPageLayout.Orientation.Landscape
+        else:
+            page_size = QPageSize(QSizeF(page_w_mm, page_h_mm), QPageSize.Unit.Millimeter)
+            orientation = QPageLayout.Orientation.Portrait
+        layout = QPageLayout(page_size, orientation, QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+        layout.setMode(QPageLayout.Mode.FullPageMode)
+        printer.setPageLayout(layout)
+        printer.setFullPage(True)
 
+    def _do_export_pdf(self, path, show_dialog=False, scene=None):
+        """实际执行单文档PDF导出 - 1:1 匹配画布物理 DPI 与页面方向，保证字号与 CDR/AI 完全一致"""
+        scene = scene or self.scene
         metrics = self._get_pdf_page_metrics(scene)
         width_mm = metrics['trim_w_mm']
         height_mm = metrics['trim_h_mm']
 
-        page_size = QPageSize(QSizeF(metrics['page_w_mm'], metrics['page_h_mm']), QPageSize.Unit.Millimeter)
-        printer.setPageSize(page_size)
-        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
-        printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setResolution(metrics['dpi'])
+        self._apply_pdf_page_layout(printer, metrics['page_w_mm'], metrics['page_h_mm'])
 
         painter = QPainter()
         painter.begin(printer)
@@ -21162,26 +21350,23 @@ class MainWindow(QMainWindow):
         scene.config_manager.set('default_save_dir', os.path.dirname(path))
         print(f"PDF已导出: {path}")
         if show_dialog:
-            extra_info = f"（含 {metrics['bleed_mm']:g}mm 出血与裁切标记）" if metrics['use_marks'] else ""
             self.show_toast(
-                f"PDF 导出完成：{os.path.basename(path)}\n成品尺寸：{int(round(width_mm))} × {int(round(height_mm))} mm @ {metrics['dpi']} DPI{extra_info}",
+                f"PDF 导出完成：{os.path.basename(path)}\n成品尺寸：{width_mm:.1f} × {height_mm:.1f} mm @ {metrics['dpi']} DPI",
                 "✅", 4000
             )
 
     def _do_export_merged_pdf(self, path, documents=None, show_dialog=False):
-        """将多个文档按标签先后次序合成为一个多页 PDF（每个文档占一页，第1个文档为第1页，依此类推）"""
+        """将多个文档按标签先后次序合成为一个多页 PDF（每个文档占一页，严格 1:1 物理尺寸输出）"""
         documents = documents or self._documents
         if not documents:
             return False
 
+        first_metrics = self._get_pdf_page_metrics(documents[0].scene)
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
         printer.setOutputFileName(path)
-
-        first_metrics = self._get_pdf_page_metrics(documents[0].scene)
-        printer.setPageSize(QPageSize(QSizeF(first_metrics['page_w_mm'], first_metrics['page_h_mm']), QPageSize.Unit.Millimeter))
-        printer.setPageOrientation(QPageLayout.Orientation.Portrait)
-        printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+        printer.setResolution(first_metrics['dpi'])
+        self._apply_pdf_page_layout(printer, first_metrics['page_w_mm'], first_metrics['page_h_mm'])
 
         painter = QPainter()
         painter.begin(printer)
@@ -21193,9 +21378,7 @@ class MainWindow(QMainWindow):
             for idx, doc in enumerate(documents):
                 m = self._get_pdf_page_metrics(doc.scene)
                 if idx > 0:
-                    printer.setPageSize(QPageSize(QSizeF(m['page_w_mm'], m['page_h_mm']), QPageSize.Unit.Millimeter))
-                    printer.setPageOrientation(QPageLayout.Orientation.Portrait)
-                    printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Millimeter)
+                    self._apply_pdf_page_layout(printer, m['page_w_mm'], m['page_h_mm'])
                     printer.newPage()
                 self._render_single_scene_to_pdf_page(painter, printer, doc.scene)
         finally:
@@ -21695,9 +21878,9 @@ class MainWindow(QMainWindow):
                 'default_text_format': text_format,
             })
             
-            # 更新工具栏显示
-            self.font_combo.setCurrentText(font.family())
-            self.font_size_spin.setValue(font.pointSize())
+            # 更新属性面板与顶部工具栏显示
+            self._sync_font_family_widgets(font.family())
+            self._sync_font_size_widgets(font.pointSize())
             
             self.show_toast(
                 f"默认字体已设置：{font.family()} ({font.pointSize()}pt)",
@@ -22124,6 +22307,23 @@ class MainWindow(QMainWindow):
             border-bottom: 1px solid #e2e8f0;
             spacing: 8px;
             padding: 6px 12px;
+        }
+
+        QToolBar#toolbar_top QToolButton#psAlignBtn {
+            background: #ffffff;
+            border: 1px solid #dce1e8;
+            border-radius: 6px;
+            padding: 3px;
+            min-width: 24px;
+            min-height: 24px;
+        }
+        QToolBar#toolbar_top QToolButton#psAlignBtn:hover {
+            background: #f0f6ff;
+            border-color: #93c5fd;
+        }
+        QToolBar#toolbar_top QToolButton#psAlignBtn:pressed {
+            background: #dbeafe;
+            border-color: #0d6efd;
         }
 
         QToolBar#toolbar_top::separator {
