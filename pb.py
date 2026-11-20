@@ -110,6 +110,18 @@ def _get_app_dir():
 APP_DIR = _get_app_dir()
 ASSETS_DIR = os.path.join(APP_DIR, "assets")  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
+DEFAULT_LINE_COLOR = "#ff0000"  # 默认连接线颜色（十六进制）
+
+def parse_connector_color(color_val, fallback="#ff0000", default_alpha=200):
+    """解析连线颜色为 QColor，若为不透明六位色值则自动应用统一半透明质感。"""
+    c = QColor(color_val) if not isinstance(color_val, QColor) else QColor(color_val)
+    if not c.isValid():
+        c = QColor(fallback)
+    if isinstance(color_val, str) and len(color_val.strip()) == 7 and color_val.strip().startswith('#'):
+        c.setAlpha(default_alpha)
+    elif not isinstance(color_val, QColor) and c.alpha() == 255:
+        c.setAlpha(default_alpha)
+    return c
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")  # 配置文件（与 exe 同目录）
 DEFAULT_LICENSE_PASSWORD = "12345678"
 LICENSE_EXPIRY_DATETIME_FORMAT = "yyyy-MM-dd HH:mm"
@@ -290,6 +302,7 @@ class ConfigManager:
             },
             'text_format_presets': [],
             'default_line_width': DEFAULT_LINE_WIDTH,  # 默认连线粗细
+            'default_line_color': DEFAULT_LINE_COLOR,  # 默认连线颜色
             'bg_above_connectors': False,  # 背景图片是否在连线之上
             'marquee_only_images': False,  # 框选时仅选择图片（兼容旧版）
             'marquee_only_connected': False,  # 框选时仅选择有连接点的元素（兼容旧版）
@@ -494,6 +507,8 @@ class AssetManager:
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
                     'layer_eye_color': getattr(item, 'layer_eye_color', None),
+                    'cp_offset_x': float(getattr(item, 'cp_offset_x', 0.0)),
+                    'cp_offset_y': float(getattr(item, 'cp_offset_y', 0.0)),
                     'connection_point_visible': connection_point_visible,
                     'connection_point_deleted': connection_point_deleted,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -529,6 +544,10 @@ class AssetManager:
                         'original_path': original_path,
                         'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
                         'opacity': getattr(item, 'image_opacity', 1.0),
+                    'cp_offset_x': float(getattr(item, 'cp_offset_x', 0.0)),
+                    'cp_offset_y': float(getattr(item, 'cp_offset_y', 0.0)),
+                        'cp_offset_x': float(getattr(item, 'cp_offset_x', 0.0)),
+                        'cp_offset_y': float(getattr(item, 'cp_offset_y', 0.0)),
                         'connection_point_visible': connection_point_visible,
                         'connection_point_deleted': connection_point_deleted,
                         'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -2778,7 +2797,7 @@ class AssetLibraryDockWidget(QDockWidget):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color', 'cp_offset_x', 'cp_offset_y'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -2790,6 +2809,8 @@ class AssetLibraryDockWidget(QDockWidget):
                     new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
                     if 'opacity' in item_data:
                         new_item.set_opacity(item_data['opacity'])
+                    if 'cp_offset_x' in item_data or 'cp_offset_y' in item_data:
+                        new_item.set_cp_offset(float(item_data.get('cp_offset_x', 0.0)), float(item_data.get('cp_offset_y', 0.0)))
             if new_item:
                 off_x = item_data['scene_pos'][0] - min_x
                 off_y = item_data['scene_pos'][1] - min_y
@@ -3211,6 +3232,10 @@ class AssetLibraryWidget(QWidget):
                         new_item.manual_line_break = item_data['manual_line_break']
                     if 'layer_eye_color' in item_data:
                         new_item.layer_eye_color = item_data['layer_eye_color']
+                    if 'cp_offset_x' in item_data:
+                        new_item.cp_offset_x = float(item_data['cp_offset_x'])
+                    if 'cp_offset_y' in item_data:
+                        new_item.cp_offset_y = float(item_data['cp_offset_y'])
                     
                     new_item.rebuild()
                         
@@ -3219,6 +3244,8 @@ class AssetLibraryWidget(QWidget):
                         new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
                         if 'opacity' in item_data:
                             new_item.set_opacity(item_data['opacity'])
+                        if 'cp_offset_x' in item_data or 'cp_offset_y' in item_data:
+                            new_item.set_cp_offset(float(item_data.get('cp_offset_x', 0.0)), float(item_data.get('cp_offset_y', 0.0)))
                 
                 if new_item:
                     # 计算相对于原始组合的偏移量，然后应用到新的基准位置
@@ -3350,6 +3377,8 @@ class ProjectData:
                 data['auto_height'] = item.auto_height
                 data['manual_line_break'] = item.manual_line_break
                 data['layer_eye_color'] = getattr(item, 'layer_eye_color', None)
+                data['cp_offset_x'] = float(getattr(item, 'cp_offset_x', 0.0))
+                data['cp_offset_y'] = float(getattr(item, 'cp_offset_y', 0.0))
                 if item.connection_point:
                     data['connection_point_visible'] = getattr(item, '_cp_user_visible', True)
                 else:
@@ -3359,6 +3388,8 @@ class ProjectData:
                 data['width'] = item.target_width
                 data['height'] = getattr(item, 'target_height', item.boundingRect().height())
                 data['opacity'] = item.image_opacity
+                data['cp_offset_x'] = float(getattr(item, 'cp_offset_x', 0.0))
+                data['cp_offset_y'] = float(getattr(item, 'cp_offset_y', 0.0))
                 data['locked'] = item.locked
                 data['visible'] = item.isVisible()
                 if item.connection_point:
@@ -3402,7 +3433,8 @@ class ProjectData:
                         'type': 'VImageTextConnector',
                         'image_id': img_id,
                         'text_id': text_id,
-                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
+                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3,
+                        'line_color': conn.base_color.name() if hasattr(conn, 'base_color') else DEFAULT_LINE_COLOR
                     }
                     if getattr(conn, 'point1', None) is not None and getattr(conn, 'point1', None).point_type == 'custom':
                         conn_data['point1_custom_index'] = getattr(conn.item1, 'custom_connection_points', []).index(conn.point1)
@@ -3419,7 +3451,8 @@ class ProjectData:
                         'item1_id': item1_id,
                         'item2_id': item2_id,
                         'connection_type': conn.connection_type if hasattr(conn, 'connection_type') else 'generic',
-                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3
+                        'line_width': conn.line_width if hasattr(conn, 'line_width') else 3,
+                        'line_color': conn.base_color.name() if hasattr(conn, 'base_color') else DEFAULT_LINE_COLOR
                     }
                     if getattr(conn, 'point1', None) is not None and conn.point1.point_type == 'custom':
                         if conn.point1.parent_element is None:
@@ -3655,6 +3688,8 @@ class ProjectData:
                 if 'manual_line_break' in d:
                     item.manual_line_break = d['manual_line_break']
                 item.layer_eye_color = d.get('layer_eye_color')
+                item.cp_offset_x = float(d.get('cp_offset_x', 0.0))
+                item.cp_offset_y = float(d.get('cp_offset_y', 0.0))
                 item.rebuild()
             elif d['type'] == 'VImageItem':
                 saved_h = d.get('height', 0)
@@ -3663,6 +3698,8 @@ class ProjectData:
                 item = VImageItem(d['path'], d['width'], saved_h)
                 if 'opacity' in d:
                     item.set_opacity(d['opacity'])
+                if 'cp_offset_x' in d or 'cp_offset_y' in d:
+                    item.set_cp_offset(float(d.get('cp_offset_x', 0.0)), float(d.get('cp_offset_y', 0.0)))
                 if d.get('locked', False):
                     item.set_locked(True)
                 if 'visible' in d:
@@ -3722,12 +3759,13 @@ class ProjectData:
         for conn_data in image_text_connectors_data:
             conn_type = conn_data.get('type', 'VImageTextConnector')
             line_width = conn_data.get('line_width', 3)
+            line_color = conn_data.get('line_color', None)
             
             if conn_type == 'VImageTextConnector':
                 img_id = conn_data.get('image_id', -1)
                 text_id = conn_data.get('text_id', -1)
                 if img_id in id_map and text_id in id_map:
-                    conn = VImageTextConnector(id_map[img_id], id_map[text_id], line_width)
+                    conn = VImageTextConnector(id_map[img_id], id_map[text_id], line_width, line_color=line_color)
                     scene.addItem(conn)
                     scene.image_text_connectors.append(conn)
                     conn.update_path()
@@ -3764,7 +3802,7 @@ class ProjectData:
                 if point2 is None and conn_data.get('point2_default') and item2 is not None:
                     point2 = getattr(item2, 'connection_point', None)
                 if (item1 is not None and item2 is not None) or (point1 is not None and point2 is not None):
-                    conn = VGenericConnector(item1, item2, connection_type, line_width, point1, point2)
+                    conn = VGenericConnector(item1, item2, connection_type, line_width, point1, point2, line_color=line_color)
                     scene.addItem(conn)
                     scene.image_text_connectors.append(conn)
                     for point in (point1, point2):
@@ -4427,6 +4465,8 @@ class SplitTextItemCommand(UndoCommand):
             self.new_item.auto_height = self.item.auto_height
             self.new_item.manual_line_break = self.item.manual_line_break
             self.new_item.layer_eye_color = getattr(self.item, 'layer_eye_color', None)
+            self.new_item.cp_offset_x = float(getattr(self.item, 'cp_offset_x', 0.0))
+            self.new_item.cp_offset_y = float(getattr(self.item, 'cp_offset_y', 0.0))
             self.new_item.setZValue(self.item.zValue())
             self.new_item.rebuild()
             if self.item.connection_point is None:
@@ -4894,9 +4934,13 @@ class ConnectionPoint(QGraphicsEllipseItem):
         if not self.parent_element: return
         rect = self.parent_element.boundingRect()
         if self.point_type == "image_top":
-            self.setPos(rect.center().x(), rect.top())
+            ox = float(getattr(self.parent_element, 'cp_offset_x', 0.0) or 0.0)
+            oy = float(getattr(self.parent_element, 'cp_offset_y', 0.0) or 0.0)
+            self.setPos(rect.center().x() + ox, rect.top() + oy)
         elif self.point_type == "text_bottom":
-            self.setPos(rect.center().x(), rect.bottom())
+            ox = float(getattr(self.parent_element, 'cp_offset_x', 0.0) or 0.0)
+            oy = float(getattr(self.parent_element, 'cp_offset_y', 0.0) or 0.0)
+            self.setPos(rect.center().x() + ox, rect.bottom() + oy)
 
     def boundingRect(self):
         """扩大重绘范围，避免缩小时视觉被裁切"""
@@ -4954,9 +4998,13 @@ class ConnectionPoint(QGraphicsEllipseItem):
             return
         rect = self.parent_element.boundingRect()
         if self.point_type == "image_top":
-            self.setPos(rect.center().x(), rect.top())
+            ox = float(getattr(self.parent_element, 'cp_offset_x', 0.0) or 0.0)
+            oy = float(getattr(self.parent_element, 'cp_offset_y', 0.0) or 0.0)
+            self.setPos(rect.center().x() + ox, rect.top() + oy)
         elif self.point_type == "text_bottom":
-            self.setPos(rect.center().x(), rect.bottom())
+            ox = float(getattr(self.parent_element, 'cp_offset_x', 0.0) or 0.0)
+            oy = float(getattr(self.parent_element, 'cp_offset_y', 0.0) or 0.0)
+            self.setPos(rect.center().x() + ox, rect.bottom() + oy)
 
     def hoverEnterEvent(self, event):
         """鼠标悬停进入"""
@@ -5116,7 +5164,7 @@ class ConnectionPoint(QGraphicsEllipseItem):
 class VGenericConnector(QGraphicsPathItem):
     """通用连接线 - 支持任意两个元素之间的连接"""
     def __init__(self, item1, item2, connection_type="generic", line_width=None,
-                 point1=None, point2=None):
+                 point1=None, point2=None, line_color=None):
         super().__init__()
         self.item1 = item1
         self.item2 = item2
@@ -5124,7 +5172,7 @@ class VGenericConnector(QGraphicsPathItem):
         self.point2 = point2
         self.connection_type = connection_type  # "image-image", "text-text", "generic"
         self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
-        self.base_color = QColor(255, 0, 0, 200)  # 基础颜色
+        self.base_color = parse_connector_color(line_color) if line_color is not None else QColor(255, 0, 0, 200)  # 基础颜色
         self.setZValue(50)  # 显示在图片前面
         
         # 统一使用红色连接线
@@ -5158,6 +5206,15 @@ class VGenericConnector(QGraphicsPathItem):
         pen = self.pen()
         pen.setWidth(width)
         self.setPen(pen)
+        self.update()
+
+    def set_line_color(self, color):
+        """设置线条颜色"""
+        self.base_color = parse_connector_color(color)
+        if not self.isSelected():
+            pen = self.pen()
+            pen.setColor(self.base_color)
+            self.setPen(pen)
         self.update()
     
     def hoverEnterEvent(self, event):
@@ -5214,6 +5271,7 @@ class VGenericConnector(QGraphicsPathItem):
             width_actions[self.line_width].setCheckable(True)
             width_actions[self.line_width].setChecked(True)
         
+        color_action = menu.addAction("线条颜色...")
         menu.addSeparator()
         delete_action = menu.addAction("删除连接线")
         
@@ -5235,6 +5293,19 @@ class VGenericConnector(QGraphicsPathItem):
             width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
             if ok:
                 self.set_line_width(width)
+        elif action == color_action:
+            cur = QColor(self.base_color)
+            cur.setAlpha(255)
+            chosen = QColorDialog.getColor(cur, None, "选择线条颜色")
+            if chosen.isValid():
+                sc = self.scene()
+                sel_conns = [c for c in sc.selectedItems() if isinstance(c, (VImageTextConnector, VGenericConnector))] if sc else []
+                targets = sel_conns if (self in sel_conns and len(sel_conns) > 1) else [self]
+                for c in targets:
+                    if hasattr(c, 'set_line_color'):
+                        c.set_line_color(chosen.name())
+                if sc:
+                    sc.update()
         elif action == delete_action:
             if self.scene():
                 self.scene().remove_connector_item(self)
@@ -5316,12 +5387,12 @@ class VGenericConnector(QGraphicsPathItem):
 
 class VImageTextConnector(QGraphicsPathItem):
     """图文连接线- 连接图片顶部中点和文字底部中点"""
-    def __init__(self, image_item, text_item, line_width=None):
+    def __init__(self, image_item, text_item, line_width=None, line_color=None):
         super().__init__()
         self.image_item = image_item
         self.text_item = text_item
         self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
-        self.base_color = QColor(255, 100, 100, 200)  # 基础颜色
+        self.base_color = parse_connector_color(line_color) if line_color is not None else QColor(255, 100, 100, 200)  # 基础颜色
         self.setZValue(55)  # 显示在图片前面
         
         pen = QPen(self.base_color)
@@ -5352,6 +5423,15 @@ class VImageTextConnector(QGraphicsPathItem):
         pen = self.pen()
         pen.setWidth(width)
         self.setPen(pen)
+        self.update()
+
+    def set_line_color(self, color):
+        """设置线条颜色"""
+        self.base_color = parse_connector_color(color)
+        if not self.isSelected():
+            pen = self.pen()
+            pen.setColor(self.base_color)
+            self.setPen(pen)
         self.update()
     
     def hoverEnterEvent(self, event):
@@ -5408,6 +5488,7 @@ class VImageTextConnector(QGraphicsPathItem):
             width_actions[self.line_width].setCheckable(True)
             width_actions[self.line_width].setChecked(True)
         
+        color_action = menu.addAction("线条颜色...")
         menu.addSeparator()
         delete_action = menu.addAction("删除连接线")
         
@@ -5429,6 +5510,19 @@ class VImageTextConnector(QGraphicsPathItem):
             width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
             if ok:
                 self.set_line_width(width)
+        elif action == color_action:
+            cur = QColor(self.base_color)
+            cur.setAlpha(255)
+            chosen = QColorDialog.getColor(cur, None, "选择线条颜色")
+            if chosen.isValid():
+                sc = self.scene()
+                sel_conns = [c for c in sc.selectedItems() if isinstance(c, (VImageTextConnector, VGenericConnector))] if sc else []
+                targets = sel_conns if (self in sel_conns and len(sel_conns) > 1) else [self]
+                for c in targets:
+                    if hasattr(c, 'set_line_color'):
+                        c.set_line_color(chosen.name())
+                if sc:
+                    sc.update()
         elif action == delete_action:
             if self.scene():
                 self.scene().remove_connector_item(self)
@@ -6624,6 +6718,8 @@ class VTextItem(BaseElement):
         self.auto_height = True  # 是否自动调整高度
         self.manual_line_break = True  # 是否启用手动换行（响应\n字符）
         self.layer_eye_color = None  # 用户指定的层级眼睛颜色：yellow/red/green/None
+        self.cp_offset_x = 0.0  # 文字连接点水平微调偏移（px）
+        self.cp_offset_y = 0.0  # 文字连接点垂直微调偏移（px）
         
         # 列间距属性
         self.column_spacing = COLUMN_SPACING  # 列间距（所有列间距相同）
@@ -6832,6 +6928,95 @@ class VTextItem(BaseElement):
             self.connection_point.setVisible(effective_visible)
         for point in getattr(self, 'custom_connection_points', []):
             point.setVisible(effective_visible)
+
+    def set_cp_offset(self, ox, oy):
+        """设置文字连接点相对底部中点的微调偏移（px），并实时刷新连接点与连线"""
+        self.cp_offset_x = float(ox)
+        self.cp_offset_y = float(oy)
+        if self.connection_point:
+            self.connection_point.update_position()
+        sc = self.scene()
+        if sc:
+            sc.update_image_text_connectors(self)
+            sc.update()
+
+    def open_cp_offset_dialog(self):
+        """弹出文字连接点偏移微调对话框（支持实时预览与多选批量微调）"""
+        sc = self.scene()
+        sel_texts = [i for i in sc.selectedItems() if isinstance(i, VTextItem)] if sc else []
+        targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
+        orig_offsets = {t: (float(getattr(t, 'cp_offset_x', 0.0)), float(getattr(t, 'cp_offset_y', 0.0))) for t in targets}
+        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
+
+        # 临时显示连接点以便直观看到偏移位置
+        prev_vis = {}
+        for t in targets:
+            if t.connection_point:
+                prev_vis[t] = t.connection_point.isVisible()
+                t.connection_point.setVisible(True)
+
+        dlg = QDialog(parent_win)
+        dlg.setWindowTitle(f"文字连接点位置偏移{f'（{len(targets)} 个文字）' if len(targets) > 1 else ''}")
+        dlg.setMinimumWidth(300)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(10)
+
+        hint = QLabel("相对于文本框底部中点的微调偏移（右为正、下为正）：", dlg)
+        hint.setStyleSheet("color: #475569; font-size: 12px;")
+        vbox.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        spin_x = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_x.setRange(-1000.0, 1000.0)
+        spin_x.setDecimals(1)
+        spin_x.setSingleStep(1.0)
+        spin_x.setValue(float(getattr(self, 'cp_offset_x', 0.0)))
+
+        spin_y = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_y.setRange(-1000.0, 1000.0)
+        spin_y.setDecimals(1)
+        spin_y.setSingleStep(1.0)
+        spin_y.setValue(float(getattr(self, 'cp_offset_y', 0.0)))
+
+        form.addRow("水平偏移 X：", spin_x)
+        form.addRow("垂直偏移 Y：", spin_y)
+        vbox.addLayout(form)
+
+        def _apply_live():
+            ox, oy = spin_x.value(), spin_y.value()
+            for t in targets:
+                t.set_cp_offset(ox, oy)
+
+        spin_x.valueChanged.connect(lambda _v: _apply_live())
+        spin_y.valueChanged.connect(lambda _v: _apply_live())
+
+        btn_row = QHBoxLayout()
+        btn_reset = QPushButton("归零重置", dlg)
+        btn_reset.clicked.connect(lambda: (spin_x.setValue(0.0), spin_y.setValue(0.0)))
+        btn_row.addWidget(btn_reset)
+        btn_row.addStretch(1)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        btn_row.addWidget(btns)
+        vbox.addLayout(btn_row)
+
+        accepted = (dlg.exec() == QDialog.DialogCode.Accepted)
+        if not accepted:
+            for t, (ox, oy) in orig_offsets.items():
+                t.set_cp_offset(ox, oy)
+        for t, was_vis in prev_vis.items():
+            if t.connection_point:
+                t.connection_point.setVisible(was_vis)
+        if accepted and sc:
+            sc._show_status_message(
+                f"已更新 {len(targets)} 个文字的连接点偏移：X={spin_x.value():g}px, Y={spin_y.value():g}px",
+                3000
+            )
         
     def _show_context_menu(self, global_pos, item_pos=None):
         self._build_text_context_menu(global_pos, item_pos)
@@ -6879,8 +7064,10 @@ class VTextItem(BaseElement):
         else:
             toggle_connection_point_action = menu.addAction("显示连接点")
         if self.connection_point:
+            offset_cp_action = menu.addAction("连接点位置偏移...")
             delete_cp_action = menu.addAction("删除连接点")
         else:
+            offset_cp_action = None
             delete_cp_action = None
         menu.addSeparator()
         
@@ -6991,6 +7178,8 @@ class VTextItem(BaseElement):
                 mw_for_preset.add_current_text_format_preset()
         elif action == toggle_connection_point_action:
             self.toggle_connection_point()
+        elif offset_cp_action and action == offset_cp_action:
+            self.open_cp_offset_dialog()
         elif delete_cp_action and action == delete_cp_action:
             self.delete_connection_point()
         elif action == copy_action:
@@ -7877,6 +8066,8 @@ class VImageItem(BaseElement):
         self._orig_ratio = 1.0
         self.image_opacity = 1.0
         self.locked = False
+        self.cp_offset_x = 0.0  # 图片连接点水平微调偏移（px）
+        self.cp_offset_y = 0.0  # 图片连接点垂直微调偏移（px）
 
         pix = QPixmap(path)
         if not pix.isNull():
@@ -8077,6 +8268,94 @@ class VImageItem(BaseElement):
             else:
                 print("图片连接点已显示")
 
+    def set_cp_offset(self, ox, oy):
+        """设置图片连接点相对顶部中点的微调偏移（px），并实时刷新连接点与连线"""
+        self.cp_offset_x = float(ox)
+        self.cp_offset_y = float(oy)
+        if self.connection_point:
+            self.connection_point.update_position()
+        sc = self.scene()
+        if sc:
+            sc.update_image_text_connectors(self)
+            sc.update()
+
+    def open_cp_offset_dialog(self):
+        """弹出图片连接点偏移微调对话框（支持实时预览与多选批量微调）"""
+        sc = self.scene()
+        sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
+        targets = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
+        orig_offsets = {img: (float(getattr(img, 'cp_offset_x', 0.0)), float(getattr(img, 'cp_offset_y', 0.0))) for img in targets}
+        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
+
+        prev_vis = {}
+        for img in targets:
+            if img.connection_point:
+                prev_vis[img] = img.connection_point.isVisible()
+                img.connection_point.setVisible(True)
+
+        dlg = QDialog(parent_win)
+        dlg.setWindowTitle(f"图片连接点位置偏移{f'（{len(targets)} 张图片）' if len(targets) > 1 else ''}")
+        dlg.setMinimumWidth(300)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(10)
+
+        hint = QLabel("相对于图片顶部中点的微调偏移（右为正、下为正）：", dlg)
+        hint.setStyleSheet("color: #475569; font-size: 12px;")
+        vbox.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        spin_x = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_x.setRange(-1000.0, 1000.0)
+        spin_x.setDecimals(1)
+        spin_x.setSingleStep(1.0)
+        spin_x.setValue(float(getattr(self, 'cp_offset_x', 0.0)))
+
+        spin_y = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_y.setRange(-1000.0, 1000.0)
+        spin_y.setDecimals(1)
+        spin_y.setSingleStep(1.0)
+        spin_y.setValue(float(getattr(self, 'cp_offset_y', 0.0)))
+
+        form.addRow("水平偏移 X：", spin_x)
+        form.addRow("垂直偏移 Y：", spin_y)
+        vbox.addLayout(form)
+
+        def _apply_live():
+            ox, oy = spin_x.value(), spin_y.value()
+            for img in targets:
+                img.set_cp_offset(ox, oy)
+
+        spin_x.valueChanged.connect(lambda _v: _apply_live())
+        spin_y.valueChanged.connect(lambda _v: _apply_live())
+
+        btn_row = QHBoxLayout()
+        btn_reset = QPushButton("归零重置", dlg)
+        btn_reset.clicked.connect(lambda: (spin_x.setValue(0.0), spin_y.setValue(0.0)))
+        btn_row.addWidget(btn_reset)
+        btn_row.addStretch(1)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        btn_row.addWidget(btns)
+        vbox.addLayout(btn_row)
+
+        accepted = (dlg.exec() == QDialog.DialogCode.Accepted)
+        if not accepted:
+            for img, (ox, oy) in orig_offsets.items():
+                img.set_cp_offset(ox, oy)
+        for img, was_vis in prev_vis.items():
+            if img.connection_point:
+                img.connection_point.setVisible(was_vis)
+        if accepted and sc:
+            sc._show_status_message(
+                f"已更新 {len(targets)} 张图片的连接点偏移：X={spin_x.value():g}px, Y={spin_y.value():g}px",
+                3000
+            )
+
     def _get_child_texts(self):
         """获取直接子文字元素列表"""
         return [c for c in self.childItems() if isinstance(c, VTextItem)]
@@ -8095,6 +8374,8 @@ class VImageItem(BaseElement):
                 t_menu.addAction("对话框编辑").triggered.connect(lambda _, t=txt: t.start_dialog_editing())
                 t_menu.addSeparator()
                 t_menu.addAction("文字样式设置...").triggered.connect(lambda _, t=txt: t.open_text_style_dialog())
+                if txt.connection_point:
+                    t_menu.addAction("连接点位置偏移...").triggered.connect(lambda _, t=txt: t.open_cp_offset_dialog())
                 t_menu.addSeparator()
                 t_menu.addAction("解除父级绑定").triggered.connect(
                     lambda _, t=txt: (
@@ -8115,6 +8396,7 @@ class VImageItem(BaseElement):
         if self.connection_point:
             lbl = "隐藏连接点" if self.connection_point.isVisible() else "显示连接点"
             menu.addAction(lbl).triggered.connect(self.toggle_connection_point)
+            menu.addAction("连接点位置偏移...").triggered.connect(self.open_cp_offset_dialog)
             menu.addAction("删除连接点").triggered.connect(self.delete_connection_point)
             menu.addSeparator()
 
@@ -10606,6 +10888,8 @@ class LayoutScene(QGraphicsScene):
                 clone.auto_height = item.auto_height
                 clone.manual_line_break = item.manual_line_break
                 clone.layer_eye_color = getattr(item, 'layer_eye_color', None)
+                clone.cp_offset_x = float(getattr(item, 'cp_offset_x', 0.0))
+                clone.cp_offset_y = float(getattr(item, 'cp_offset_y', 0.0))
                 clone.rebuild()
                 # 同步连接点状态（删除/可见性）
                 if item.connection_point is None:
@@ -10615,6 +10899,7 @@ class LayoutScene(QGraphicsScene):
             elif isinstance(item, VImageItem):
                 clone = VImageItem(item.file_path, item.target_width, getattr(item, 'target_height', 0))
                 clone.set_opacity(item.image_opacity)
+                clone.set_cp_offset(float(getattr(item, 'cp_offset_x', 0.0)), float(getattr(item, 'cp_offset_y', 0.0)))
                 if item.locked:
                     clone.set_locked(True)
                 # 同步连接点状态（删除/可见性）
@@ -11024,7 +11309,8 @@ class LayoutScene(QGraphicsScene):
             'generic',
             self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
             source_point,
-            foot_point
+            foot_point,
+            line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR)
         )
         return AddPerpendicularToGuideCommand(self, conn, foot_point, created_new_point=created_new)
 
@@ -11663,7 +11949,8 @@ class LayoutScene(QGraphicsScene):
             conn = VGenericConnector(
                 source_item, target_item, 'generic',
                 self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
-                source_point, target_point
+                source_point, target_point,
+                line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR)
             )
             self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
             return True
@@ -11683,7 +11970,8 @@ class LayoutScene(QGraphicsScene):
             conn = VGenericConnector(
                 source_item, target_item, connection_type,
                 self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH),
-                source_point, target_point
+                source_point, target_point,
+                line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR)
             )
             self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
             return True
@@ -11810,7 +12098,7 @@ class LayoutScene(QGraphicsScene):
                     print("这两个元素已经连接")
                     return
 
-        conn = VImageTextConnector(image_item, text_item, self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
+        conn = VImageTextConnector(image_item, text_item, self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR))
         self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("图文连接已创建")
     
@@ -11831,7 +12119,7 @@ class LayoutScene(QGraphicsScene):
                     print("这两个图片已经连接")
                     return
 
-        conn = VGenericConnector(image1, image2, "image-image", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
+        conn = VGenericConnector(image1, image2, "image-image", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR))
         self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("图片-图片连接已创建")
 
@@ -11852,7 +12140,7 @@ class LayoutScene(QGraphicsScene):
                     print("这两个文字已经连接")
                     return
 
-        conn = VGenericConnector(text1, text2, "text-text", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH))
+        conn = VGenericConnector(text1, text2, "text-text", self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR))
         self.undo_stack.push_and_execute(AddConnectorCommand(self, conn))
         print("文字-文字连接已创建")
     
@@ -12208,6 +12496,8 @@ class LayoutScene(QGraphicsScene):
                     'auto_height': item.auto_height,
                     'manual_line_break': item.manual_line_break,
                     'layer_eye_color': getattr(item, 'layer_eye_color', None),
+                    'cp_offset_x': float(getattr(item, 'cp_offset_x', 0.0)),
+                    'cp_offset_y': float(getattr(item, 'cp_offset_y', 0.0)),
                     'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -12225,6 +12515,8 @@ class LayoutScene(QGraphicsScene):
                     'path': item.file_path,
                     'width': item.target_width, 'height': getattr(item, 'target_height', item.boundingRect().height()),
                     'opacity': getattr(item, 'image_opacity', 1.0),
+                    'cp_offset_x': float(getattr(item, 'cp_offset_x', 0.0)),
+                    'cp_offset_y': float(getattr(item, 'cp_offset_y', 0.0)),
                     'connection_point_deleted': connection_point_deleted,
                     'connection_point_visible': connection_point_visible,
                     'scene_pos': (item.scenePos().x(), item.scenePos().y()),
@@ -12276,7 +12568,7 @@ class LayoutScene(QGraphicsScene):
                 new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                 new_item.font_family = item_data['font_family']
                 new_item.text_color = QColor(item_data['text_color'])
-                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                for k in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color', 'cp_offset_x', 'cp_offset_y'):
                     if k in item_data:
                         setattr(new_item, k, item_data[k])
                 new_item.rebuild()
@@ -12284,6 +12576,8 @@ class LayoutScene(QGraphicsScene):
                 new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
                 if 'opacity' in item_data:
                     new_item.set_opacity(item_data['opacity'])
+                if 'cp_offset_x' in item_data or 'cp_offset_y' in item_data:
+                    new_item.set_cp_offset(float(item_data.get('cp_offset_x', 0.0)), float(item_data.get('cp_offset_y', 0.0)))
 
             if new_item:
                 offset_x = item_data['scene_pos'][0] - min_x
@@ -12359,18 +12653,19 @@ class LayoutScene(QGraphicsScene):
                 if (conn.item1 == item1 and conn.item2 == item2) or \
                    (conn.item1 == item2 and conn.item2 == item1):
                     return None
+        _def_lc = self.config_manager.get('default_line_color', DEFAULT_LINE_COLOR)
         if isinstance(item1, VImageItem) and isinstance(item2, VTextItem):
             return AddConnectorCommand(self, VImageTextConnector(item1, item2,
-                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=_def_lc))
         elif isinstance(item1, VTextItem) and isinstance(item2, VImageItem):
             return AddConnectorCommand(self, VImageTextConnector(item2, item1,
-                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=_def_lc))
         elif isinstance(item1, VImageItem) and isinstance(item2, VImageItem):
             return AddConnectorCommand(self, VGenericConnector(item1, item2, "image-image",
-                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=_def_lc))
         elif isinstance(item1, VTextItem) and isinstance(item2, VTextItem):
             return AddConnectorCommand(self, VGenericConnector(item1, item2, "text-text",
-                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH)))
+                self.config_manager.get('default_line_width', DEFAULT_LINE_WIDTH), line_color=_def_lc))
         return None
 
     def _has_parent_child_relation(self, item1, item2):
@@ -16402,33 +16697,168 @@ class MainWindow(QMainWindow):
         self._save_window_state()
         event.accept()
 
-    def _setup_searchable_font_combo(self, combo, default_font):
-        """为字体下拉框启用关键词模糊搜索（输入任意中文/英文片段即可下拉匹配对应字体并一键应用）"""
+    def _make_fav_star_icon(self, filled=True):
+        """生成常用字体星标小图标（filled=True 金色 ★，filled=False 浅灰 ☆）"""
+        cache = getattr(self, '_cached_fav_star_icons', None)
+        if cache is None:
+            cache = {}
+            self._cached_fav_star_icons = cache
+        key = bool(filled)
+        if key in cache:
+            return cache[key]
+        pix = QPixmap(16, 16)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QColor("#f59e0b") if key else QColor("#94a3b8"))
+        p.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold if key else QFont.Weight.Normal))
+        p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "★" if key else "☆")
+        p.end()
+        icon = QIcon(pix)
+        cache[key] = icon
+        return icon
+
+    def _get_favorite_fonts(self):
+        """获取用户固定的常用字体列表（按顺序去重且过滤本机已安装字体）"""
         if not hasattr(self, '_all_font_families') or not self._all_font_families:
             self._all_font_families = list(QFontDatabase.families())
             self._all_font_families_lower = {f.lower(): f for f in self._all_font_families}
-        families = self._all_font_families
+        raw = self.scene.config_manager.get('favorite_fonts', []) if self.scene else []
+        if not isinstance(raw, list):
+            raw = []
+        favs = []
+        seen = set()
+        for name in raw:
+            exact = self._all_font_families_lower.get(str(name).strip().lower())
+            if exact and exact not in seen:
+                favs.append(exact)
+                seen.add(exact)
+        return favs
 
-        combo.setEditable(True)
-        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        combo.addItems(families)
+    def _populate_font_combo(self, combo, keep_text=None):
+        """刷新字体下拉列表：常用字体带星标固定置顶 + 分隔线 + 其余系统字体"""
+        if combo is None:
+            return
+        if not hasattr(self, '_all_font_families') or not self._all_font_families:
+            self._all_font_families = list(QFontDatabase.families())
+            self._all_font_families_lower = {f.lower(): f for f in self._all_font_families}
+        cur_text = keep_text if keep_text is not None else combo.currentText()
+        favs = self._get_favorite_fonts()
+        fav_set = set(favs)
+        others = [f for f in self._all_font_families if f not in fav_set]
+        ordered_all = favs + others
+        star_filled = self._make_fav_star_icon(True)
+        star_empty = self._make_fav_star_icon(False)
 
-        idx = combo.findText(default_font)
+        combo.blockSignals(True)
+        combo.clear()
+        for fam in favs:
+            combo.addItem(star_filled, fam)
+        if favs and others:
+            combo.insertSeparator(len(favs))
+        for fam in others:
+            combo.addItem(star_empty, fam)
+        idx = combo.findText(cur_text)
         if idx >= 0:
             combo.setCurrentIndex(idx)
         else:
-            combo.setCurrentText(default_font)
+            combo.setCurrentText(cur_text)
+        combo.blockSignals(False)
 
-        completer = QCompleter(families, combo)
+        comp = combo.completer()
+        if comp is not None:
+            comp.setModel(QStringListModel(ordered_all, comp))
+
+    def _refresh_all_font_combos(self, active_family=None):
+        """同步刷新顶部工具栏与右侧属性面板的字体列表和星标状态"""
+        for combo in (getattr(self, 'font_combo', None), getattr(self, 'toolbar_font_combo', None)):
+            if combo is not None:
+                self._populate_font_combo(combo, keep_text=active_family if active_family is not None else combo.currentText())
+        cur = active_family
+        if not cur:
+            src_combo = getattr(self, 'toolbar_font_combo', None) or getattr(self, 'font_combo', None)
+            cur = src_combo.currentText() if src_combo is not None else ''
+        self._sync_fav_font_pin_buttons(cur)
+
+    def _sync_fav_font_pin_buttons(self, family_name=None):
+        """根据当前字体是否在常用列表中更新输入框前置 ☆ / ★ 可点击符号"""
+        if family_name is None:
+            src_combo = getattr(self, 'toolbar_font_combo', None) or getattr(self, 'font_combo', None)
+            family_name = src_combo.currentText() if src_combo is not None else ''
+        favs_lower = {f.lower() for f in self._get_favorite_fonts()}
+        is_fav = bool(family_name and str(family_name).strip().lower() in favs_lower)
+        icon = self._make_fav_star_icon(is_fav)
+        tip = (
+            f"★ 常用字体「{family_name}」（点击取消固定）"
+            if is_fav
+            else f"☆ 非常用字体「{family_name}」（点击固定为常用并置顶）"
+        )
+        for combo in (getattr(self, 'toolbar_font_combo', None), getattr(self, 'font_combo', None)):
+            if combo is None:
+                continue
+            act = getattr(combo, '_fav_leading_action', None)
+            if act is not None:
+                act.setIcon(icon)
+                act.setToolTip(tip)
+
+    def toggle_current_font_favorite(self, source_combo=None):
+        """一键固定/取消固定当前字体到常用字体列表（自动保存并置顶显示）"""
+        combo = source_combo or getattr(self, 'toolbar_font_combo', None) or getattr(self, 'font_combo', None)
+        if combo is None:
+            return
+        raw_name = (combo.currentText() or "").strip()
+        exact = getattr(self, '_all_font_families_lower', {}).get(raw_name.lower())
+        if not exact:
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.showMessage("请先选择有效的系统字体后再固定为常用字体", 3000)
+            self._sync_fav_font_pin_buttons(raw_name)
+            return
+        favs = self._get_favorite_fonts()
+        if exact in favs:
+            favs.remove(exact)
+            msg = f"已取消固定常用字体：{exact}"
+        else:
+            favs.insert(0, exact)
+            msg = f"已将「{exact}」固定为常用字体（置顶显示）"
+        self._set_shared_config('favorite_fonts', favs)
+        self._refresh_all_font_combos(active_family=exact)
+        if hasattr(self, 'status_bar') and self.status_bar:
+            self.status_bar.showMessage(msg, 3000)
+
+    def _setup_searchable_font_combo(self, combo, default_font):
+        """为字体下拉框启用常用字体置顶 + 中英文关键词模糊搜索"""
+        if not hasattr(self, '_all_font_families') or not self._all_font_families:
+            self._all_font_families = list(QFontDatabase.families())
+            self._all_font_families_lower = {f.lower(): f for f in self._all_font_families}
+
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # 隐藏 QComboBox 输入框自带的只读项图标（避免与内置可点击 ☆/★ 重复显示两个星标），同时保留下拉列表中的星标图标
+        combo.setIconSize(QSize(0, 0))
+        if combo.view() is not None:
+            combo.view().setIconSize(QSize(16, 16))
+
+        completer = QCompleter(self._all_font_families, combo)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         completer.setMaxVisibleItems(12)
         combo.setCompleter(completer)
 
+        self._populate_font_combo(combo, keep_text=default_font)
+
         le = combo.lineEdit()
         if le is not None:
             le.setPlaceholderText("输入关键词搜字体...")
+            fav_act = le.addAction(self._make_fav_star_icon(False), QLineEdit.ActionPosition.LeadingPosition)
+            fav_act.triggered.connect(lambda _=False, c=combo: self.toggle_current_font_favorite(c))
+            combo._fav_leading_action = fav_act
+            le.setTextMargins(0, 0, 0, 0)
+            for tb_child in le.findChildren(QToolButton):
+                tb_child.setObjectName("fontInlineStarBtn")
+                tb_child.setFixedSize(18, 18)
+                tb_child.setIconSize(QSize(16, 16))
+                tb_child.setCursor(Qt.CursorShape.PointingHandCursor)
 
         def _apply_font_name(name):
             name_str = (name or "").strip()
@@ -16448,9 +16878,10 @@ class MainWindow(QMainWindow):
             if exact:
                 _apply_font_name(exact)
                 return
-            # 未输全时按回车直接采用首条匹配字体
+            # 优先匹配已固定的常用字体，再匹配其余系统字体
             kw_low = kw.lower()
-            matched = next((f for f in families if kw_low in f.lower()), None)
+            ordered = self._get_favorite_fonts() + self._all_font_families
+            matched = next((f for f in ordered if kw_low in f.lower()), None)
             if matched:
                 combo.blockSignals(True)
                 combo.setCurrentText(matched)
@@ -16484,6 +16915,7 @@ class MainWindow(QMainWindow):
         self.font_combo.setMinimumWidth(120)
         default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
         self._setup_searchable_font_combo(self.font_combo, default_font)
+        self._sync_fav_font_pin_buttons(default_font)
         text_layout.addRow("字体", self.font_combo)
 
         self.font_size_spin = MinimalSpinBox()
@@ -17151,11 +17583,12 @@ class MainWindow(QMainWindow):
         top_toolbar.addWidget(font_lbl)
         self.toolbar_font_combo = QComboBox()
         self.toolbar_font_combo.setObjectName("toolbarFontCombo")
-        self.toolbar_font_combo.setFixedWidth(132)
-        self.toolbar_font_combo.setToolTip("字体：输入中文/英文关键词即可模糊搜索并切换选中文字字体")
+        self.toolbar_font_combo.setFixedWidth(146)
+        self.toolbar_font_combo.setToolTip("字体：点击左侧 ☆/★ 可固定或取消常用字体，输入关键词可模糊搜索")
         default_font_tb = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
         self._setup_searchable_font_combo(self.toolbar_font_combo, default_font_tb)
         top_toolbar.addWidget(self.toolbar_font_combo)
+        self._sync_fav_font_pin_buttons(default_font_tb)
 
         size_lbl = QLabel("字号:")
         size_lbl.setObjectName("toolbarHint")
@@ -17739,6 +18172,10 @@ class MainWindow(QMainWindow):
         set_line_width_action = QAction('连线粗细...', self)
         set_line_width_action.triggered.connect(lambda: self.set_line_width())
         cp_style_submenu.addAction(set_line_width_action)
+
+        set_line_color_action = QAction('连线默认颜色...', self)
+        set_line_color_action.triggered.connect(lambda: self.set_default_line_color())
+        cp_style_submenu.addAction(set_line_color_action)
 
         # 二级：组合素材与 Excel 映射
         asset_submenu = connect_asset_menu.addMenu('素材库与映射')
@@ -19820,7 +20257,7 @@ class MainWindow(QMainWindow):
                     new_item = VTextItem(item_data['text'], item_data['font_size'], item_data['box_height'])
                     new_item.font_family = item_data['font_family']
                     new_item.text_color = QColor(item_data['text_color'])
-                    for key in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color'):
+                    for key in ('chars_per_column', 'column_spacing', 'character_spacing', 'auto_height', 'manual_line_break', 'layer_eye_color', 'cp_offset_x', 'cp_offset_y'):
                         if key in item_data:
                             setattr(new_item, key, item_data[key])
                     new_item.rebuild()
@@ -19828,6 +20265,8 @@ class MainWindow(QMainWindow):
                     new_item = VImageItem(item_data['path'], item_data['width'], item_data.get('height', 0))
                     if 'opacity' in item_data:
                         new_item.set_opacity(item_data['opacity'])
+                    if 'cp_offset_x' in item_data or 'cp_offset_y' in item_data:
+                        new_item.set_cp_offset(float(item_data.get('cp_offset_x', 0.0)), float(item_data.get('cp_offset_y', 0.0)))
                 elif item_data['type'] == 'VImageItem':
                     image_path = item_data.get('path', '')
                     if image_path and not os.path.isabs(image_path):
@@ -19836,6 +20275,8 @@ class MainWindow(QMainWindow):
                         new_item = VImageItem(image_path, item_data['width'], item_data.get('height', 0))
                         if 'opacity' in item_data:
                             new_item.set_opacity(item_data['opacity'])
+                        if 'cp_offset_x' in item_data or 'cp_offset_y' in item_data:
+                            new_item.set_cp_offset(float(item_data.get('cp_offset_x', 0.0)), float(item_data.get('cp_offset_y', 0.0)))
 
                 if new_item:
                     off_x = item_data['scene_pos'][0] - min_x
@@ -20230,6 +20671,8 @@ class MainWindow(QMainWindow):
                 combo.blockSignals(True)
                 combo.setCurrentText(family_name)
                 combo.blockSignals(False)
+        if hasattr(self, '_sync_fav_font_pin_buttons'):
+            self._sync_fav_font_pin_buttons(family_name)
 
     def _sync_font_size_widgets(self, size_val):
         for spin in (getattr(self, 'font_size_spin', None), getattr(self, 'toolbar_font_size_spin', None)):
@@ -20410,6 +20853,38 @@ class MainWindow(QMainWindow):
                 conn.set_line_width(width)
                 count += 1
         print(f"连线粗细已设置为 {width}px，共更新 {count} 条")
+
+    def set_default_line_color(self):
+        """设置新建连线的默认颜色，并可选一键同步更新当前画布所有已有连线"""
+        current_hex = self.scene.config_manager.get('default_line_color', DEFAULT_LINE_COLOR)
+        init_color = QColor(current_hex)
+        if not init_color.isValid():
+            init_color = QColor(DEFAULT_LINE_COLOR)
+        chosen = QColorDialog.getColor(init_color, self, "选择连线默认颜色")
+        if not chosen.isValid():
+            return
+        hex_color = chosen.name()
+        self._set_shared_config('default_line_color', hex_color)
+        existing = [c for c in self.scene.image_text_connectors if hasattr(c, 'set_line_color')]
+        updated = 0
+        if existing:
+            reply = QMessageBox.question(
+                self,
+                "应用到已有连线",
+                f"已将默认连线颜色设为 {hex_color}。\n是否同时将当前画布已有的 {len(existing)} 条连线也更改为该颜色？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for conn in existing:
+                    conn.set_line_color(hex_color)
+                    updated += 1
+                self.scene.update()
+        if hasattr(self, 'status_bar') and self.status_bar:
+            if updated:
+                self.status_bar.showMessage(f"连线默认颜色已设为 {hex_color}，并已同步更新 {updated} 条已有连线", 3500)
+            else:
+                self.status_bar.showMessage(f"连线默认颜色已设为 {hex_color}（后续新建连线将使用此颜色）", 3500)
     
     def set_canvas_size(self):
         current_rect = self.scene.sceneRect()
@@ -22324,6 +22799,48 @@ class MainWindow(QMainWindow):
         QToolBar#toolbar_top QToolButton#psAlignBtn:pressed {
             background: #dbeafe;
             border-color: #0d6efd;
+        }
+        QToolButton#favFontPinBtn {
+            background: #ffffff;
+            border: 1px solid #dce1e8;
+            border-radius: 6px;
+            color: #94a3b8;
+            font-size: 14px;
+            padding: 0px;
+            min-width: 24px;
+            min-height: 24px;
+        }
+        QToolButton#favFontPinBtn:hover {
+            background: #fffbeb;
+            border-color: #f59e0b;
+            color: #f59e0b;
+        }
+        QToolButton#favFontPinBtn:checked {
+            background: #fef3c7;
+            border-color: #f59e0b;
+            color: #d97706;
+        }
+        QToolBar#toolbar_top QComboBox QLineEdit QToolButton#fontInlineStarBtn,
+        QComboBox QLineEdit QToolButton#fontInlineStarBtn {
+            background: transparent;
+            border: none;
+            border-radius: 3px;
+            padding: 0px;
+            margin: 0px;
+            min-width: 18px;
+            max-width: 18px;
+            min-height: 18px;
+            max-height: 18px;
+        }
+        QToolBar#toolbar_top QComboBox QLineEdit QToolButton#fontInlineStarBtn:hover,
+        QComboBox QLineEdit QToolButton#fontInlineStarBtn:hover {
+            background: #fef3c7;
+            border: none;
+        }
+        QToolBar#toolbar_top QComboBox QLineEdit QToolButton#fontInlineStarBtn:pressed,
+        QComboBox QLineEdit QToolButton#fontInlineStarBtn:pressed {
+            background: #fde68a;
+            border: none;
         }
 
         QToolBar#toolbar_top::separator {
