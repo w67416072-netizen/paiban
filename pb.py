@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-123
+# -*- coding: utf-8 -*-
 import sys
 import json
 import math
@@ -325,6 +325,7 @@ class ConfigManager:
             'startup_horizontal_guides': [],  # 启动时横向辅助线Y坐标（场景像素）
             'startup_horizontal_guides_unit': 'px',  # 启动横向辅助线输入单位：px / mm
             'display_unit': 'mm',  # 全局显示/输入单位：px / mm
+            'ruler_origin_mode': 'cdr',  # 标尺原点模式：cdr（左下角Y向上）/ top_left（左上角Y向下）
             'default_save_format': 'pdf',  # 默认保存格式：'pdf'（内嵌工程可编辑PDF） / 'vlayout'（纯工程文件）
             'smart_brush_radius': 18,  # 智能笔刷默认大小
             'default_save_dir': '',  # 默认保存目录
@@ -8881,10 +8882,23 @@ class GuideItem(QGraphicsItem):
         self._snap_active = False
         self._update_pos()
 
+    def _is_cdr_y_mode(self):
+        sc = self.scene()
+        if self.orientation != Qt.Orientation.Horizontal or not sc:
+            return False
+        if hasattr(sc, 'config_manager'):
+            return sc.config_manager.get('ruler_origin_mode', 'cdr') == 'cdr'
+        return True
+
+    def _display_px_value(self):
+        if self._is_cdr_y_mode():
+            return float(self.scene().sceneRect().bottom() - self.pos_value)
+        return float(self.pos_value)
+
     def format_coord_text(self, detailed=True):
-        """格式化辅助线的 X 或 Y 坐标文本（同时支持 px 与 mm 显示）"""
+        """格式化辅助线的 X 或 Y 坐标文本（同时支持 px 与 mm 显示，遵循标尺原点方向）"""
         axis = "Y" if self.orientation == Qt.Orientation.Horizontal else "X"
-        px_val = float(self.pos_value)
+        px_val = self._display_px_value()
         mm_val = px_val * 25.4 / CORELDRAW_EXPORT_DPI
         unit = 'mm'
         if self.scene() and hasattr(self.scene(), 'config_manager'):
@@ -9090,7 +9104,8 @@ class GuideItem(QGraphicsItem):
         spin = MinimalDoubleSpinBox(dlg, suffix=unit)
         spin.setDecimals(2 if unit == 'mm' else 1)
         spin.setRange(-99999.0, 99999.0)
-        init_val = self.pos_value * 25.4 / CORELDRAW_EXPORT_DPI if unit == 'mm' else float(self.pos_value)
+        disp_px = self._display_px_value()
+        init_val = disp_px * 25.4 / CORELDRAW_EXPORT_DPI if unit == 'mm' else float(disp_px)
         spin.setValue(init_val)
         spin.selectAll()
 
@@ -9101,10 +9116,11 @@ class GuideItem(QGraphicsItem):
             cur_u = unit_combo.currentData()
             spin.setSuffix(cur_u)
             spin.setDecimals(2 if cur_u == 'mm' else 1)
+            d_px = self._display_px_value()
             if cur_u == 'mm':
-                spin.setValue(self.pos_value * 25.4 / CORELDRAW_EXPORT_DPI)
+                spin.setValue(d_px * 25.4 / CORELDRAW_EXPORT_DPI)
             else:
-                spin.setValue(float(self.pos_value))
+                spin.setValue(float(d_px))
 
         unit_combo.currentIndexChanged.connect(on_unit_changed)
         form.addRow(info_lbl)
@@ -9122,7 +9138,11 @@ class GuideItem(QGraphicsItem):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             chosen_u = unit_combo.currentData()
             val = spin.value()
-            self.pos_value = val * CORELDRAW_EXPORT_DPI / 25.4 if chosen_u == 'mm' else val
+            target_px = val * CORELDRAW_EXPORT_DPI / 25.4 if chosen_u == 'mm' else val
+            if self._is_cdr_y_mode():
+                self.pos_value = sc.sceneRect().bottom() - target_px
+            else:
+                self.pos_value = target_px
             self._sync_perp_points_and_update()
 
     def _show_context_menu(self, global_pos):
@@ -13988,79 +14008,192 @@ class LayoutView(QGraphicsView):
         painter.restore()
 
     def _draw_rulers(self, painter):
-        """在 viewport 上绘制标尺"""
+        """在 viewport 上绘制标尺（支持 CDR 左下角原点、次级细分刻度、竖尺文字旋转 90°）"""
         R = self.RULER_SIZE
         vp = self.viewport().rect()
+        sc = self.scene()
+        if not sc:
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
-        # 背景
+        # 配色
         ruler_color = QColor(50, 50, 55)
-        tick_color = QColor(180, 180, 180)
-        text_color = QColor(200, 200, 200)
+        border_color = QColor(85, 85, 92)
+        major_tick_color = QColor(195, 195, 205)
+        mid_tick_color = QColor(145, 145, 155)
+        minor_tick_color = QColor(115, 115, 125)
+        text_color = QColor(215, 215, 222)
         corner_color = QColor(40, 40, 45)
 
-        # 水平标尺（顶部）
+        # 水平标尺（顶部）与垂直标尺（左侧）背景
         painter.fillRect(R, 0, vp.width() - R, R, ruler_color)
-        # 垂直标尺（左侧）
         painter.fillRect(0, R, R, vp.height() - R, ruler_color)
-        # 左上角
-        painter.fillRect(0, 0, R, R, corner_color)
+        # 标尺内边分割线
+        painter.setPen(QPen(border_color, 1))
+        painter.drawLine(R, R - 1, vp.width(), R - 1)
+        painter.drawLine(R - 1, R, R - 1, vp.height())
 
-        painter.setPen(QPen(tick_color, 1))
         font = QFont("Arial", 7)
         painter.setFont(font)
-        painter.setPen(text_color)
-        display_unit = self.scene().config_manager.get('display_unit', 'mm')
-        painter.drawText(3, R - 5, "mm" if display_unit == 'mm' else "px")
+        display_unit = sc.config_manager.get('display_unit', 'mm')
+        is_cdr_origin = (sc.config_manager.get('ruler_origin_mode', 'cdr') == 'cdr')
 
-        # 水平刻度
+        step, sub_div = self._ruler_step_and_sub()
+        sub_step = step / sub_div if sub_div > 1 else step
+        half_idx = (sub_div // 2) if (sub_div % 2 == 0) else -1
+
+        # ── 水平标尺（顶部：X 向右递增）──────────────────────────
+        painter.save()
+        painter.setClipRect(R, 0, max(0, vp.width() - R), R)
         scene_left = self.mapToScene(QPoint(R, 0)).x()
         scene_right = self.mapToScene(QPoint(vp.width(), 0)).x()
-        step = self._ruler_step()
         x = math.floor(scene_left / step) * step
-        while x <= scene_right:
+        while x <= scene_right + step:
             vx = self.mapFromScene(QPointF(x, 0)).x()
-            painter.setPen(QPen(tick_color, 1))
-            painter.drawLine(vx, R - 6, vx, R)
-            if vx > R + 2:
+            if vx >= R:
+                painter.setPen(QPen(major_tick_color, 1))
+                painter.drawLine(vx, R - 8, vx, R)
                 painter.setPen(text_color)
-                painter.drawText(vx + 2, R - 2, self._format_ruler_label(x))
+                painter.drawText(vx + 2, 10, self._format_ruler_label(x))
+            # 次级细分刻度
+            if sub_div > 1:
+                for i in range(1, sub_div):
+                    sx = x + i * sub_step
+                    if sx > scene_right:
+                        break
+                    svx = self.mapFromScene(QPointF(sx, 0)).x()
+                    if svx < R:
+                        continue
+                    if i == half_idx:
+                        painter.setPen(QPen(mid_tick_color, 1))
+                        painter.drawLine(svx, R - 6, svx, R)
+                    else:
+                        painter.setPen(QPen(minor_tick_color, 1))
+                        painter.drawLine(svx, R - 3, svx, R)
             x += step
+        painter.restore()
 
-        # 垂直刻度
+        # ── 垂直标尺（左侧：支持 CDR 左下角原点向上递增 + 90° 旋转文字）──
+        painter.save()
+        painter.setClipRect(0, R, R, max(0, vp.height() - R))
         scene_top = self.mapToScene(QPoint(0, R)).y()
         scene_bottom = self.mapToScene(QPoint(0, vp.height())).y()
-        y = math.floor(scene_top / step) * step
-        while y <= scene_bottom:
-            vy = self.mapFromScene(QPointF(0, y)).y()
-            painter.setPen(QPen(tick_color, 1))
-            painter.drawLine(R - 6, vy, R, vy)
-            if vy > R + 2:
-                painter.setPen(text_color)
-                painter.drawText(2, vy - 1, self._format_ruler_label(y))
-            y += step
 
-        # 鼠标位置十字线（在标尺上）
+        if is_cdr_origin:
+            origin_y = sc.sceneRect().bottom()
+            cdr_min = origin_y - scene_bottom
+            cdr_max = origin_y - scene_top
+            cy = math.floor(cdr_min / step) * step
+            while cy <= cdr_max + step:
+                sy = origin_y - cy
+                vy = self.mapFromScene(QPointF(0, sy)).y()
+                if vy >= R:
+                    painter.setPen(QPen(major_tick_color, 1))
+                    painter.drawLine(R - 8, vy, R, vy)
+                    label = self._format_ruler_label(cy)
+                    painter.save()
+                    painter.setPen(text_color)
+                    painter.translate(10, vy - 2)
+                    painter.rotate(-90)
+                    painter.drawText(0, 0, label)
+                    painter.restore()
+                if sub_div > 1:
+                    for i in range(1, sub_div):
+                        scy = cy + i * sub_step
+                        if scy > cdr_max:
+                            break
+                        ssy = origin_y - scy
+                        svy = self.mapFromScene(QPointF(0, ssy)).y()
+                        if svy < R or svy > vp.height():
+                            continue
+                        if i == half_idx:
+                            painter.setPen(QPen(mid_tick_color, 1))
+                            painter.drawLine(R - 6, svy, R, svy)
+                        else:
+                            painter.setPen(QPen(minor_tick_color, 1))
+                            painter.drawLine(R - 3, svy, R, svy)
+                cy += step
+        else:
+            y = math.floor(scene_top / step) * step
+            while y <= scene_bottom + step:
+                vy = self.mapFromScene(QPointF(0, y)).y()
+                if vy >= R:
+                    painter.setPen(QPen(major_tick_color, 1))
+                    painter.drawLine(R - 8, vy, R, vy)
+                    label = self._format_ruler_label(y)
+                    painter.save()
+                    painter.setPen(text_color)
+                    painter.translate(10, vy - 2)
+                    painter.rotate(-90)
+                    painter.drawText(0, 0, label)
+                    painter.restore()
+                if sub_div > 1:
+                    for i in range(1, sub_div):
+                        ssy = y + i * sub_step
+                        if ssy > scene_bottom:
+                            break
+                        svy = self.mapFromScene(QPointF(0, ssy)).y()
+                        if svy < R or svy > vp.height():
+                            continue
+                        if i == half_idx:
+                            painter.setPen(QPen(mid_tick_color, 1))
+                            painter.drawLine(R - 6, svy, R, svy)
+                        else:
+                            painter.setPen(QPen(minor_tick_color, 1))
+                            painter.drawLine(R - 3, svy, R, svy)
+                y += step
+        painter.restore()
+
+        # 左上角单位方块（最后绘制以遮罩干净）
+        painter.fillRect(0, 0, R, R, corner_color)
+        painter.setPen(QPen(border_color, 1))
+        painter.drawRect(0, 0, R - 1, R - 1)
+        painter.setPen(text_color)
+        painter.drawText(QRect(0, 0, R, R), Qt.AlignmentFlag.AlignCenter, "mm" if display_unit == 'mm' else "px")
+
+        # 鼠标位置蓝色追踪线（在标尺上）
         cursor_vp = self.viewport().mapFromGlobal(self.cursor().pos())
         if vp.contains(cursor_vp):
-            painter.setPen(QPen(QColor(0, 180, 255, 200), 1))
-            painter.drawLine(cursor_vp.x(), 0, cursor_vp.x(), R)
-            painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())
+            painter.setPen(QPen(QColor(0, 180, 255, 220), 1))
+            if cursor_vp.x() >= R:
+                painter.drawLine(cursor_vp.x(), 0, cursor_vp.x(), R)
+            if cursor_vp.y() >= R:
+                painter.drawLine(0, cursor_vp.y(), R, cursor_vp.y())
 
-    def _ruler_step(self):
-        """根据当前缩放计算合适的标尺刻度间距（内部返回场景像素）。"""
-        scale = self.transform().m11()
+    def _ruler_step_and_sub(self):
+        """根据当前缩放计算主刻度间距（场景像素）及次级等分数。"""
+        scale = max(1e-6, abs(self.transform().m11()))
         if self.scene().config_manager.get('display_unit', 'mm') == 'px':
             for step_px in [10, 20, 50, 100, 200, 500, 1000, 2000]:
-                if step_px * scale >= 40:
-                    return step_px
-            return 2000
+                screen_px = step_px * scale
+                if screen_px >= 48:
+                    head = int(str(step_px)[0])
+                    if head == 2:
+                        sub = 4 if screen_px >= 40 else 2
+                    elif head == 5:
+                        sub = 5 if screen_px >= 45 else 1
+                    else:
+                        sub = 10 if screen_px >= 75 else 5
+                    return step_px, sub
+            return 2000, 4
         px_per_mm = CORELDRAW_EXPORT_DPI / 25.4
         for step_mm in [1, 2, 5, 10, 20, 50, 100, 200, 500]:
             step_px = step_mm * px_per_mm
-            if step_px * scale >= 40:
-                return step_px
-        return 500 * px_per_mm
+            screen_px = step_px * scale
+            if screen_px >= 48:
+                head = int(str(step_mm)[0])
+                if head == 2:
+                    sub = 4 if screen_px >= 40 else 2
+                elif head == 5:
+                    sub = 5 if screen_px >= 45 else 1
+                else:
+                    sub = 10 if screen_px >= 75 else 5
+                return step_px, sub
+        return 500 * px_per_mm, 5
+
+    def _ruler_step(self):
+        """根据当前缩放计算合适的标尺刻度间距（内部返回场景像素）。"""
+        return self._ruler_step_and_sub()[0]
 
     def _format_ruler_label(self, scene_value):
         if self.scene().config_manager.get('display_unit', 'mm') == 'px':
@@ -18288,6 +18421,22 @@ class MainWindow(QMainWindow):
         (self.display_unit_px_action if current_unit == 'px' else self.display_unit_mm_action).setChecked(True)
         self.display_unit_group.triggered.connect(self.set_display_unit)
 
+        guide_unit_submenu.addSeparator()
+        self.ruler_origin_group = QActionGroup(self)
+        self.ruler_origin_group.setExclusive(True)
+        self.ruler_origin_cdr_action = QAction('标尺原点：左下角 (CDR)', self)
+        self.ruler_origin_cdr_action.setCheckable(True)
+        self.ruler_origin_cdr_action.setData('cdr')
+        self.ruler_origin_tl_action = QAction('标尺原点：左上角 (默认)', self)
+        self.ruler_origin_tl_action.setCheckable(True)
+        self.ruler_origin_tl_action.setData('top_left')
+        self.ruler_origin_group.addAction(self.ruler_origin_cdr_action)
+        self.ruler_origin_group.addAction(self.ruler_origin_tl_action)
+        guide_unit_submenu.addActions([self.ruler_origin_cdr_action, self.ruler_origin_tl_action])
+        current_origin = self.scene.config_manager.get('ruler_origin_mode', 'cdr')
+        (self.ruler_origin_tl_action if current_origin == 'top_left' else self.ruler_origin_cdr_action).setChecked(True)
+        self.ruler_origin_group.triggered.connect(self.set_ruler_origin_mode)
+
         # 二级：画布尺寸与背景底图
         canvas_bg_submenu = view_menu.addMenu('画布与底图')
         canvas_size_action = QAction('画布大小...', self)
@@ -22234,6 +22383,20 @@ class MainWindow(QMainWindow):
             view.viewport().update()
         if hasattr(self, 'status_bar'):
             self.status_bar.showMessage(f'界面单位已切换为{"毫米" if unit == "mm" else "像素"}', 3000)
+
+    def set_ruler_origin_mode(self, action):
+        """切换标尺与辅助线坐标系原点：cdr（左下角Y向上）或 top_left（左上角Y向下）。"""
+        mode = action.data() or 'cdr'
+        for document in self._documents:
+            document.scene.config_manager.set('ruler_origin_mode', mode)
+            for g in getattr(document.scene, 'guides', []):
+                if hasattr(g, '_update_pos'):
+                    g._update_pos()
+                g.update()
+            document.view.viewport().update()
+        if hasattr(self, 'status_bar'):
+            label = '左下角 (CDR，Y轴向上)' if mode == 'cdr' else '左上角 (Y轴向下)'
+            self.status_bar.showMessage(f'标尺原点已切换为：{label}', 3000)
 
     def set_startup_horizontal_guides(self):
         """设置启动横向辅助线的位置和输入单位。内部始终保存为场景像素。"""
