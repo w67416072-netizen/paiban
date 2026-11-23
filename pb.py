@@ -15672,8 +15672,10 @@ class FamilyTreeImportDialog(QDialog):
 
         root.addWidget(layout_group)
 
-        # 各辈分 Y 坐标
-        y_group = QGroupBox("各辈分 Y 坐标")
+        # 各辈分 Y 坐标（跟随当前标尺原点：默认 CDR 左下角 (0, 0)，Y 向上递增）
+        is_cdr_origin = (self.scene.config_manager.get('ruler_origin_mode', 'cdr') == 'cdr')
+        y_group_title = "各辈分 Y 坐标（左下角为 0,0，Y 向上）" if is_cdr_origin else "各辈分 Y 坐标（左上角为 0,0，Y 向下）"
+        y_group = QGroupBox(y_group_title)
         yg = QFormLayout(y_group)
         yg.setHorizontalSpacing(12)
         self.y_spins = []
@@ -15987,8 +15989,15 @@ class FamilyTreeImportDialog(QDialog):
         self.spin_start_x.setValue(cfg.get('ftimport_start_x', 500))
         self.spin_spacing.setValue(cfg.get('ftimport_spacing', 200))
         defaults = [500, 1000, 1500, 2000, 2500]
+        cur_origin = cfg.get('ruler_origin_mode', 'cdr')
+        saved_origin = cfg.get('ftimport_y_origin_mode', 'top_left')
+        canvas_h_px = float(self.scene.sceneRect().height())
+        canvas_h_unit = (canvas_h_px * 25.4 / CORELDRAW_EXPORT_DPI) if unit == 'mm' else canvas_h_px
+        need_flip = (saved_origin != cur_origin)
         for i, sp in enumerate(self.y_spins):
-            sp.setValue(cfg.get(f'ftimport_y{i+1}', defaults[i]))
+            raw_y = float(cfg.get(f'ftimport_y{i+1}', defaults[i]))
+            val_y = round(canvas_h_unit - raw_y, 2) if need_flip else raw_y
+            sp.setValue(val_y)
         template_name = cfg.get('ftimport_template_name', '')
         if template_name:
             idx = self.combo_template.findText(template_name)
@@ -16018,6 +16027,7 @@ class FamilyTreeImportDialog(QDialog):
             'ftimport_unit': unit,
             'ftimport_start_x': self.spin_start_x.value(),
             'ftimport_spacing': self.spin_spacing.value(),
+            'ftimport_y_origin_mode': cfg.get('ruler_origin_mode', 'cdr'),
         }
         for i, sp in enumerate(self.y_spins):
             new_values[f'ftimport_y{i+1}'] = sp.value()
@@ -16070,12 +16080,17 @@ class FamilyTreeImportDialog(QDialog):
         def to_px(value):
             return value * scale
         font_size, font_family = self._get_t1_font()
+        is_cdr_origin = (self.scene.config_manager.get('ruler_origin_mode', 'cdr') == 'cdr')
+        canvas_bottom = self.scene.sceneRect().bottom()
+        def to_scene_y(value):
+            px_val = to_px(value)
+            return (canvas_bottom - px_val) if is_cdr_origin else px_val
         return {
             'excel_path': self.txt_excel.text().strip(),
             'unit': unit,
             'start_x': to_px(self.spin_start_x.value()),
             'spacing': to_px(self.spin_spacing.value()),
-            'y_coords': [to_px(sp.value()) for sp in self.y_spins],
+            'y_coords': [to_scene_y(sp.value()) for sp in self.y_spins],
             'font_size': font_size,
             'font_family': font_family,
             'img_width': 150,
