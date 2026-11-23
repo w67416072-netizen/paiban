@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-12
+# -*- coding: utf-8 -*-
 import sys
 import json
 import math
@@ -10026,7 +10026,7 @@ class LayoutScene(QGraphicsScene):
         self.connectors = []
         self.image_text_connectors = []  
         self.show_grid = True  
-        self.show_connectors = True  
+        self.show_connectors = False  # 已移除父子级虚线连线（仅保留父子层级绑定）  
         self.show_image_text_connectors = True  
         self.undo_stack = UndoStack()  
         self._horizontal_move_lock_y = {}
@@ -10780,12 +10780,8 @@ class LayoutScene(QGraphicsScene):
         super().mouseReleaseEvent(event)
 
     def add_connector(self, parent, child):
+        """已移除父子级虚线连线，保留空实现以兼容现有调用与历史工程加载。"""
         self.remove_child_connectors(child)
-        conn = VConnector(parent, child)
-        self.addItem(conn)
-        self.connectors.append(conn)
-        conn.update_path()
-        self.sync_connectors_visibility(child)
 
     def remove_child_connectors(self, child):
         to_rem = [c for c in self.connectors if c.child_element == child]
@@ -10945,9 +10941,7 @@ class LayoutScene(QGraphicsScene):
                 c_item.prepareGeometryChange() # 刷新图形状态
                 c_item.setParentItem(c_parent) # 核心：建立层级
                 
-                # 为这对副本创建一条对应的红虚线连接器
-                new_conn = VConnector(c_parent, c_item)
-                new_internal_conns.append(new_conn)
+                # 已移除父子级红虚线连线，仅保留父子层级绑定
 
         # --- 第三步：设置坐标并筛选出顶层父级 ---
         roots_only = []
@@ -11014,7 +11008,7 @@ class LayoutScene(QGraphicsScene):
     
     def set_connectors_visible(self, visible):
         """控制所有连接器的可见性"""
-        self.show_connectors = visible
+        self.show_connectors = False
         for c in self.connectors:
             c.setVisible(visible and self._connector_items_visible(c.parent_element, c.child_element))
     
@@ -12801,6 +12795,14 @@ class LayoutScene(QGraphicsScene):
         return self.isolation_manager.enter_level(items, auto_from_group_edit=auto_from_group_edit, label=label)
 
     def exit_isolation_level(self, silent=False) -> bool:
+        if (not silent
+                and getattr(self, '_editing_group_asset_id', None) is not None
+                and getattr(self, 'isolation_manager', None) is not None
+                and self.isolation_manager.level_count() <= 1):
+            mw = getattr(self.views()[0], '_main_window', None) if self.views() else None
+            if mw and hasattr(mw, 'prompt_exit_group_edit'):
+                QTimer.singleShot(0, mw.prompt_exit_group_edit)
+            return False
         return self.isolation_manager.exit_level(silent=silent)
 
     def exit_all_isolation_modes(self, silent=False) -> bool:
@@ -13942,24 +13944,40 @@ class LayoutView(QGraphicsView):
         painter.setFont(font)
         fm = QFontMetrics(font)
 
+        # 键帽专用带衬线等宽字体（I 带清晰上下短横线，彻底区分于 l）
+        key_font = QFont("Consolas", 9, QFont.Weight.Bold)
+        key_font.setStyleHint(QFont.StyleHint.TypeWriter)
+        kfm = QFontMetrics(key_font)
+
         auto_bind = bool(sc.config_manager.get('isolation_auto_bind_new_item', True))
         prefix_text = f"🔒 独立模式 [层级 {mgr.level_count()}: {lvl.get('label', '')}]"
+        # 每项：(btn_id, parts_tuple_or_str, kind)；tuple 为 (前置词, 键帽字符, 后置词)
         btn_specs = [
             (
                 'toggle_auto_bind',
                 "✓ 新建归属当前子集" if auto_bind else "○ 新建不归属子集",
                 'active' if auto_bind else 'inactive',
             ),
-            ('enter_sublevel', "按 I 深入子级", 'normal'),
-            ('exit_level', "按 ESC 退出", 'danger'),
+            ('enter_sublevel', ("按", "I", "深入子级"), 'normal'),
+            ('exit_level', ("按", "ESC", "退出"), 'danger'),
         ]
 
         pad_x = 14.0
         btn_pad_x = 10.0
         btn_gap = 6.0
         prefix_gap = 10.0
+        key_pad_x = 5.0
+        key_gap = 4.0
+
+        def _measure_btn_width(spec_lbl):
+            if isinstance(spec_lbl, tuple):
+                pre_t, key_t, suf_t = spec_lbl
+                kw = max(16.0, kfm.horizontalAdvance(key_t) + key_pad_x * 2)
+                return fm.horizontalAdvance(pre_t) + key_gap + kw + key_gap + fm.horizontalAdvance(suf_t) + btn_pad_x * 2
+            return fm.horizontalAdvance(spec_lbl) + btn_pad_x * 2
+
         prefix_w = fm.horizontalAdvance(prefix_text)
-        btn_widths = [fm.horizontalAdvance(lbl) + btn_pad_x * 2 for _, lbl, _ in btn_specs]
+        btn_widths = [_measure_btn_width(lbl) for _, lbl, _ in btn_specs]
         total_w = pad_x * 2 + prefix_w + prefix_gap + sum(btn_widths) + btn_gap * (len(btn_specs) - 1)
         th = fm.height() + 14.0
         bx = R + max(8.0, (vp.width() - R - total_w) / 2.0)
@@ -13972,11 +13990,12 @@ class LayoutView(QGraphicsView):
 
         # 绘制左侧状态文字
         cur_x = bx + pad_x
+        painter.setFont(font)
         painter.setPen(QColor(226, 232, 240))
         painter.drawText(QRectF(cur_x, by, prefix_w, th), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, prefix_text)
         cur_x += prefix_w + prefix_gap
 
-        # 绘制三个可点击的胶囊功能按钮
+        # 绘制三个可点击的胶囊功能按钮（带衬线键帽徽章）
         btn_h = th - 6.0
         btn_y = by + 3.0
         hovered_id = getattr(self, '_hovered_isolation_btn', None)
@@ -13999,8 +14018,42 @@ class LayoutView(QGraphicsView):
             painter.setPen(QPen(bd, 1))
             painter.setBrush(QBrush(bg))
             painter.drawRoundedRect(brect, btn_h / 2.0, btn_h / 2.0)
-            painter.setPen(QColor(255, 255, 255))
-            painter.drawText(brect, Qt.AlignmentFlag.AlignCenter, lbl)
+
+            if isinstance(lbl, tuple):
+                pre_t, key_t, suf_t = lbl
+                pre_w = fm.horizontalAdvance(pre_t)
+                kw = max(16.0, kfm.horizontalAdvance(key_t) + key_pad_x * 2)
+                suf_w = fm.horizontalAdvance(suf_t)
+                inner_x = cur_x + btn_pad_x
+
+                painter.setFont(font)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(QRectF(inner_x, btn_y, pre_w, btn_h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, pre_t)
+                inner_x += pre_w + key_gap
+
+                # 衬线键帽外框（微立体描边 + 浅白底）
+                kh = btn_h - 5.0
+                ky = btn_y + (btn_h - kh) / 2.0
+                krect = QRectF(inner_x, ky, kw, kh)
+                painter.setPen(QPen(QColor(255, 255, 255, 195), 1))
+                painter.setBrush(QBrush(QColor(255, 255, 255, 42)))
+                painter.drawRoundedRect(krect, 3.5, 3.5)
+                # 键帽底部微立体高光底边
+                painter.setPen(QPen(QColor(15, 23, 42, 90), 1))
+                painter.drawLine(QPointF(krect.left() + 2.0, krect.bottom() + 0.5), QPointF(krect.right() - 2.0, krect.bottom() + 0.5))
+
+                painter.setFont(key_font)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(krect, Qt.AlignmentFlag.AlignCenter, key_t)
+                inner_x += kw + key_gap
+
+                painter.setFont(font)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(QRectF(inner_x, btn_y, suf_w, btn_h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, suf_t)
+            else:
+                painter.setFont(font)
+                painter.setPen(QColor(255, 255, 255))
+                painter.drawText(brect, Qt.AlignmentFlag.AlignCenter, lbl)
             buttons_hit.append((brect, btn_id))
             cur_x += bw + btn_gap
 
@@ -19354,6 +19407,32 @@ class MainWindow(QMainWindow):
         self.refresh_ui()
         self.status_bar.showMessage("已取消编辑组合，已销毁画布临时编辑元素并退出独立模式", 3000)
 
+    def prompt_exit_group_edit(self):
+        """编辑组合根层级触发退出时弹出三选一确认框，防止误退隔离或误丢修改"""
+        if not self.scene or getattr(self.scene, '_editing_group_asset_id', None) is None:
+            return
+        if getattr(self, '_group_edit_exit_prompt_open', False):
+            return
+        self._group_edit_exit_prompt_open = True
+        try:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("退出组合编辑")
+            box.setText("当前正在编辑组合素材，退出前如何处理本次修改？")
+            btn_save = box.addButton("更新到素材库并退出", QMessageBox.ButtonRole.AcceptRole)
+            btn_discard = box.addButton("放弃修改并退出", QMessageBox.ButtonRole.DestructiveRole)
+            btn_continue = box.addButton("继续编辑", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_continue)
+            box.setEscapeButton(btn_continue)
+            box.exec()
+            clicked = box.clickedButton()
+        finally:
+            self._group_edit_exit_prompt_open = False
+        if clicked == btn_save:
+            QTimer.singleShot(0, self.finish_edit_group_asset)
+        elif clicked == btn_discard:
+            QTimer.singleShot(0, self.cancel_edit_group_asset)
+
     def fit_view(self):
         """初始化时适应视图"""
         # 使用新的智能适应方法
@@ -20070,6 +20149,16 @@ class MainWindow(QMainWindow):
                             self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
                         return True
                     if self.scene.is_isolation_active():
+                        if getattr(self.scene, '_editing_group_asset_id', None) is not None:
+                            iso_mgr = getattr(self.scene, 'isolation_manager', None)
+                            if iso_mgr is not None and iso_mgr.level_count() > 1:
+                                self.scene.exit_isolation_level()
+                            elif self.scene.selectedItems():
+                                self.scene.clearSelection()
+                                self.scene._show_status_message("已取消选中（再按一次 Esc 可选择保存或放弃退出组合编辑）", 2500)
+                            else:
+                                QTimer.singleShot(0, self.prompt_exit_group_edit)
+                            return True
                         self.scene.exit_isolation_level()
                         return True
             elif (event.key() == Qt.Key.Key_I
