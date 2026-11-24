@@ -16987,13 +16987,14 @@ class MainWindow(QMainWindow):
         return btn
 
     def _add_ps_side_toolbar_button(self, toolbar, icon_kind, label, slot, tooltip, checkable=False):
-        """在左侧工具箱创建纯 PS 极简 32x32 图标工具按钮（悬停显示完整中文提示）。"""
+        """在左侧工具箱创建无边框极简图标 + 极轻 10px 短字按钮（46x44，剪映/墨刀风格）。"""
         btn = QToolButton()
         btn.setObjectName("psSideBtn")
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setIcon(self._make_ps_toolbar_icon(icon_kind))
         btn.setIconSize(QSize(18, 18))
-        btn.setFixedSize(32, 32)
+        btn.setText(label)
+        btn.setFixedSize(46, 44)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setCheckable(checkable)
         btn.setToolTip(tooltip)
@@ -17167,10 +17168,11 @@ class MainWindow(QMainWindow):
 
         insert_btn = QToolButton()
         insert_btn.setObjectName("psSideBtn")
-        insert_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        insert_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         insert_btn.setIcon(self._make_ps_toolbar_icon('insert'))
         insert_btn.setIconSize(QSize(18, 18))
-        insert_btn.setFixedSize(32, 32)
+        insert_btn.setText("插入")
+        insert_btn.setFixedSize(46, 44)
         insert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         insert_btn.setMenu(insert_menu)
         insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -17182,7 +17184,7 @@ class MainWindow(QMainWindow):
         # [左侧组2] 画布选区与变形工具（专业侧边栏：上矢量图标 + 下极简短字）
         main_toolbar.addSeparator()
         self.btn_marquee_mode = self._add_ps_side_toolbar_button(
-            main_toolbar, 'marquee_img', "仅图片",
+            main_toolbar, 'marquee_img', "仅图",
             self.on_marquee_button_toggled,
             "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
             checkable=True
@@ -17194,7 +17196,7 @@ class MainWindow(QMainWindow):
             checkable=True
         )
         self.btn_resize = self._add_ps_side_toolbar_button(
-            main_toolbar, 'resize', "调图片",
+            main_toolbar, 'resize', "调图",
             self.toggle_resize_mode,
             "选中图片后显示缩放控制点",
             checkable=True
@@ -17203,7 +17205,7 @@ class MainWindow(QMainWindow):
         # [左侧组3] 族谱连线核心工具
         main_toolbar.addSeparator()
         self.btn_avatar_connect = self._add_ps_side_toolbar_button(
-            main_toolbar, 'avatar_connect', "点图连",
+            main_toolbar, 'avatar_connect', "点连",
             self.toggle_avatar_connect_mode,
             "开启后直接点击人物头像即可连续接龙连线，自动按横向(a↔a)/纵向(b→a)选点（右键/点空白断开当前链条，按住Ctrl固定起点一对多）",
             checkable=True
@@ -18141,6 +18143,7 @@ class MainWindow(QMainWindow):
             is_all = (current == 'all')
             self.btn_marquee_mode.blockSignals(True)
             self.btn_marquee_mode.setChecked(is_all)
+            self.btn_marquee_mode.setText("全选" if is_all else "仅图")
             self.btn_marquee_mode.setIcon(self._make_ps_toolbar_icon('marquee_all' if is_all else 'marquee_img'))
             self.btn_marquee_mode.setToolTip(
                 "当前框选模式：全选（点击或按 Alt+M 切回仅图片）"
@@ -22362,11 +22365,15 @@ class MainWindow(QMainWindow):
         }
         QToolBar#toolbar_main QToolButton#psSideBtn {
             background: transparent;
-            border: 1px solid transparent;
-            border-radius: 5px;
-            padding: 4px;
-            min-width: 28px;
-            min-height: 28px;
+            border: none;
+            border-left: 3px solid transparent;
+            border-radius: 6px;
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 500;
+            padding: 4px 2px 2px 0px;
+            min-width: 42px;
+            min-height: 40px;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn::menu-indicator {
             image: none;
@@ -22374,16 +22381,23 @@ class MainWindow(QMainWindow):
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:hover {
             background: #e2e8f0;
-            border-color: #cbd5e1;
+            color: #1e293b;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:pressed,
         QToolBar#toolbar_main QToolButton#psSideBtn:checked {
             background: #dbeafe;
-            border-color: #0d6efd;
+            border-left: 3px solid #0d6efd;
+            border-top-left-radius: 2px;
+            border-bottom-left-radius: 2px;
+            border-top-right-radius: 6px;
+            border-bottom-right-radius: 6px;
+            color: #0d6efd;
+            font-weight: 600;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:checked:hover {
             background: #bfdbfe;
-            border-color: #0b5ed7;
+            border-left: 3px solid #0b5ed7;
+            color: #0b5ed7;
         }
         QToolButton#favFontPinBtn {
             background: #ffffff;
@@ -22446,8 +22460,8 @@ class MainWindow(QMainWindow):
         QToolBar#toolbar_main::separator {
             background-color: #cbd5e1;
             height: 1px;
-            width: 22px;
-            margin: 4px 5px;
+            width: 28px;
+            margin: 4px 9px;
         }
 
         QToolBar#toolbar_top QToolButton {
