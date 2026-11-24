@@ -16857,13 +16857,18 @@ class MainWindow(QMainWindow):
             p.drawEllipse(QPointF(9.0, 3.2), 1.8, 1.8)
 
         elif kind == 'insert':
-            # 插入：圆角画框 + 蓝色加号
+            # 插入：圆角画框 + 蓝色加号 + PS 标志性右下角展开小三角
             p.setPen(slate_pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(QRectF(2.5, 2.5, 13.0, 13.0), 2.5, 2.5)
+            p.drawRoundedRect(QRectF(2.2, 2.2, 12.2, 12.2), 2.2, 2.2)
             p.setPen(blue_pen)
-            p.drawLine(QPointF(9.0, 5.5), QPointF(9.0, 12.5))
-            p.drawLine(QPointF(5.5, 9.0), QPointF(12.5, 9.0))
+            p.drawLine(QPointF(8.3, 5.2), QPointF(8.3, 11.4))
+            p.drawLine(QPointF(5.2, 8.3), QPointF(11.4, 8.3))
+            # PS 右下角抽屉小三角角标
+            tri = QPolygonF([QPointF(17.2, 13.2), QPointF(17.2, 17.2), QPointF(13.2, 17.2)])
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(QColor("#64748b")))
+            p.drawPolygon(tri)
 
         elif kind == 'marquee_img':
             # 仅图片框选：虚线选框 + 蓝色小图片轮廓
@@ -16982,14 +16987,13 @@ class MainWindow(QMainWindow):
         return btn
 
     def _add_ps_side_toolbar_button(self, toolbar, icon_kind, label, slot, tooltip, checkable=False):
-        """在左侧工具箱创建「上图标 + 下短字」的专业侧边栏方块按钮（54x46）。"""
+        """在左侧工具箱创建纯 PS 极简 32x32 图标工具按钮（悬停显示完整中文提示）。"""
         btn = QToolButton()
         btn.setObjectName("psSideBtn")
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         btn.setIcon(self._make_ps_toolbar_icon(icon_kind))
         btn.setIconSize(QSize(18, 18))
-        btn.setText(label)
-        btn.setFixedSize(54, 46)
+        btn.setFixedSize(32, 32)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setCheckable(checkable)
         btn.setToolTip(tooltip)
@@ -17163,15 +17167,14 @@ class MainWindow(QMainWindow):
 
         insert_btn = QToolButton()
         insert_btn.setObjectName("psSideBtn")
-        insert_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        insert_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         insert_btn.setIcon(self._make_ps_toolbar_icon('insert'))
         insert_btn.setIconSize(QSize(18, 18))
-        insert_btn.setText("插入▾")
-        insert_btn.setFixedSize(54, 46)
+        insert_btn.setFixedSize(32, 32)
         insert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         insert_btn.setMenu(insert_menu)
         insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        insert_btn.setToolTip("添加文本、插入图片、导入 Excel 与拆分文字")
+        insert_btn.setToolTip("插入与拆分：添加文本、插入图片、导入 Excel 与拆分文字")
         insert_act = main_toolbar.addWidget(insert_btn)
         insert_act.setText("插入")
         insert_act.setMenu(insert_menu)
@@ -18138,8 +18141,12 @@ class MainWindow(QMainWindow):
             is_all = (current == 'all')
             self.btn_marquee_mode.blockSignals(True)
             self.btn_marquee_mode.setChecked(is_all)
-            self.btn_marquee_mode.setText("全选" if is_all else "仅图片")
             self.btn_marquee_mode.setIcon(self._make_ps_toolbar_icon('marquee_all' if is_all else 'marquee_img'))
+            self.btn_marquee_mode.setToolTip(
+                "当前框选模式：全选（点击或按 Alt+M 切回仅图片）"
+                if is_all
+                else "当前框选模式：仅图片（点击或按 Alt+M 切换为全选）"
+            )
             self.btn_marquee_mode.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             idx = self.marquee_mode_combo.findData(current)
@@ -22354,31 +22361,25 @@ class MainWindow(QMainWindow):
             border-color: #0b5ed7;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn {
-            background: #ffffff;
-            border: 1px solid #dce1e8;
-            border-radius: 6px;
-            color: #334155;
-            font-size: 11px;
-            font-weight: 500;
-            padding: 4px 2px 2px 2px;
-            min-width: 50px;
-            min-height: 42px;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            padding: 4px;
+            min-width: 28px;
+            min-height: 28px;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn::menu-indicator {
             image: none;
             width: 0px;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:hover {
-            background: #f0f6ff;
-            border-color: #93c5fd;
-            color: #0d6efd;
+            background: #e2e8f0;
+            border-color: #cbd5e1;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:pressed,
         QToolBar#toolbar_main QToolButton#psSideBtn:checked {
             background: #dbeafe;
             border-color: #0d6efd;
-            color: #0b5ed7;
-            font-weight: 600;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn:checked:hover {
             background: #bfdbfe;
@@ -22435,18 +22436,18 @@ class MainWindow(QMainWindow):
         }
 
         QToolBar#toolbar_main {
-            background: #f8fafc;
+            background: #f4f6f9;
             border: none;
             border-right: 1px solid #e2e8f0;
-            spacing: 6px;
-            padding: 8px 6px;
+            spacing: 4px;
+            padding: 8px 4px;
         }
 
         QToolBar#toolbar_main::separator {
-            background-color: #dce1e8;
+            background-color: #cbd5e1;
             height: 1px;
-            width: 40px;
-            margin: 3px 7px;
+            width: 22px;
+            margin: 4px 5px;
         }
 
         QToolBar#toolbar_top QToolButton {
