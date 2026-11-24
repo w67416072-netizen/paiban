@@ -16749,6 +16749,259 @@ class MainWindow(QMainWindow):
         p.end()
         return QIcon(pix)
 
+    def _make_ps_toolbar_icon(self, kind):
+        """绘制与对齐按钮完全统一风格的 18x18 Photoshop 双色矢量图标（深灰 #334155 + 亮蓝 #0d6efd）。"""
+        pix = QPixmap(18, 18)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        slate_pen = QPen(QColor("#334155"), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        blue_pen = QPen(QColor("#0d6efd"), 1.7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        red_pen = QPen(QColor("#dc2626"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        slate_brush = QBrush(QColor("#334155"))
+        blue_brush = QBrush(QColor("#0d6efd"))
+
+        if kind == 'undo':
+            # 撤销：左向弯箭头
+            path = QPainterPath()
+            path.moveTo(6.5, 6.0)
+            path.lineTo(11.5, 6.0)
+            path.arcTo(QRectF(7.5, 6.0, 7.0, 8.0), 90, -180)
+            path.lineTo(5.0, 14.0)
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+            # 蓝色箭头尖
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(6.8, 3.2), QPointF(3.6, 6.0))
+            p.drawLine(QPointF(3.6, 6.0), QPointF(6.8, 8.8))
+
+        elif kind == 'clear':
+            # 清空画布：极简垃圾桶（顶盖+桶身+竖纹）
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(QPointF(3.0, 5.0), QPointF(15.0, 5.0))
+            p.drawRect(QRectF(6.8, 2.5, 4.4, 2.5))
+            p.drawRoundedRect(QRectF(4.5, 5.2, 9.0, 10.3), 1.5, 1.5)
+            p.setPen(red_pen)
+            p.drawLine(QPointF(7.5, 7.8), QPointF(7.5, 13.0))
+            p.drawLine(QPointF(10.5, 7.8), QPointF(10.5, 13.0))
+
+        elif kind == 'align_first':
+            # 对齐基准-首个对象：高亮蓝色主锚框 + 灰框
+            p.setPen(blue_pen)
+            p.setBrush(QBrush(QColor(13, 110, 253, 45)))
+            p.drawRect(QRectF(2.5, 3.0, 6.5, 6.5))
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(9.5, 8.5, 6.0, 6.0))
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(5.7, 4.6), QPointF(5.7, 7.9))
+
+        elif kind == 'align_pick':
+            # 对齐基准-点选对象：十字准星靶心
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(9.0, 9.0), 5.2, 5.2)
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(9.0, 2.0), QPointF(9.0, 5.2))
+            p.drawLine(QPointF(9.0, 12.8), QPointF(9.0, 16.0))
+            p.drawLine(QPointF(2.0, 9.0), QPointF(5.2, 9.0))
+            p.drawLine(QPointF(12.8, 9.0), QPointF(16.0, 9.0))
+            p.setBrush(blue_brush)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPointF(9.0, 9.0), 1.9, 1.9)
+
+        elif kind == 'h_move':
+            # 仅水平移动：蓝色双向水平箭头 + 灰竖向锁定基准线
+            p.setPen(QPen(QColor("#94a3b8"), 1.2, Qt.PenStyle.DashLine))
+            p.drawLine(QPointF(9.0, 2.5), QPointF(9.0, 15.5))
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(3.2, 9.0), QPointF(14.8, 9.0))
+            p.drawLine(QPointF(5.8, 6.2), QPointF(2.8, 9.0))
+            p.drawLine(QPointF(2.8, 9.0), QPointF(5.8, 11.8))
+            p.drawLine(QPointF(12.2, 6.2), QPointF(15.2, 9.0))
+            p.drawLine(QPointF(15.2, 9.0), QPointF(12.2, 11.8))
+
+        elif kind == 'select_parent':
+            # 选子即选父：上方蓝色父框 + 下方深灰子框 + 向上联动连接线
+            p.setPen(blue_pen)
+            p.setBrush(QBrush(QColor(13, 110, 253, 40)))
+            p.drawRoundedRect(QRectF(3.0, 2.5, 12.0, 5.5), 1.5, 1.5)
+            p.setPen(slate_pen)
+            p.setBrush(slate_brush)
+            p.drawRoundedRect(QRectF(5.5, 11.5, 7.0, 4.0), 1.2, 1.2)
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(9.0, 8.2), QPointF(9.0, 11.3))
+
+        elif kind == 'show_cp':
+            # 显示/隐藏连接点：上方高亮红/蓝锚点圆 + 下方对象框
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(3.5, 7.5, 11.0, 8.0), 1.5, 1.5)
+            p.setPen(QPen(QColor("#0d6efd"), 1.5))
+            p.setBrush(QBrush(QColor("#ef4444")))
+            p.drawEllipse(QPointF(9.0, 5.2), 2.8, 2.8)
+
+        elif kind == 'perp_guide':
+            # 向辅助线画垂线：蓝色水平辅助线 + 深灰垂线 + 直角符号
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(2.0, 13.5), QPointF(16.0, 13.5))
+            p.setPen(slate_pen)
+            p.drawLine(QPointF(9.0, 3.0), QPointF(9.0, 13.3))
+            p.setPen(QPen(QColor("#0d6efd"), 1.2))
+            p.drawLine(QPointF(9.0, 10.3), QPointF(12.2, 10.3))
+            p.drawLine(QPointF(12.2, 10.3), QPointF(12.2, 13.5))
+            p.setBrush(blue_brush)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPointF(9.0, 3.2), 1.8, 1.8)
+
+        elif kind == 'insert':
+            # 插入：圆角画框 + 蓝色加号
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QRectF(2.5, 2.5, 13.0, 13.0), 2.5, 2.5)
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(9.0, 5.5), QPointF(9.0, 12.5))
+            p.drawLine(QPointF(5.5, 9.0), QPointF(12.5, 9.0))
+
+        elif kind == 'marquee_img':
+            # 仅图片框选：虚线选框 + 蓝色小图片轮廓
+            p.setPen(QPen(QColor("#334155"), 1.3, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(2.2, 2.2, 13.6, 13.6))
+            p.setPen(blue_pen)
+            p.setBrush(QBrush(QColor(13, 110, 253, 45)))
+            p.drawRoundedRect(QRectF(5.0, 5.2, 8.0, 7.6), 1.2, 1.2)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(blue_brush)
+            p.drawEllipse(QPointF(7.6, 7.8), 1.1, 1.1)
+
+        elif kind == 'marquee_all':
+            # 全选框选：蓝色虚线选框 + 图/文双元素
+            p.setPen(QPen(QColor("#0d6efd"), 1.4, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(2.2, 2.2, 13.6, 13.6))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(blue_brush)
+            p.drawRect(QRectF(5.0, 4.8, 4.2, 4.2))
+            p.setPen(slate_pen)
+            p.drawLine(QPointF(11.5, 5.0), QPointF(11.5, 12.8))
+            p.drawLine(QPointF(5.0, 12.0), QPointF(9.2, 12.0))
+
+        elif kind == 'brush':
+            # 智能笔刷：斜向笔杆 + 蓝色刷头
+            p.setPen(slate_pen)
+            p.drawLine(QPointF(14.5, 3.5), QPointF(8.2, 9.8))
+            p.setPen(blue_pen)
+            p.setBrush(QBrush(QColor(13, 110, 253, 60)))
+            path = QPainterPath()
+            path.moveTo(8.2, 9.8)
+            path.quadTo(4.0, 10.5, 3.0, 14.8)
+            path.quadTo(7.5, 14.5, 8.8, 11.0)
+            path.closeSubpath()
+            p.drawPath(path)
+
+        elif kind == 'resize':
+            # 调图片：深灰图框 + 四角蓝色控点 + 双向缩放线
+            p.setPen(slate_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(QRectF(3.5, 3.5, 11.0, 11.0))
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(6.2, 11.8), QPointF(11.8, 6.2))
+            p.drawLine(QPointF(9.2, 6.2), QPointF(11.8, 6.2))
+            p.drawLine(QPointF(11.8, 6.2), QPointF(11.8, 8.8))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(blue_brush)
+            for cx, cy in ((3.5, 3.5), (14.5, 3.5), (3.5, 14.5), (14.5, 14.5)):
+                p.drawRect(QRectF(cx - 1.5, cy - 1.5, 3.0, 3.0))
+
+        elif kind == 'avatar_connect':
+            # 点图连：上下两个节点 + 蓝色折线连线
+            p.setPen(blue_pen)
+            path = QPainterPath()
+            path.moveTo(5.0, 4.8)
+            path.cubicTo(5.0, 10.0, 13.0, 8.0, 13.0, 13.2)
+            p.drawPath(path)
+            p.setPen(slate_pen)
+            p.setBrush(QBrush(QColor("#ffffff")))
+            p.drawEllipse(QPointF(5.0, 4.8), 2.5, 2.5)
+            p.setPen(blue_pen)
+            p.setBrush(blue_brush)
+            p.drawEllipse(QPointF(13.0, 13.2), 2.5, 2.5)
+
+        elif kind == 'connect_v':
+            # 垂连 (b->a)：上节点 + 下节点 + 蓝色竖直连线与箭头
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(9.0, 5.5), QPointF(9.0, 12.8))
+            p.drawLine(QPointF(6.8, 10.2), QPointF(9.0, 12.8))
+            p.drawLine(QPointF(11.2, 10.2), QPointF(9.0, 12.8))
+            p.setPen(slate_pen)
+            p.setBrush(QBrush(QColor("#ffffff")))
+            p.drawRect(QRectF(5.5, 2.0, 7.0, 3.5))
+            p.setPen(blue_pen)
+            p.setBrush(QBrush(QColor(13, 110, 253, 50)))
+            p.drawRect(QRectF(5.5, 13.0, 7.0, 3.0))
+
+        elif kind == 'connect_h':
+            # 平连 (a<->a)：左右节点 + 蓝色水平双向连接
+            p.setPen(blue_pen)
+            p.drawLine(QPointF(5.2, 9.0), QPointF(12.8, 9.0))
+            p.drawLine(QPointF(7.2, 6.8), QPointF(5.2, 9.0))
+            p.drawLine(QPointF(7.2, 11.2), QPointF(5.2, 9.0))
+            p.drawLine(QPointF(10.8, 6.8), QPointF(12.8, 9.0))
+            p.drawLine(QPointF(10.8, 11.2), QPointF(12.8, 9.0))
+            p.setPen(slate_pen)
+            p.setBrush(QBrush(QColor("#ffffff")))
+            p.drawEllipse(QPointF(3.5, 9.0), 2.0, 2.0)
+            p.drawEllipse(QPointF(14.5, 9.0), 2.0, 2.0)
+
+        p.end()
+        return QIcon(pix)
+
+    def _add_ps_icon_toolbar_button(self, toolbar, icon_kind, label, slot, tooltip, shortcut=None, checkable=False):
+        """在顶部工具栏创建与对齐按钮完全一致的 28x28 Photoshop 风格图标按钮。"""
+        btn = QToolButton()
+        btn.setObjectName("psAlignBtn")
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        btn.setIcon(self._make_ps_toolbar_icon(icon_kind))
+        btn.setIconSize(QSize(18, 18))
+        btn.setFixedSize(28, 28)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setCheckable(checkable)
+        btn.setToolTip(tooltip)
+        btn.setStatusTip(tooltip)
+        if shortcut:
+            btn.setShortcut(shortcut)
+        if checkable:
+            btn.toggled.connect(slot)
+        else:
+            btn.clicked.connect(lambda _=False, s=slot: s())
+        act = toolbar.addWidget(btn)
+        act.setText(label)
+        return btn
+
+    def _add_ps_side_toolbar_button(self, toolbar, icon_kind, label, slot, tooltip, checkable=False):
+        """在左侧工具箱创建「上图标 + 下短字」的专业侧边栏方块按钮（54x46）。"""
+        btn = QToolButton()
+        btn.setObjectName("psSideBtn")
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        btn.setIcon(self._make_ps_toolbar_icon(icon_kind))
+        btn.setIconSize(QSize(18, 18))
+        btn.setText(label)
+        btn.setFixedSize(54, 46)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setCheckable(checkable)
+        btn.setToolTip(tooltip)
+        btn.setStatusTip(tooltip)
+        if checkable:
+            btn.toggled.connect(slot)
+        else:
+            btn.clicked.connect(lambda _=False, s=slot: s())
+        act = toolbar.addWidget(btn)
+        act.setText(label)
+        return btn
+
     def create_toolbars(self):
         # ══════════════════════════════════════════════════════════════════
         # 1. 顶部快捷与排版工具栏（放置全局操作、对齐排布、常驻约束开关与数值参数）
@@ -16764,12 +17017,13 @@ class MainWindow(QMainWindow):
         self.top_toolbar = top_toolbar
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, top_toolbar)
 
-        # [顶部组1] 历史与画布操作（防误触隔离）
-        self._add_toolbar_action(top_toolbar, "↩撤销", self.undo, "撤销上一步操作 (Ctrl+Z)", "Ctrl+Z")
-        self._add_toolbar_action(
-            top_toolbar,
-            "🗑清空",
-            self.clear_current_canvas,
+        # [顶部组1] 历史与画布操作（统一 Photoshop 紧凑图标风格）
+        self._add_ps_icon_toolbar_button(
+            top_toolbar, 'undo', "撤销", self.undo,
+            "撤销上一步操作 (Ctrl+Z)", shortcut="Ctrl+Z"
+        )
+        self._add_ps_icon_toolbar_button(
+            top_toolbar, 'clear', "清空画布", self.clear_current_canvas,
             "清空当前画布上的所有内容（支持 Ctrl+Z 撤销）"
         )
 
@@ -16793,52 +17047,49 @@ class MainWindow(QMainWindow):
             act = top_toolbar.addWidget(btn)
             act.setText(tip)
 
-        self.btn_align_mode = self._add_toolbar_action(
-            top_toolbar,
-            "🎯首",
+        self.btn_align_mode = self._add_ps_icon_toolbar_button(
+            top_toolbar, 'align_first', "对齐基准",
             self.on_align_mode_button_toggled,
-            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
+            "对齐基准模式切换（Alt+A）：「首个选中对象」/「点选指定对象」",
             checkable=True
         )
 
-        # [顶部组3] 全局移动与视图约束开关（像仪表盘指示灯一样一目了然）
+        # [顶部组3] 全局移动与视图约束开关（统一 28x28 图标开关风格，开启时亮蓝高亮）
         top_toolbar.addSeparator()
-        self.btn_horizontal_move = self._add_toolbar_action(
-            top_toolbar,
-            "🔒横移",
+        self.btn_horizontal_move = self._add_ps_icon_toolbar_button(
+            top_toolbar, 'h_move', "仅水平移动",
             lambda checked: self.toggle_horizontal_move_only(checked),
-            "锁定垂直移动，只允许水平方向移动选中对象 (Ctrl+H)",
+            "仅水平移动：锁定垂直移动，只允许水平方向拖动选中对象 (Ctrl+H)",
             checkable=True
         )
+        self.btn_horizontal_move.blockSignals(True)
         self.btn_horizontal_move.setChecked(self.scene.config_manager.get('horizontal_move_only', False))
+        self.btn_horizontal_move.blockSignals(False)
 
-        self.btn_select_parent = self._add_toolbar_action(
-            top_toolbar,
-            "🔗选父",
+        self.btn_select_parent = self._add_ps_icon_toolbar_button(
+            top_toolbar, 'select_parent', "选子即选父",
             self.toggle_select_child_selects_parent,
-            "开启后，点击或框选集合中的子集（如图片下方的子文字）会自动选中并整体移动其父级 (Alt+G)；双击文字仍可直接编辑",
+            "选子即选父 (Alt+G)：点击或框选子文字自动选中并联动移动父级图片；双击文字仍可直接编辑",
             checkable=True
         )
         self.btn_select_parent.blockSignals(True)
         self.btn_select_parent.setChecked(self.scene.config_manager.get('select_child_selects_parent', True))
         self.btn_select_parent.blockSignals(False)
 
-        self.btn_show_cp = self._add_toolbar_action(
-            top_toolbar,
-            "👁连接点",
+        self.btn_show_cp = self._add_ps_icon_toolbar_button(
+            top_toolbar, 'show_cp', "显示连接点",
             self.set_all_connection_points_visible,
-            "一键显示/隐藏画布上所有连接点 (Alt+P) — 隐藏连接点后不影响点图片连线、Shift接龙与智能连接",
+            "显示/隐藏所有连接点 (Alt+P) — 隐藏后不影响点图片连线与智能连接",
             checkable=True
         )
         self.btn_show_cp.blockSignals(True)
         self.btn_show_cp.setChecked(getattr(self.scene, 'show_connection_points', True))
         self.btn_show_cp.blockSignals(False)
 
-        self.btn_perp_guide = self._add_toolbar_action(
-            top_toolbar,
-            "⊥垂线",
+        self.btn_perp_guide = self._add_ps_icon_toolbar_button(
+            top_toolbar, 'perp_guide', "辅助线垂线",
             self.toggle_perpendicular_to_guide_enabled,
-            "开启/关闭「连接点向辅助线画垂线」功能（开启后才可使用 Alt+V、右键画垂线及鼠标靠近辅助线虚线预览点击）",
+            "开启/关闭「连接点向辅助线画垂线」(Alt+V)",
             checkable=True
         )
         self.btn_perp_guide.blockSignals(True)
@@ -16911,8 +17162,13 @@ class MainWindow(QMainWindow):
         insert_menu.addAction("设置默认拆分符号...", self.set_default_split_symbol)
 
         insert_btn = QToolButton()
-        insert_btn.setText("➕插入 ▾")
-        insert_btn.setFixedWidth(76)
+        insert_btn.setObjectName("psSideBtn")
+        insert_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        insert_btn.setIcon(self._make_ps_toolbar_icon('insert'))
+        insert_btn.setIconSize(QSize(18, 18))
+        insert_btn.setText("插入▾")
+        insert_btn.setFixedSize(54, 46)
+        insert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         insert_btn.setMenu(insert_menu)
         insert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         insert_btn.setToolTip("添加文本、插入图片、导入 Excel 与拆分文字")
@@ -16920,26 +17176,22 @@ class MainWindow(QMainWindow):
         insert_act.setText("插入")
         insert_act.setMenu(insert_menu)
 
-        # [左侧组2] 画布选区与变形工具
+        # [左侧组2] 画布选区与变形工具（专业侧边栏：上矢量图标 + 下极简短字）
         main_toolbar.addSeparator()
-        self.btn_marquee_mode = self._add_toolbar_action(
-            main_toolbar,
-            "▭仅图片",
+        self.btn_marquee_mode = self._add_ps_side_toolbar_button(
+            main_toolbar, 'marquee_img', "仅图片",
             self.on_marquee_button_toggled,
             "框选模式切换（Alt+M）：默认「仅图片」，按一下切换为「全选」",
             checkable=True
         )
-        self.btn_smart_brush = self._add_toolbar_action(
-            main_toolbar,
-            "🖌笔刷",
+        self.btn_smart_brush = self._add_ps_side_toolbar_button(
+            main_toolbar, 'brush', "笔刷",
             self.toggle_smart_brush,
             "智能笔刷 (快捷键 B)：涂抹对象加入选区；按住 Alt 涂抹从选区中减去",
-            None,
             checkable=True
         )
-        self.btn_resize = self._add_toolbar_action(
-            main_toolbar,
-            "⤢调图片",
+        self.btn_resize = self._add_ps_side_toolbar_button(
+            main_toolbar, 'resize', "调图片",
             self.toggle_resize_mode,
             "选中图片后显示缩放控制点",
             checkable=True
@@ -16947,31 +17199,22 @@ class MainWindow(QMainWindow):
 
         # [左侧组3] 族谱连线核心工具
         main_toolbar.addSeparator()
-        self.btn_avatar_connect = self._add_toolbar_action(
-            main_toolbar,
-            "⚡点图连",
+        self.btn_avatar_connect = self._add_ps_side_toolbar_button(
+            main_toolbar, 'avatar_connect', "点图连",
             self.toggle_avatar_connect_mode,
             "开启后直接点击人物头像即可连续接龙连线，自动按横向(a↔a)/纵向(b→a)选点（右键/点空白断开当前链条，按住Ctrl固定起点一对多）",
             checkable=True
         )
-        self._add_toolbar_action(
-            main_toolbar,
-            "↕垂连",
+        self._add_ps_side_toolbar_button(
+            main_toolbar, 'connect_v', "垂连",
             lambda: self.scene.group_chain_connect(),
             "将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点"
         )
-        self._add_toolbar_action(
-            main_toolbar,
-            "↔平连",
+        self._add_ps_side_toolbar_button(
+            main_toolbar, 'connect_h', "平连",
             lambda: self.scene.connect_image_points_right_to_left(),
             "按从右到左顺序连接选中图片的连接点"
         )
-
-        # 统一设置左侧工具箱所有动作按钮宽度为 76px，呈整齐紧凑的 PS 工具箱列
-        for act in main_toolbar.actions():
-            w = main_toolbar.widgetForAction(act)
-            if isinstance(w, QToolButton):
-                w.setFixedWidth(76)
 
         # 修复工具栏溢出折叠按钮（qt_toolbar_ext_button）：显示清晰的 "▾" 符号与提示
         for tb in (top_toolbar, main_toolbar):
@@ -17895,7 +18138,8 @@ class MainWindow(QMainWindow):
             is_all = (current == 'all')
             self.btn_marquee_mode.blockSignals(True)
             self.btn_marquee_mode.setChecked(is_all)
-            self.btn_marquee_mode.setText("▭全选" if is_all else "▭仅图片")
+            self.btn_marquee_mode.setText("全选" if is_all else "仅图片")
+            self.btn_marquee_mode.setIcon(self._make_ps_toolbar_icon('marquee_all' if is_all else 'marquee_img'))
             self.btn_marquee_mode.blockSignals(False)
         if hasattr(self, 'marquee_mode_combo'):
             idx = self.marquee_mode_combo.findData(current)
@@ -17946,7 +18190,12 @@ class MainWindow(QMainWindow):
             is_pick = (current == 'pick_reference')
             self.btn_align_mode.blockSignals(True)
             self.btn_align_mode.setChecked(is_pick)
-            self.btn_align_mode.setText("🎯选" if is_pick else "🎯首")
+            self.btn_align_mode.setIcon(self._make_ps_toolbar_icon('align_pick' if is_pick else 'align_first'))
+            self.btn_align_mode.setToolTip(
+                "当前对齐基准：点选指定对象（点击或按 Alt+A 切回首个选中对象）"
+                if is_pick
+                else "当前对齐基准：首个选中对象（点击或按 Alt+A 切换为点选指定对象）"
+            )
             self.btn_align_mode.blockSignals(False)
 
     def toggle_insert_image_to_bottom(self, enabled):
@@ -22096,6 +22345,45 @@ class MainWindow(QMainWindow):
             background: #dbeafe;
             border-color: #0d6efd;
         }
+        QToolBar#toolbar_top QToolButton#psAlignBtn:checked {
+            background: #dbeafe;
+            border-color: #0d6efd;
+        }
+        QToolBar#toolbar_top QToolButton#psAlignBtn:checked:hover {
+            background: #bfdbfe;
+            border-color: #0b5ed7;
+        }
+        QToolBar#toolbar_main QToolButton#psSideBtn {
+            background: #ffffff;
+            border: 1px solid #dce1e8;
+            border-radius: 6px;
+            color: #334155;
+            font-size: 11px;
+            font-weight: 500;
+            padding: 4px 2px 2px 2px;
+            min-width: 50px;
+            min-height: 42px;
+        }
+        QToolBar#toolbar_main QToolButton#psSideBtn::menu-indicator {
+            image: none;
+            width: 0px;
+        }
+        QToolBar#toolbar_main QToolButton#psSideBtn:hover {
+            background: #f0f6ff;
+            border-color: #93c5fd;
+            color: #0d6efd;
+        }
+        QToolBar#toolbar_main QToolButton#psSideBtn:pressed,
+        QToolBar#toolbar_main QToolButton#psSideBtn:checked {
+            background: #dbeafe;
+            border-color: #0d6efd;
+            color: #0b5ed7;
+            font-weight: 600;
+        }
+        QToolBar#toolbar_main QToolButton#psSideBtn:checked:hover {
+            background: #bfdbfe;
+            border-color: #0b5ed7;
+        }
         QToolButton#favFontPinBtn {
             background: #ffffff;
             border: 1px solid #dce1e8;
@@ -22147,18 +22435,18 @@ class MainWindow(QMainWindow):
         }
 
         QToolBar#toolbar_main {
-            background: #f4f6f9;
+            background: #f8fafc;
             border: none;
             border-right: 1px solid #e2e8f0;
-            spacing: 8px;
-            padding: 10px 8px;
+            spacing: 6px;
+            padding: 8px 6px;
         }
 
         QToolBar#toolbar_main::separator {
             background-color: #dce1e8;
             height: 1px;
-            width: 64px;
-            margin: 4px 6px;
+            width: 40px;
+            margin: 3px 7px;
         }
 
         QToolBar#toolbar_top QToolButton {
