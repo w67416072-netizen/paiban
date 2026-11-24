@@ -3712,37 +3712,49 @@ class SetParentCommand(UndoCommand):
         # 移除旧的连接器
         if self.old_parent:
             self.scene.remove_child_connectors(self.child_item)
-        
+
         # 保存当前场景坐标
         current_scene_pos = self.child_item.scenePos()
-        
-        # 设置新的父子关系
-        if self.new_parent:
-            self.child_item.setParentItem(self.new_parent)
-            # 转换为父级的本地坐标
-            local_pos = self.new_parent.mapFromScene(current_scene_pos)
-            self.child_item.setPos(local_pos)
-            # 创建新的连接器
-            self.scene.add_connector(self.new_parent, self.child_item)
-        else:
-            # 移除父子关系
-            self.child_item.setParentItem(None)
-            self.child_item.setPos(current_scene_pos)
-    
+
+        # 标记程序化坐标转换，避免左键点选父级时误触发拖拽顶部/边缘吸附参考线与位置偏移
+        prev_prog = getattr(self.scene, '_programmatic_moving', False)
+        self.scene._programmatic_moving = True
+        try:
+            if self.new_parent:
+                self.child_item.setParentItem(self.new_parent)
+                local_pos = self.new_parent.mapFromScene(current_scene_pos)
+                self.child_item.setPos(local_pos)
+                self.scene.add_connector(self.new_parent, self.child_item)
+            else:
+                self.child_item.setParentItem(None)
+                self.child_item.setPos(current_scene_pos)
+        finally:
+            self.scene._programmatic_moving = prev_prog
+            self.scene._image_top_edge_snap_indicator = None
+            self.scene._image_right_edge_snap_indicator = None
+            if hasattr(self.scene, 'clear_snap_guides'):
+                self.scene.clear_snap_guides()
+
     def undo(self):
         # 移除当前连接器
         self.scene.remove_child_connectors(self.child_item)
-        
-        # 恢复旧的父子关系
-        if self.old_parent and self.old_parent.scene():
-            self.child_item.setParentItem(self.old_parent)
-            self.child_item.setPos(self.old_pos)
-            # 重新创建旧的连接器
-            self.scene.add_connector(self.old_parent, self.child_item)
-        else:
-            # 恢复为无父级状态
-            self.child_item.setParentItem(None)
-            self.child_item.setPos(self.old_scene_pos)
+
+        prev_prog = getattr(self.scene, '_programmatic_moving', False)
+        self.scene._programmatic_moving = True
+        try:
+            if self.old_parent and self.old_parent.scene():
+                self.child_item.setParentItem(self.old_parent)
+                self.child_item.setPos(self.old_pos)
+                self.scene.add_connector(self.old_parent, self.child_item)
+            else:
+                self.child_item.setParentItem(None)
+                self.child_item.setPos(self.old_scene_pos)
+        finally:
+            self.scene._programmatic_moving = prev_prog
+            self.scene._image_top_edge_snap_indicator = None
+            self.scene._image_right_edge_snap_indicator = None
+            if hasattr(self.scene, 'clear_snap_guides'):
+                self.scene.clear_snap_guides()
 
 class MoveItemCommand(UndoCommand):
     """移动元素命令"""
@@ -5721,13 +5733,8 @@ class BaseElement(QGraphicsItem):
                 self.scene().draw_perpendicular_to_guide(items=targets)
         
         if action == unbind_action:
-            # 使用撤销命令解除父级绑定
             if self.scene():
-                old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
-                if old_parent:
-                    command = SetParentCommand(self.scene(), self, None, old_parent)
-                    command.execute()
-                    self.scene().undo_stack.push(command)
+                self.scene().unbind_parent_for_item(self)
         elif action == set_parent_action:
              if self.scene(): self.scene().start_binding_mode(self)
 
@@ -6667,11 +6674,7 @@ class VTextItem(BaseElement):
         
         if action == unbind_action:
             if self.scene():
-                old_parent = self.parentItem() if isinstance(self.parentItem(), BaseElement) else None
-                if old_parent:
-                    command = SetParentCommand(self.scene(), self, None, old_parent)
-                    command.execute()
-                    self.scene().undo_stack.push(command)
+                self.scene().unbind_parent_for_item(self)
         elif action == set_parent_action:
             if self.scene(): self.scene().start_binding_mode(self)
 
@@ -7688,10 +7691,7 @@ class VImageItem(BaseElement):
                     t_menu.addAction("连接点位置偏移...").triggered.connect(lambda _, t=txt: t.open_cp_offset_dialog())
                 t_menu.addSeparator()
                 t_menu.addAction("解除父级绑定").triggered.connect(
-                    lambda _, t=txt: (
-                        lambda cmd: (cmd.execute(), self.scene().undo_stack.push(cmd))
-                    )(SetParentCommand(self.scene(), t, None, self))
-                    if self.scene() else None
+                    lambda _, t=txt: self.scene().unbind_parent_for_item(t) if self.scene() else None
                 )
             menu.addSeparator()
 
@@ -7779,10 +7779,7 @@ class VImageItem(BaseElement):
             menu.addSeparator()
 
         menu.addAction("解除父级绑定").triggered.connect(
-            lambda: (
-                lambda cmd: (cmd.execute(), self.scene().undo_stack.push(cmd))
-            )(SetParentCommand(self.scene(), self, None, self.parentItem()))
-            if self.scene() and isinstance(self.parentItem(), BaseElement) else None
+            lambda: self.scene().unbind_parent_for_item(self) if self.scene() else None
         )
         menu.addAction("设置父级").triggered.connect(lambda: self.scene().start_binding_mode(self) if self.scene() else None)
         if self.scene() and self.scene().is_perpendicular_to_guide_enabled():
@@ -9938,12 +9935,46 @@ class LayoutScene(QGraphicsScene):
                     sorted_new = list(newly_selected)
                 self.selection_order.extend(sorted_new)
             
+    def _describe_element_brief(self, item):
+        """返回元素的简短中文描述（用于提示信息）"""
+        if isinstance(item, VTextItem):
+            txt = (getattr(item, 'full_text', '') or '').replace('\n', ' ').strip()
+            if txt:
+                short = txt[:8] + ('…' if len(txt) > 8 else '')
+                return f"文字「{short}」"
+            return "文字"
+        if isinstance(item, VImageItem):
+            return "图片"
+        return "对象"
+
+    def unbind_parent_for_item(self, item):
+        """解除指定元素的父级绑定，并给出 Toast 与状态栏反馈"""
+        old_parent = item.parentItem() if isinstance(item.parentItem(), BaseElement) else None
+        if not old_parent:
+            msg = f"当前{self._describe_element_brief(item)}未绑定父级"
+            self._show_status_message(msg, 2500)
+            ToastNotification.notify(msg, "ℹ️", 2200)
+            return False
+        command = SetParentCommand(self, item, None, old_parent)
+        command.execute()
+        self.undo_stack.push(command)
+        msg = f"已解除父级绑定：{self._describe_element_brief(item)}（原父级：{self._describe_element_brief(old_parent)}）"
+        self._show_status_message(msg, 3000)
+        ToastNotification.notify(msg, "🔓", 2600)
+        views = self.views()
+        mw = getattr(views[0], '_main_window', None) if views else None
+        if mw and hasattr(mw, 'refresh_ui'):
+            mw.refresh_ui()
+        return True
+
     def start_binding_mode(self, item):
         self.binding_source = item
         views = self.views()
         if views:
             views[0].setCursor(Qt.CursorShape.CrossCursor)
-        print("Select parent for binding...")
+        msg = f"请点击目标父级对象，将{self._describe_element_brief(item)}绑定到其下（按 Esc 或点空白取消）"
+        self._show_status_message(msg, 4500)
+        ToastNotification.notify(msg, "🔗", 3000)
 
     def contextMenuEvent(self, event):
         """右键菜单：盖章或对齐基准选择过程中屏蔽菜单"""
@@ -10048,12 +10079,21 @@ class LayoutScene(QGraphicsScene):
                     break
 
             if target_item and isinstance(target_item, BaseElement) and target_item != self.binding_source:
-                command = SetParentCommand(self, self.binding_source, target_item)
+                child_desc = self._describe_element_brief(self.binding_source)
+                parent_desc = self._describe_element_brief(target_item)
+                old_parent = self.binding_source.parentItem() if isinstance(self.binding_source.parentItem(), BaseElement) else None
+                command = SetParentCommand(self, self.binding_source, target_item, old_parent)
                 command.execute()
                 self.undo_stack.push(command)
-                print(f"已设置父级: {type(target_item).__name__}")
+                msg = f"已设置父级：{child_desc} → {parent_desc}"
+                self._show_status_message(msg, 3000)
+                ToastNotification.notify(msg, "✅", 2600)
+                views = self.views()
+                mw = getattr(views[0], '_main_window', None) if views else None
+                if mw and hasattr(mw, 'refresh_ui'):
+                    mw.refresh_ui()
             else:
-                print("已取消设置父级")
+                self._show_status_message("已取消设置父级", 2000)
 
             self.binding_source = None
             if self.views():
@@ -19482,6 +19522,7 @@ class MainWindow(QMainWindow):
                         self.scene.binding_source = None
                         if self.scene.views():
                             self.scene.views()[0].setCursor(Qt.CursorShape.ArrowCursor)
+                        self.scene._show_status_message("已取消设置父级", 2000)
                         return True
                     if self.scene.is_isolation_active():
                         if getattr(self.scene, '_editing_group_asset_id', None) is not None:
@@ -19703,6 +19744,8 @@ class MainWindow(QMainWindow):
                 text_item.character_spacing = character_spacing
                 text_item.column_spacing = column_spacing
                 text_item.rebuild()
+                # D 组独立文字导入时自动移除连接点
+                text_item.delete_connection_point()
                 text_item.setPos(x - idx * (font_size * 2 + column_spacing), y)
                 text_cmd = AddItemCommand(self.scene, text_item)
                 text_cmd.execute()
