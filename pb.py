@@ -471,14 +471,6 @@ class AssetManager:
             print(f"复制图片失败: {e}")
             return None
     
-    def get_text_assets(self):
-        """获取所有文字素材"""
-        return self.assets.get('texts', [])
-    
-    def get_image_assets(self):
-        """获取所有图片素材"""
-        return self.assets.get('images', [])
-    
     def add_group_asset(self, items, scene):
         """添加组合素材(支持父子关系和图文连接)"""
         if not items:
@@ -783,32 +775,6 @@ class AssetManager:
             self._delete_group_asset_files(old_asset, keep_paths)
         return new_asset
     
-    def remove_text_asset(self, asset_id):
-        """删除文字素材"""
-        self.assets['texts'] = [a for a in self.assets['texts'] if a['id'] != asset_id]
-        self.save_assets()
-    
-    def remove_image_asset(self, asset_id):
-        """删除图片素材"""
-        # 找到要删除的素材
-        asset_to_remove = None
-        for asset in self.assets['images']:
-            if asset['id'] == asset_id:
-                asset_to_remove = asset
-                break
-        
-        if asset_to_remove:
-            # 删除文件
-            try:
-                if os.path.exists(asset_to_remove['path']):
-                    os.remove(asset_to_remove['path'])
-            except:
-                pass
-            
-            # 从列表中删除
-            self.assets['images'] = [a for a in self.assets['images'] if a['id'] != asset_id]
-            self.save_assets()
-
 
 class _BaseMinimalSpinBox(QFrame):
     """现代化极简数值输入框公共组件基类：
@@ -1588,7 +1554,6 @@ class FontPickerDialog(QDialog):
             text=current_text
         )
         if ok:
-            import re
             parts = re.split(r'[\s,]+', text.strip())
             new_sizes = []
             for p in parts:
@@ -1819,10 +1784,6 @@ class TextStyleSettingsDialog(QDialog):
 
     def _on_font_size_changed(self, val):
         self._font_size = val
-        self._maybe_live_apply()
-
-    def _on_chars_per_col_changed(self, val):
-        self._chars_per_column = val
         self._maybe_live_apply()
 
     def _on_col_spacing_changed(self, val):
@@ -4770,7 +4731,118 @@ class ConnectionPoint(QGraphicsEllipseItem):
         """获取连接点在场景中的中心位置"""
         return self.mapToScene(0, 0)
 
-class VGenericConnector(QGraphicsPathItem):
+class BaseLineConnector(QGraphicsPathItem):
+    """连接线公共基类：统一管理线宽、颜色、悬停高亮、选中绘制与右键样式菜单。"""
+
+    def _init_connector_style(self, line_width, default_color, z_value, line_color=None):
+        self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH
+        self.base_color = parse_connector_color(line_color) if line_color is not None else QColor(default_color)
+        self.setZValue(z_value)
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setAcceptHoverEvents(True)
+
+    def set_line_width(self, width):
+        """设置线条粗细"""
+        self.line_width = width
+        pen = self.pen()
+        pen.setWidth(width)
+        self.setPen(pen)
+        self.update()
+
+    def set_line_color(self, color):
+        """设置线条颜色"""
+        self.base_color = parse_connector_color(color)
+        if not self.isSelected():
+            pen = self.pen()
+            pen.setColor(self.base_color)
+            self.setPen(pen)
+        self.update()
+
+    def hoverEnterEvent(self, event):
+        """鼠标悬停时高亮"""
+        pen = QPen(QColor(255, 150, 0, 255))  # 橙色高亮
+        pen.setWidth(self.line_width + 1)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        """鼠标离开时恢复"""
+        pen = QPen(self.base_color)
+        pen.setWidth(self.line_width)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        self.setPen(pen)
+        super().hoverLeaveEvent(event)
+
+    def paint(self, painter, option, widget):
+        """绘制连接线，选中时显示高亮"""
+        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
+            return
+        if self.isSelected():
+            pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
+            self.setPen(pen)
+        else:
+            pen = QPen(self.base_color)
+            pen.setWidth(self.line_width)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            self.setPen(pen)
+        super().paint(painter, option, widget)
+
+    def contextMenuEvent(self, event):
+        """右键菜单（线条粗细、颜色与删除）"""
+        menu = QMenu()
+        width_menu = menu.addMenu("线条粗细")
+        width_1 = width_menu.addAction("细 (1px)")
+        width_2 = width_menu.addAction("较细 (2px)")
+        width_3 = width_menu.addAction("正常 (3px)")
+        width_4 = width_menu.addAction("较粗 (4px)")
+        width_5 = width_menu.addAction("粗 (5px)")
+        width_8 = width_menu.addAction("很粗 (8px)")
+        width_custom = width_menu.addAction("自定义...")
+
+        width_actions = {1: width_1, 2: width_2, 3: width_3, 4: width_4, 5: width_5, 8: width_8}
+        if self.line_width in width_actions:
+            width_actions[self.line_width].setCheckable(True)
+            width_actions[self.line_width].setChecked(True)
+
+        color_action = menu.addAction("线条颜色...")
+        menu.addSeparator()
+        delete_action = menu.addAction("删除连接线")
+
+        action = menu.exec(event.screenPos())
+
+        if action in width_actions.values():
+            for w_val, w_act in width_actions.items():
+                if action == w_act:
+                    self.set_line_width(w_val)
+                    break
+        elif action == width_custom:
+            width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
+            if ok:
+                self.set_line_width(width)
+        elif action == color_action:
+            cur = QColor(self.base_color)
+            cur.setAlpha(255)
+            chosen = QColorDialog.getColor(cur, None, "选择线条颜色")
+            if chosen.isValid():
+                sc = self.scene()
+                sel_conns = [c for c in sc.selectedItems() if isinstance(c, BaseLineConnector)] if sc else []
+                targets = sel_conns if (self in sel_conns and len(sel_conns) > 1) else [self]
+                for c in targets:
+                    if hasattr(c, 'set_line_color'):
+                        c.set_line_color(chosen.name())
+                if sc:
+                    sc.update()
+        elif action == delete_action:
+            if self.scene():
+                self.scene().remove_connector_item(self)
+
+
+class VGenericConnector(BaseLineConnector):
     """通用连接线 - 支持任意两个元素之间的连接"""
     def __init__(self, item1, item2, connection_type="generic", line_width=None,
                  point1=None, point2=None, line_color=None):
@@ -4780,17 +4852,7 @@ class VGenericConnector(QGraphicsPathItem):
         self.point1 = point1
         self.point2 = point2
         self.connection_type = connection_type  # "image-image", "text-text", "generic"
-        self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
-        self.base_color = parse_connector_color(line_color) if line_color is not None else QColor(255, 0, 0, 200)  # 基础颜色
-        self.setZValue(50)  # 显示在图片前面
-        
-        # 统一使用红色连接线
-        pen = QPen(self.base_color)
-        pen.setWidth(self.line_width)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
-        self.setAcceptHoverEvents(True)  # 接受悬停事件
+        self._init_connector_style(line_width, QColor(255, 0, 0, 200), 50, line_color)
 
     # --- 新增：重写 shape 方法以扩大点击区域 ---
     def shape(self):
@@ -4809,116 +4871,6 @@ class VGenericConnector(QGraphicsPathItem):
         return stroker.createStroke(path)
     # ----------------------------------------
     
-    def set_line_width(self, width):
-        """设置线条粗细"""
-        self.line_width = width
-        pen = self.pen()
-        pen.setWidth(width)
-        self.setPen(pen)
-        self.update()
-
-    def set_line_color(self, color):
-        """设置线条颜色"""
-        self.base_color = parse_connector_color(color)
-        if not self.isSelected():
-            pen = self.pen()
-            pen.setColor(self.base_color)
-            self.setPen(pen)
-        self.update()
-    
-    def hoverEnterEvent(self, event):
-        """鼠标悬停时高亮"""
-        pen = QPen(QColor(255, 150, 0, 255))  # 橙色高亮
-        pen.setWidth(self.line_width + 1)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        super().hoverEnterEvent(event)
-    
-    def hoverLeaveEvent(self, event):
-        """鼠标离开时恢复"""
-        pen = QPen(self.base_color)
-        pen.setWidth(self.line_width)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        super().hoverLeaveEvent(event)
-    
-    def paint(self, painter, option, widget):
-        """绘制连接线，选中时显示高亮"""
-        # 如果设置了背景图片在连线之上，则在 drawBackground 中手动绘制，此处跳过
-        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
-            return
-            
-        if self.isSelected():
-            # 选中时使用橙色粗线
-            pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
-            self.setPen(pen)
-        else:
-            # 连线被取消选中时，强制恢复到基础画笔颜色
-            pen = QPen(self.base_color)
-            pen.setWidth(self.line_width)
-            pen.setStyle(Qt.PenStyle.SolidLine)
-            self.setPen(pen)
-        super().paint(painter, option, widget)
-    
-    def contextMenuEvent(self, event):
-        """右键菜单"""
-        menu = QMenu()
-        
-        # 线条粗细子菜单
-        width_menu = menu.addMenu("线条粗细")
-        width_1 = width_menu.addAction("细 (1px)")
-        width_2 = width_menu.addAction("较细 (2px)")
-        width_3 = width_menu.addAction("正常 (3px)")
-        width_4 = width_menu.addAction("较粗 (4px)")
-        width_5 = width_menu.addAction("粗 (5px)")
-        width_8 = width_menu.addAction("很粗 (8px)")
-        width_custom = width_menu.addAction("自定义...")
-        
-        # 当前粗细标记
-        width_actions = {1: width_1, 2: width_2, 3: width_3, 4: width_4, 5: width_5, 8: width_8}
-        if self.line_width in width_actions:
-            width_actions[self.line_width].setCheckable(True)
-            width_actions[self.line_width].setChecked(True)
-        
-        color_action = menu.addAction("线条颜色...")
-        menu.addSeparator()
-        delete_action = menu.addAction("删除连接线")
-        
-        action = menu.exec(event.screenPos())
-        
-        if action == width_1:
-            self.set_line_width(1)
-        elif action == width_2:
-            self.set_line_width(2)
-        elif action == width_3:
-            self.set_line_width(3)
-        elif action == width_4:
-            self.set_line_width(4)
-        elif action == width_5:
-            self.set_line_width(5)
-        elif action == width_8:
-            self.set_line_width(8)
-        elif action == width_custom:
-            width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
-            if ok:
-                self.set_line_width(width)
-        elif action == color_action:
-            cur = QColor(self.base_color)
-            cur.setAlpha(255)
-            chosen = QColorDialog.getColor(cur, None, "选择线条颜色")
-            if chosen.isValid():
-                sc = self.scene()
-                sel_conns = [c for c in sc.selectedItems() if isinstance(c, (VImageTextConnector, VGenericConnector))] if sc else []
-                targets = sel_conns if (self in sel_conns and len(sel_conns) > 1) else [self]
-                for c in targets:
-                    if hasattr(c, 'set_line_color'):
-                        c.set_line_color(chosen.name())
-                if sc:
-                    sc.update()
-        elif action == delete_action:
-            if self.scene():
-                self.scene().remove_connector_item(self)
-        
     def update_path(self):
         if self.point1 is not None or self.point2 is not None:
             if (self.point1 is None or self.point2 is None
@@ -4994,22 +4946,13 @@ class VGenericConnector(QGraphicsPathItem):
                 return child
         return None
 
-class VImageTextConnector(QGraphicsPathItem):
+class VImageTextConnector(BaseLineConnector):
     """图文连接线- 连接图片顶部中点和文字底部中点"""
     def __init__(self, image_item, text_item, line_width=None, line_color=None):
         super().__init__()
         self.image_item = image_item
         self.text_item = text_item
-        self.line_width = line_width if line_width is not None else DEFAULT_LINE_WIDTH  # 线条粗细
-        self.base_color = parse_connector_color(line_color) if line_color is not None else QColor(255, 100, 100, 200)  # 基础颜色
-        self.setZValue(55)  # 显示在图片前面
-        
-        pen = QPen(self.base_color)
-        pen.setWidth(self.line_width)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)  # 可选中
-        self.setAcceptHoverEvents(True)  # 接受悬停事件
+        self._init_connector_style(line_width, QColor(255, 100, 100, 200), 55, line_color)
 
     # --- 新增：重写 shape 方法以扩大点击区域 ---
     def shape(self):
@@ -5026,116 +4969,6 @@ class VImageTextConnector(QGraphicsPathItem):
         return stroker.createStroke(path)
     # ----------------------------------------
     
-    def set_line_width(self, width):
-        """设置线条粗细"""
-        self.line_width = width
-        pen = self.pen()
-        pen.setWidth(width)
-        self.setPen(pen)
-        self.update()
-
-    def set_line_color(self, color):
-        """设置线条颜色"""
-        self.base_color = parse_connector_color(color)
-        if not self.isSelected():
-            pen = self.pen()
-            pen.setColor(self.base_color)
-            self.setPen(pen)
-        self.update()
-    
-    def hoverEnterEvent(self, event):
-        """鼠标悬停时高亮"""
-        pen = QPen(QColor(255, 150, 0, 255))  # 橙色高亮
-        pen.setWidth(self.line_width + 1)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        super().hoverEnterEvent(event)
-    
-    def hoverLeaveEvent(self, event):
-        """鼠标离开时恢复"""
-        pen = QPen(self.base_color)
-        pen.setWidth(self.line_width)
-        pen.setStyle(Qt.PenStyle.SolidLine)
-        self.setPen(pen)
-        super().hoverLeaveEvent(event)
-    
-    def paint(self, painter, option, widget):
-        """绘制连接线，选中时显示高亮"""
-        # 如果设置了背景图片在连线之上，则在 drawBackground 中手动绘制，此处跳过
-        if self.scene() and self.scene().config_manager.get('bg_above_connectors', False):
-            return
-            
-        if self.isSelected():
-            # 选中时使用橙色粗线
-            pen = QPen(QColor(255, 140, 0), self.line_width + 2, Qt.PenStyle.SolidLine)
-            self.setPen(pen)
-        else:
-            # 连线被取消选中时，强制恢复到基础画笔颜色
-            pen = QPen(self.base_color)
-            pen.setWidth(self.line_width)
-            pen.setStyle(Qt.PenStyle.SolidLine)
-            self.setPen(pen)
-        super().paint(painter, option, widget)
-        
-    def contextMenuEvent(self, event):
-        """右键菜单"""
-        menu = QMenu()
-        
-        # 线条粗细子菜单
-        width_menu = menu.addMenu("线条粗细")
-        width_1 = width_menu.addAction("细 (1px)")
-        width_2 = width_menu.addAction("较细 (2px)")
-        width_3 = width_menu.addAction("正常 (3px)")
-        width_4 = width_menu.addAction("较粗 (4px)")
-        width_5 = width_menu.addAction("粗 (5px)")
-        width_8 = width_menu.addAction("很粗 (8px)")
-        width_custom = width_menu.addAction("自定义...")
-        
-        # 当前粗细标记
-        width_actions = {1: width_1, 2: width_2, 3: width_3, 4: width_4, 5: width_5, 8: width_8}
-        if self.line_width in width_actions:
-            width_actions[self.line_width].setCheckable(True)
-            width_actions[self.line_width].setChecked(True)
-        
-        color_action = menu.addAction("线条颜色...")
-        menu.addSeparator()
-        delete_action = menu.addAction("删除连接线")
-        
-        action = menu.exec(event.screenPos())
-        
-        if action == width_1:
-            self.set_line_width(1)
-        elif action == width_2:
-            self.set_line_width(2)
-        elif action == width_3:
-            self.set_line_width(3)
-        elif action == width_4:
-            self.set_line_width(4)
-        elif action == width_5:
-            self.set_line_width(5)
-        elif action == width_8:
-            self.set_line_width(8)
-        elif action == width_custom:
-            width, ok = MinimalInputDialog.getInt(None, "自定义线条粗细", "线条粗细 (像素):", self.line_width, 1, 20)
-            if ok:
-                self.set_line_width(width)
-        elif action == color_action:
-            cur = QColor(self.base_color)
-            cur.setAlpha(255)
-            chosen = QColorDialog.getColor(cur, None, "选择线条颜色")
-            if chosen.isValid():
-                sc = self.scene()
-                sel_conns = [c for c in sc.selectedItems() if isinstance(c, (VImageTextConnector, VGenericConnector))] if sc else []
-                targets = sel_conns if (self in sel_conns and len(sel_conns) > 1) else [self]
-                for c in targets:
-                    if hasattr(c, 'set_line_color'):
-                        c.set_line_color(chosen.name())
-                if sc:
-                    sc.update()
-        elif action == delete_action:
-            if self.scene():
-                self.scene().remove_connector_item(self)
-        
     def update_path(self):
         if not self.image_item.scene() or not self.text_item.scene():
             return
@@ -5966,6 +5799,103 @@ class BaseElement(QGraphicsItem):
             element_type = "图片" if isinstance(self, VImageItem) else "文字"
             print(f"{element_type}连接点已永久删除")
 
+    def set_cp_offset(self, ox, oy):
+        """设置元素连接点相对默认锚点的微调偏移（px），并实时刷新连接点与连线"""
+        self.cp_offset_x = float(ox)
+        self.cp_offset_y = float(oy)
+        if getattr(self, 'connection_point', None):
+            self.connection_point.update_position()
+        sc = self.scene()
+        if sc:
+            sc.update_image_text_connectors(self)
+            sc.update()
+
+    def open_cp_offset_dialog(self):
+        """弹出连接点偏移微调对话框（支持实时预览与同类型多选批量微调）"""
+        sc = self.scene()
+        is_img = isinstance(self, VImageItem)
+        target_cls = VImageItem if is_img else VTextItem
+        noun = "图片" if is_img else "文字"
+        unit_word = "张图片" if is_img else "个文字"
+        anchor_desc = "图片顶部中点" if is_img else "文本框底部中点"
+
+        sel_same = [i for i in sc.selectedItems() if isinstance(i, target_cls)] if sc else []
+        targets = sel_same if (self in sel_same and len(sel_same) > 1) else [self]
+        orig_offsets = {
+            t: (float(getattr(t, 'cp_offset_x', 0.0)), float(getattr(t, 'cp_offset_y', 0.0)))
+            for t in targets
+        }
+        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
+
+        prev_vis = {}
+        for t in targets:
+            if getattr(t, 'connection_point', None):
+                prev_vis[t] = t.connection_point.isVisible()
+                t.connection_point.setVisible(True)
+
+        dlg = QDialog(parent_win)
+        dlg.setWindowTitle(f"{noun}连接点位置偏移{f'（{len(targets)} {unit_word}）' if len(targets) > 1 else ''}")
+        dlg.setMinimumWidth(300)
+        vbox = QVBoxLayout(dlg)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(10)
+
+        hint = QLabel(f"相对于{anchor_desc}的微调偏移（右为正、下为正）：", dlg)
+        hint.setStyleSheet("color: #475569; font-size: 12px;")
+        vbox.addWidget(hint)
+
+        form = QFormLayout()
+        form.setSpacing(8)
+        spin_x = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_x.setRange(-1000.0, 1000.0)
+        spin_x.setDecimals(1)
+        spin_x.setSingleStep(1.0)
+        spin_x.setValue(float(getattr(self, 'cp_offset_x', 0.0)))
+
+        spin_y = MinimalDoubleSpinBox(dlg, suffix="px")
+        spin_y.setRange(-1000.0, 1000.0)
+        spin_y.setDecimals(1)
+        spin_y.setSingleStep(1.0)
+        spin_y.setValue(float(getattr(self, 'cp_offset_y', 0.0)))
+
+        form.addRow("水平偏移 X：", spin_x)
+        form.addRow("垂直偏移 Y：", spin_y)
+        vbox.addLayout(form)
+
+        def _apply_live():
+            ox, oy = spin_x.value(), spin_y.value()
+            for t in targets:
+                t.set_cp_offset(ox, oy)
+
+        spin_x.valueChanged.connect(lambda _v: _apply_live())
+        spin_y.valueChanged.connect(lambda _v: _apply_live())
+
+        btn_row = QHBoxLayout()
+        btn_reset = QPushButton("归零重置", dlg)
+        btn_reset.clicked.connect(lambda: (spin_x.setValue(0.0), spin_y.setValue(0.0)))
+        btn_row.addWidget(btn_reset)
+        btn_row.addStretch(1)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
+        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        btn_row.addWidget(btns)
+        vbox.addLayout(btn_row)
+
+        accepted = (dlg.exec() == QDialog.DialogCode.Accepted)
+        if not accepted:
+            for t, (ox, oy) in orig_offsets.items():
+                t.set_cp_offset(ox, oy)
+        for t, was_vis in prev_vis.items():
+            if getattr(t, 'connection_point', None):
+                t.connection_point.setVisible(was_vis)
+        if accepted and sc:
+            sc._show_status_message(
+                f"已更新 {len(targets)} {unit_word}的连接点偏移：X={spin_x.value():g}px, Y={spin_y.value():g}px",
+                3000
+            )
+
 class InlineTextEditor(QTextEdit):
     """原位内联编辑器：透明覆盖层，只负责接收键盘输入，视觉由 VTextItem.paint 负责。
     
@@ -6538,95 +6468,6 @@ class VTextItem(BaseElement):
         for point in getattr(self, 'custom_connection_points', []):
             point.setVisible(effective_visible)
 
-    def set_cp_offset(self, ox, oy):
-        """设置文字连接点相对底部中点的微调偏移（px），并实时刷新连接点与连线"""
-        self.cp_offset_x = float(ox)
-        self.cp_offset_y = float(oy)
-        if self.connection_point:
-            self.connection_point.update_position()
-        sc = self.scene()
-        if sc:
-            sc.update_image_text_connectors(self)
-            sc.update()
-
-    def open_cp_offset_dialog(self):
-        """弹出文字连接点偏移微调对话框（支持实时预览与多选批量微调）"""
-        sc = self.scene()
-        sel_texts = [i for i in sc.selectedItems() if isinstance(i, VTextItem)] if sc else []
-        targets = sel_texts if (self in sel_texts and len(sel_texts) > 1) else [self]
-        orig_offsets = {t: (float(getattr(t, 'cp_offset_x', 0.0)), float(getattr(t, 'cp_offset_y', 0.0))) for t in targets}
-        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
-
-        # 临时显示连接点以便直观看到偏移位置
-        prev_vis = {}
-        for t in targets:
-            if t.connection_point:
-                prev_vis[t] = t.connection_point.isVisible()
-                t.connection_point.setVisible(True)
-
-        dlg = QDialog(parent_win)
-        dlg.setWindowTitle(f"文字连接点位置偏移{f'（{len(targets)} 个文字）' if len(targets) > 1 else ''}")
-        dlg.setMinimumWidth(300)
-        vbox = QVBoxLayout(dlg)
-        vbox.setContentsMargins(16, 14, 16, 14)
-        vbox.setSpacing(10)
-
-        hint = QLabel("相对于文本框底部中点的微调偏移（右为正、下为正）：", dlg)
-        hint.setStyleSheet("color: #475569; font-size: 12px;")
-        vbox.addWidget(hint)
-
-        form = QFormLayout()
-        form.setSpacing(8)
-        spin_x = MinimalDoubleSpinBox(dlg, suffix="px")
-        spin_x.setRange(-1000.0, 1000.0)
-        spin_x.setDecimals(1)
-        spin_x.setSingleStep(1.0)
-        spin_x.setValue(float(getattr(self, 'cp_offset_x', 0.0)))
-
-        spin_y = MinimalDoubleSpinBox(dlg, suffix="px")
-        spin_y.setRange(-1000.0, 1000.0)
-        spin_y.setDecimals(1)
-        spin_y.setSingleStep(1.0)
-        spin_y.setValue(float(getattr(self, 'cp_offset_y', 0.0)))
-
-        form.addRow("水平偏移 X：", spin_x)
-        form.addRow("垂直偏移 Y：", spin_y)
-        vbox.addLayout(form)
-
-        def _apply_live():
-            ox, oy = spin_x.value(), spin_y.value()
-            for t in targets:
-                t.set_cp_offset(ox, oy)
-
-        spin_x.valueChanged.connect(lambda _v: _apply_live())
-        spin_y.valueChanged.connect(lambda _v: _apply_live())
-
-        btn_row = QHBoxLayout()
-        btn_reset = QPushButton("归零重置", dlg)
-        btn_reset.clicked.connect(lambda: (spin_x.setValue(0.0), spin_y.setValue(0.0)))
-        btn_row.addWidget(btn_reset)
-        btn_row.addStretch(1)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        btn_row.addWidget(btns)
-        vbox.addLayout(btn_row)
-
-        accepted = (dlg.exec() == QDialog.DialogCode.Accepted)
-        if not accepted:
-            for t, (ox, oy) in orig_offsets.items():
-                t.set_cp_offset(ox, oy)
-        for t, was_vis in prev_vis.items():
-            if t.connection_point:
-                t.connection_point.setVisible(was_vis)
-        if accepted and sc:
-            sc._show_status_message(
-                f"已更新 {len(targets)} 个文字的连接点偏移：X={spin_x.value():g}px, Y={spin_y.value():g}px",
-                3000
-            )
-        
     def _show_context_menu(self, global_pos, item_pos=None):
         self._build_text_context_menu(global_pos, item_pos)
 
@@ -6846,58 +6687,6 @@ class VTextItem(BaseElement):
             if parent_win and hasattr(parent_win, 'update_font_controls'):
                 parent_win.update_font_controls()
 
-    def change_font_settings(self):
-        current_font = QFont(self.font_family)
-        current_font.setPointSize(self.font_size)
-        cfg = self.scene().config_manager if self.scene() else None
-        font, ok = FontPickerDialog.get_font(current_font, cfg, None, "选择字体")
-        if ok:
-            self.font_family = font.family()
-            self.font_size = font.pointSize()
-            self.rebuild()
-            if self.scene(): 
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
-
-    def change_color_settings(self):
-        color = QColorDialog.getColor(self.text_color, None, "选择颜色")
-        if color.isValid():
-            self.text_color = color
-            self.rebuild()
-    
-    def change_chars_per_column_settings(self):
-        """设置每列字符数"""
-        chars_count, ok = MinimalInputDialog.getInt(None, "设置每列字符数", "每列字符数", self.chars_per_column, 5, 50)
-        if ok:
-            self.chars_per_column = chars_count
-            self.rebuild()
-            if self.scene(): 
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
-    
-    def change_column_spacing_settings(self):
-        """设置列间距"""
-        spacing, ok = MinimalInputDialog.getInt(None, "设置列间距", "列间距 (像素):", self.column_spacing, 0, 200)
-        if ok:
-            self.column_spacing = spacing
-            self.rebuild()
-            if self.scene():
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
-            print(f"列间距已设置为: {self.column_spacing}px")
-
-    def change_character_spacing_settings(self):
-        """设置同一竖列中相邻字符之间的额外间距。"""
-        spacing, ok = MinimalInputDialog.getInt(
-            None, "设置字间距", "字间距 (像素):", self.character_spacing, -200, 200
-        )
-        if ok:
-            self.character_spacing = spacing
-            self.rebuild()
-            if self.scene():
-                self.scene().update_connectors(self)
-                self.scene().update_image_text_connectors(self)
-    
     def toggle_connection_point(self):
         """切换连接点的可见性（隐藏后不影响头像连线）"""
         if self.connection_point:
@@ -7876,94 +7665,6 @@ class VImageItem(BaseElement):
                 print("图片连接点已隐藏（不影响点图片连线）")
             else:
                 print("图片连接点已显示")
-
-    def set_cp_offset(self, ox, oy):
-        """设置图片连接点相对顶部中点的微调偏移（px），并实时刷新连接点与连线"""
-        self.cp_offset_x = float(ox)
-        self.cp_offset_y = float(oy)
-        if self.connection_point:
-            self.connection_point.update_position()
-        sc = self.scene()
-        if sc:
-            sc.update_image_text_connectors(self)
-            sc.update()
-
-    def open_cp_offset_dialog(self):
-        """弹出图片连接点偏移微调对话框（支持实时预览与多选批量微调）"""
-        sc = self.scene()
-        sel_imgs = [i for i in sc.selectedItems() if isinstance(i, VImageItem)] if sc else []
-        targets = sel_imgs if (self in sel_imgs and len(sel_imgs) > 1) else [self]
-        orig_offsets = {img: (float(getattr(img, 'cp_offset_x', 0.0)), float(getattr(img, 'cp_offset_y', 0.0))) for img in targets}
-        parent_win = sc.views()[0].window() if (sc and sc.views()) else None
-
-        prev_vis = {}
-        for img in targets:
-            if img.connection_point:
-                prev_vis[img] = img.connection_point.isVisible()
-                img.connection_point.setVisible(True)
-
-        dlg = QDialog(parent_win)
-        dlg.setWindowTitle(f"图片连接点位置偏移{f'（{len(targets)} 张图片）' if len(targets) > 1 else ''}")
-        dlg.setMinimumWidth(300)
-        vbox = QVBoxLayout(dlg)
-        vbox.setContentsMargins(16, 14, 16, 14)
-        vbox.setSpacing(10)
-
-        hint = QLabel("相对于图片顶部中点的微调偏移（右为正、下为正）：", dlg)
-        hint.setStyleSheet("color: #475569; font-size: 12px;")
-        vbox.addWidget(hint)
-
-        form = QFormLayout()
-        form.setSpacing(8)
-        spin_x = MinimalDoubleSpinBox(dlg, suffix="px")
-        spin_x.setRange(-1000.0, 1000.0)
-        spin_x.setDecimals(1)
-        spin_x.setSingleStep(1.0)
-        spin_x.setValue(float(getattr(self, 'cp_offset_x', 0.0)))
-
-        spin_y = MinimalDoubleSpinBox(dlg, suffix="px")
-        spin_y.setRange(-1000.0, 1000.0)
-        spin_y.setDecimals(1)
-        spin_y.setSingleStep(1.0)
-        spin_y.setValue(float(getattr(self, 'cp_offset_y', 0.0)))
-
-        form.addRow("水平偏移 X：", spin_x)
-        form.addRow("垂直偏移 Y：", spin_y)
-        vbox.addLayout(form)
-
-        def _apply_live():
-            ox, oy = spin_x.value(), spin_y.value()
-            for img in targets:
-                img.set_cp_offset(ox, oy)
-
-        spin_x.valueChanged.connect(lambda _v: _apply_live())
-        spin_y.valueChanged.connect(lambda _v: _apply_live())
-
-        btn_row = QHBoxLayout()
-        btn_reset = QPushButton("归零重置", dlg)
-        btn_reset.clicked.connect(lambda: (spin_x.setValue(0.0), spin_y.setValue(0.0)))
-        btn_row.addWidget(btn_reset)
-        btn_row.addStretch(1)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg)
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        btn_row.addWidget(btns)
-        vbox.addLayout(btn_row)
-
-        accepted = (dlg.exec() == QDialog.DialogCode.Accepted)
-        if not accepted:
-            for img, (ox, oy) in orig_offsets.items():
-                img.set_cp_offset(ox, oy)
-        for img, was_vis in prev_vis.items():
-            if img.connection_point:
-                img.connection_point.setVisible(was_vis)
-        if accepted and sc:
-            sc._show_status_message(
-                f"已更新 {len(targets)} 张图片的连接点偏移：X={spin_x.value():g}px, Y={spin_y.value():g}px",
-                3000
-            )
 
     def _get_child_texts(self):
         """获取直接子文字元素列表"""
@@ -11622,21 +11323,6 @@ class LayoutScene(QGraphicsScene):
         self.set_connection_points_visible(self.show_connection_points)
         print(f"连接点显示 {'开启' if self.show_connection_points else '关闭'}")
     
-    def save_item_as_asset(self, item):
-        """保存元素为素材"""
-        if isinstance(item, VTextItem):
-            asset = self.asset_manager.add_text_asset(item)
-            if asset:
-                print(f"文字素材已保存 {asset['name']}")
-                self.refresh_asset_library()
-        elif isinstance(item, VImageItem):
-            asset = self.asset_manager.add_image_asset(item)
-            if asset:
-                print(f"图片素材已保存 {asset['name']}")
-                self.refresh_asset_library()
-            else:
-                print("保存图片素材失败")
-    
     def save_group_as_asset(self, items=None):
         """保存组合为素材（自动包含已选父级下的所有子级元素）"""
         if items is None:
@@ -11686,25 +11372,6 @@ class LayoutScene(QGraphicsScene):
                         widget.asset_library.refresh_assets()
                     break
                 widget = widget.parent()
-    
-    def start_image_text_binding(self, item):
-        """开始图文/人物智能连接模式（被锁定的图片不参与连线）"""
-        if isinstance(item, VImageItem) and getattr(item, 'locked', False):
-            self._show_status_message("被锁定的图片不参与连线", 2500)
-            return
-        if isinstance(item, (VImageItem, VTextItem)):
-            self.image_text_binding_mode = True
-            self.image_text_source = item
-            info = self.get_person_group_info(item)
-            self.avatar_connect_source = info['root'] if info else item
-            views = self.views()
-            if views:
-                views[0].setCursor(Qt.CursorShape.CrossCursor)
-            self._show_status_message(
-                "图文/人物连线：请直接点击目标人物头像或文字（自动判断横向a↔a / 纵向b→a，按Esc取消）",
-                0
-            )
-            self.update()
     
     def add_image_text_connector(self, image_item, text_item):
         """添加图文连接线"""
@@ -11797,12 +11464,6 @@ class LayoutScene(QGraphicsScene):
             elif hasattr(conn, 'item1') and hasattr(conn, 'item2'):
                 if conn.item1 == item or conn.item2 == item:
                     conn.update_path()
-    
-    def update_all_image_text_connectors(self):
-        """更新所有图文连接器"""
-        for conn in self.image_text_connectors:
-            conn.update_path()
-        self.sync_connectors_visibility()
     
     def auto_connect_selected_items(self):
         """智能连接：
@@ -17031,190 +16692,6 @@ class MainWindow(QMainWindow):
         self._refresh_text_preset_combo()
         self.status_bar.showMessage(f"已删除文字预设：{name}", 3000)
     
-    def create_toolbars_legacy(self):
-        # 主工具栏 - 编辑和格式化
-        main_toolbar = QToolBar("编辑与格式")
-        main_toolbar.setObjectName("toolbar_main")
-        main_toolbar.setMovable(False)
-        main_toolbar.setIconSize(QSize(16, 16))
-        main_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, main_toolbar)
-        
-        # === 基本编辑操作 ===
-        btn_add_text = QAction("添加文本", self)
-        btn_add_text.triggered.connect(self.add_text)
-        main_toolbar.addAction(btn_add_text)
-
-        btn_add_img = QAction("插入图片", self)
-        btn_add_img.triggered.connect(self.add_image)
-        main_toolbar.addAction(btn_add_img)
-
-        btn_edit_text = QAction("编辑文字", self)
-        btn_edit_text.triggered.connect(self.edit_selected_text)
-        main_toolbar.addAction(btn_edit_text)
-
-        self.btn_resize = QAction("调整图片大小", self)
-        self.btn_resize.setCheckable(True)
-        self.btn_resize.setToolTip("开启后选中图片会显示缩放控制点")
-        self.btn_resize.toggled.connect(self.toggle_resize_mode)
-        main_toolbar.addAction(self.btn_resize)
-        
-        main_toolbar.addSeparator()
-        
-        btn_undo = QAction("撤销", self)
-        btn_undo.setShortcut("Ctrl+Z")
-        btn_undo.triggered.connect(self.undo)
-        main_toolbar.addAction(btn_undo)
-
-        btn_clear_canvas = QAction("清空画布", self)
-        btn_clear_canvas.setToolTip("清空当前画布上的所有元素（支持 Ctrl+Z 撤销）")
-        btn_clear_canvas.triggered.connect(self.clear_current_canvas)
-        main_toolbar.addAction(btn_clear_canvas)
-        
-        btn_align_right = QAction("右对齐", self)
-        btn_align_right.triggered.connect(self.align_right)
-        main_toolbar.addAction(btn_align_right)
-
-        btn_align_top = QAction("顶部对齐", self)
-        btn_align_top.triggered.connect(self.align_top)
-        main_toolbar.addAction(btn_align_top)
-
-        self.btn_align_mode = self._add_toolbar_action(
-            main_toolbar,
-            "对齐: 首选对象",
-            self.on_align_mode_button_toggled,
-            "对齐基准模式切换（Alt+A）：「对选择的第一个对象对齐」与「点选指定对象对齐」可随时切换",
-            checkable=True
-        )
-
-
-        
-        main_toolbar.addSeparator()
-        
-        # === 字体格式 ===
-        main_toolbar.addWidget(QLabel("字体:"))
-        self.font_combo = QComboBox()
-        self.font_combo.setMinimumWidth(120)
-        self.font_combo.setMaximumWidth(170)
-        self.font_combo.setEditable(True)
-        # 加载系统所有字体
-        for f in QFontDatabase.families():
-            self.font_combo.addItem(f)
-        default_font = self.scene.config_manager.get('default_font_family', DEFAULT_FONT)
-        idx = self.font_combo.findText(default_font)
-        if idx >= 0:
-            self.font_combo.setCurrentIndex(idx)
-        else:
-            self.font_combo.setCurrentText(default_font)
-        self.font_combo.currentTextChanged.connect(
-            lambda name: self.change_selected_font(QFont(name))
-        )
-        main_toolbar.addWidget(self.font_combo)
-        
-        main_toolbar.addWidget(QLabel("大小:"))
-        self.font_size_spin = MinimalSpinBox()
-        self.font_size_spin.setRange(4, 200)
-        # 从配置加载默认字体大小
-        default_font_size = self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)
-        self.font_size_spin.setValue(default_font_size)
-        self.font_size_spin.setSuffix("pt")
-        self.font_size_spin.valueChanged.connect(self.change_selected_font_size)
-        main_toolbar.addWidget(self.font_size_spin)
-        
-        self.color_button = QPushButton()
-        self.color_button.setFixedSize(28, 24)
-        self.color_button.setStyleSheet("""
-            QPushButton {
-                background-color: black;
-                border: 2px solid rgba(255, 255, 255, 0.9);
-                border-radius: 4px;
-                padding: 0;
-            }
-            QPushButton:hover {
-                border: 2px solid rgba(0, 120, 215, 0.8);
-            }
-            QPushButton:pressed {
-            }
-        """)
-        self.color_button.clicked.connect(self.change_selected_color)
-        main_toolbar.addWidget(self.color_button)
-        
-        main_toolbar.addSeparator()
-        
-        # === 竖排布局设置 ===
-        main_toolbar.addWidget(QLabel("每列字数:"))
-        self.chars_per_column_spin = MinimalSpinBox()
-        self.chars_per_column_spin.setRange(5, 50)
-        self.chars_per_column_spin.setValue(15)
-        self.chars_per_column_spin.setSuffix("字")
-        self.chars_per_column_spin.valueChanged.connect(self.change_chars_per_column)
-        main_toolbar.addWidget(self.chars_per_column_spin)
-        
-        main_toolbar.addWidget(QLabel("列间距:"))
-        self.column_spacing_spin = MinimalSpinBox()
-        self.column_spacing_spin.setRange(0, 200)
-        self.column_spacing_spin.setValue(COLUMN_SPACING)
-        self.column_spacing_spin.setSuffix("px")
-        self.column_spacing_spin.valueChanged.connect(self.change_column_spacing)
-        main_toolbar.addWidget(self.column_spacing_spin)
-
-        main_toolbar.addWidget(QLabel("字间距:"))
-        self.character_spacing_spin = MinimalSpinBox()
-        self.character_spacing_spin.setRange(-200, 200)
-        self.character_spacing_spin.setValue(0)
-        self.character_spacing_spin.setSuffix("px")
-        self.character_spacing_spin.valueChanged.connect(self.change_character_spacing)
-        main_toolbar.addWidget(self.character_spacing_spin)
-        
-        self.manual_line_break_btn = QPushButton("手动换行")
-        self.manual_line_break_btn.setCheckable(True)
-        self.manual_line_break_btn.setChecked(True)
-        self.manual_line_break_btn.setMaximumHeight(28)
-        self.manual_line_break_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(255, 255, 255, 0.9),
-                    stop:1 rgba(249, 249, 249, 0.9));
-                border: 1px solid rgba(0, 0, 0, 0.1);
-                border-radius: 4px;
-                padding: 3px 8px;
-                font-weight: 500;
-            }
-            QPushButton:checked {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(0, 120, 215, 1.0),
-                    stop:1 rgba(0, 90, 158, 1.0));
-                color: white;
-                border: 1px solid rgba(0, 90, 158, 1.0);
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                border: 1px solid rgba(0, 120, 215, 0.4);
-            }
-        """)
-        self.manual_line_break_btn.toggled.connect(self.toggle_manual_line_break)
-        main_toolbar.addWidget(self.manual_line_break_btn)
-
-        main_toolbar.addSeparator()
-        self.btn_marquee_mode = self._add_toolbar_action(
-            main_toolbar,
-            "框选: 仅图片",
-            self.on_marquee_button_toggled,
-            "框选模式切换（Alt+M）：默认「仅图片」，按下切换为「全选」",
-            checkable=True
-        )
-
-        main_toolbar.addSeparator()
-        btn_group_connect = QAction("垂直连接", self)
-        btn_group_connect.setToolTip("将选中图片+子文字视为组合，按位置顺序依次连接 b点→a点")
-        btn_group_connect.triggered.connect(lambda: self.scene.group_chain_connect())
-        main_toolbar.addAction(btn_group_connect)
-
-        btn_img_connect = QAction("水平连接", self)
-        btn_img_connect.setToolTip("按从右到左顺序，依次连接选中图片的连接点")
-        btn_img_connect.triggered.connect(lambda: self.scene.connect_image_points_right_to_left())
-        main_toolbar.addAction(btn_img_connect)
-
     def _add_toolbar_action(self, toolbar, text, slot, tooltip=None, shortcut=None, checkable=False):
         action = QAction(text, self)
         if tooltip:
@@ -18427,14 +17904,6 @@ class MainWindow(QMainWindow):
                 self.marquee_mode_combo.setCurrentIndex(idx)
                 self.marquee_mode_combo.blockSignals(False)
 
-    def toggle_marquee_filter_setting(self, enabled):
-        """兼容旧调用"""
-        self.set_marquee_mode('images' if enabled else 'all')
-
-    def toggle_marquee_connected_setting(self, enabled):
-        """兼容旧调用"""
-        self.set_marquee_mode('connected' if enabled else 'all')
-
     def on_align_mode_button_toggled(self, checked):
         """工具栏对齐基准按钮切换：未按下=对第一个选中对象对齐，按下=点选指定对象对齐"""
         self.set_align_mode('pick_reference' if checked else 'first_selected')
@@ -19324,9 +18793,6 @@ class MainWindow(QMainWindow):
     
     def auto_connect_selected(self):
         self.scene.auto_connect_selected_items()
-    
-    def clear_all_connections(self):
-        self.scene.remove_all_image_text_connections()
     
     def set_all_connection_points_visible(self, visible):
         """设置全局连接点显示/隐藏（隐藏后不影响点图片连线、Shift接龙与智能连接）"""
@@ -20489,15 +19955,6 @@ class MainWindow(QMainWindow):
             "✅", 4500
         )
     
-    def _open_font_dialog(self):
-        """弹出字体选择对话框"""
-        current = QFont(self.font_combo.currentText())
-        current.setPointSize(self.font_size_spin.value())
-        font, ok = FontPickerDialog.get_font(current, self.scene.config_manager, self, "选择字体")
-        if ok:
-            self.font_combo.setCurrentText(font.family())
-            self.change_selected_font(font)
-
     def _get_target_text_items_for_property(self):
         """获取当前选中的文字对象；若仅选中了父级图片，则自动包含其子文字对象"""
         if not self.scene:
@@ -21119,10 +20576,6 @@ class MainWindow(QMainWindow):
                 return c
         return None
 
-    def _on_tree_item_changed(self, node, column):
-        """保留旧信号槽，兼容旧工程/旧 UI 调用。"""
-        return
-
     def export_image(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Image", "", "PNG (*.png)")
         if path:
@@ -21507,25 +20960,6 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith('.pdf'):
             path += '.pdf'
         self._do_export_pdf(path, show_dialog=True)
-
-    def set_multi_pdf_export_mode(self, mode):
-        """切换多文档 PDF 导出方式：'merged'（合并为一个多页PDF） / 'separate'（拆分为多个独立PDF）"""
-        if mode not in ('merged', 'separate'):
-            mode = 'merged'
-        self._set_shared_config('multi_pdf_export_mode', mode)
-        if hasattr(self, 'pdf_mode_merged_action') and hasattr(self, 'pdf_mode_separate_action'):
-            self.pdf_mode_merged_action.blockSignals(True)
-            self.pdf_mode_separate_action.blockSignals(True)
-            self.pdf_mode_merged_action.setChecked(mode == 'merged')
-            self.pdf_mode_separate_action.setChecked(mode == 'separate')
-            self.pdf_mode_merged_action.blockSignals(False)
-            self.pdf_mode_separate_action.blockSignals(False)
-        mode_desc = (
-            "合并为一个多页 PDF（按文档先后次序一文档一页）"
-            if mode == 'merged'
-            else "拆分为多个独立 PDF（按页码导出 1.pdf, 2.pdf...）"
-        )
-        self.show_toast(f"多文档 PDF 导出方式已切换为：\n{mode_desc}", "✅", 3500)
 
     def _get_pdf_page_metrics(self, scene):
         """按当前画布 DPI 计算 PDF 导出页面物理尺寸"""
@@ -23161,17 +22595,6 @@ class MainWindow(QMainWindow):
         
         self.setStyleSheet(fluent_style)
     
-    def set_button_style(self, button, style_class="default"):
-        """为按钮设置特定的Fluent Design样式"""
-        if style_class == "primary":
-            button.setProperty("class", "primary")
-        elif style_class == "danger":
-            button.setProperty("class", "danger")
-        
-        # 刷新样式
-        button.style().unpolish(button)
-        button.style().polish(button)
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
