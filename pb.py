@@ -17176,7 +17176,7 @@ class MainWindow(QMainWindow):
         self.toolbar_font_size_spin.setRange(4, 200)
         self.toolbar_font_size_spin.setValue(int(self.scene.config_manager.get('default_font_size', DEFAULT_FONT_SIZE)))
         self.toolbar_font_size_spin.setSuffix("pt")
-        self.toolbar_font_size_spin.setFixedWidth(56)
+        self.toolbar_font_size_spin.setFixedWidth(78)
         self.toolbar_font_size_spin.setToolTip("字号：设置选中文字（或选中图片的子文字）的字号（与 CorelDRAW 1:1 物理尺寸一致）")
         self.toolbar_font_size_spin.valueChanged.connect(self.change_selected_font_size)
         top_toolbar.addWidget(self.toolbar_font_size_spin)
@@ -20299,9 +20299,20 @@ class MainWindow(QMainWindow):
     def change_selected_font_size(self, size):
         self._sync_font_size_widgets(size)
         selected_items = self._get_target_text_items_for_property()
-        for item in selected_items:
-            item.font_size = size
-            item.rebuild()
+        if selected_items:
+            for item in selected_items:
+                item.font_size = size
+                item.rebuild()
+        else:
+            # 未选中文字时直接修改字号框，自动更新并持久化全局默认字号
+            fmt = dict(self.scene.config_manager.get('default_text_format', {}) or {})
+            fmt['font_size'] = int(size)
+            self._set_shared_configs({
+                'default_font_size': int(size),
+                'default_text_format': fmt,
+            })
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.showMessage(f"默认字号已设为 {int(size)} pt（新建文字将使用此字号）", 2500)
     
     def change_selected_color(self):
         selected_items = self._get_target_text_items_for_property()
