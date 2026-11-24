@@ -9489,7 +9489,7 @@ class CdrNavigatorButton(QToolButton):
     def __init__(self, layout_view):
         super().__init__(layout_view)
         self.layout_view = layout_view
-        self.setFixedSize(20, 20)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("导航器 (快捷键 N)\n• 按住左键拖拽：即时漫游全景\n• 单击：弹出导航小方框（滚轮缩放 / 右键拉框放大）")
         self.setStyleSheet("""
@@ -9517,14 +9517,17 @@ class CdrNavigatorButton(QToolButton):
         super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        side = max(8.0, float(min(self.width(), self.height())))
         c = QPointF(self.width() / 2.0, self.height() / 2.0)
-        # 绘制 CDR 风格的小方框 + 四向十字箭头图标
-        painter.setPen(QPen(QColor(36, 41, 47), 1.2))
+        box_half = max(2.2, side * 0.22)
+        arm = max(3.5, side * 0.36)
+        # 绘制 CDR 风格的小方框 + 四向十字箭头图标（自适应角落槽位尺寸）
+        painter.setPen(QPen(QColor(36, 41, 47), 1.1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(QRectF(c.x() - 4.5, c.y() - 4.5, 9.0, 9.0))
-        painter.setPen(QPen(QColor(9, 105, 218), 1.3))
-        painter.drawLine(QPointF(c.x() - 7, c.y()), QPointF(c.x() + 7, c.y()))
-        painter.drawLine(QPointF(c.x(), c.y() - 7), QPointF(c.x(), c.y() + 7))
+        painter.drawRect(QRectF(c.x() - box_half, c.y() - box_half, box_half * 2.0, box_half * 2.0))
+        painter.setPen(QPen(QColor(9, 105, 218), 1.2))
+        painter.drawLine(QPointF(c.x() - arm, c.y()), QPointF(c.x() + arm, c.y()))
+        painter.drawLine(QPointF(c.x(), c.y() - arm), QPointF(c.x(), c.y() + arm))
         painter.end()
 
     def mousePressEvent(self, event):
@@ -13607,7 +13610,7 @@ class LayoutView(QGraphicsView):
         # CorelDRAW 风格右下角小方框导航按钮与悬浮小导航器
         self._cdr_nav_popup = None
         self._cdr_nav_btn = CdrNavigatorButton(self)
-        self._position_cdr_nav_btn()
+        self.setCornerWidget(self._cdr_nav_btn)
 
     def set_main_window(self, mw):
         self._main_window = mw
@@ -14846,14 +14849,8 @@ class LayoutView(QGraphicsView):
         self._position_cdr_nav_btn()
 
     def _position_cdr_nav_btn(self):
-        """将 CDR 导航小方框按钮固定在画布右下角（滚动条交界处或视口右下角）。"""
-        if not hasattr(self, '_cdr_nav_btn') or self._cdr_nav_btn is None:
-            return
-        btn_w, btn_h = self._cdr_nav_btn.width(), self._cdr_nav_btn.height()
-        x = max(self.RULER_SIZE, self.width() - btn_w - 2)
-        y = max(self.RULER_SIZE, self.height() - btn_h - 2)
-        self._cdr_nav_btn.move(x, y)
-        self._cdr_nav_btn.raise_()
+        """导航按钮已通过 setCornerWidget 嵌入横竖滚动条交汇角，由 Qt 自动精准布局。"""
+        pass
 
     def show_cdr_navigator_popup(self, anchor_global_pos=None, hold_mode=False):
         """弹出 CorelDRAW 风格的紧凑导航小方框。"""
@@ -22987,8 +22984,8 @@ class MainWindow(QMainWindow):
         /* 滚动条样式 */
         QScrollBar:vertical {
             background: rgba(245, 245, 245, 0.8);
-            width: 12px;
-            border-radius: 6px;
+            width: 14px;
+            border-radius: 7px;
         }
         
         QScrollBar::handle:vertical {
@@ -23003,8 +23000,8 @@ class MainWindow(QMainWindow):
         
         QScrollBar:horizontal {
             background: rgba(245, 245, 245, 0.8);
-            height: 12px;
-            border-radius: 6px;
+            height: 14px;
+            border-radius: 7px;
         }
         
         QScrollBar::handle:horizontal {
