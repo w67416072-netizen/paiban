@@ -22970,6 +22970,27 @@ if __name__ == "__main__":
     app.setApplicationVersion("1.0")
     app.setOrganizationName("VertiLayout")
 
+    # 强制检查配置文件是否存在且有效：缺失、空文件或损坏时直接禁止启动
+    if not os.path.isfile(CONFIG_FILE):
+        QMessageBox.critical(
+            None,
+            "缺少授权配置文件",
+            f"未找到配置文件 config.json，软件禁止启动。\n\n请确保软件目录中存在有效的 config.json 文件后重试：\n{CONFIG_FILE}"
+        )
+        sys.exit(0)
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as _cf:
+            _raw_cfg = json.load(_cf)
+        if not isinstance(_raw_cfg, dict) or not _raw_cfg:
+            raise ValueError("配置文件内容为空或格式无效")
+    except Exception:
+        QMessageBox.critical(
+            None,
+            "授权配置文件损坏",
+            f"配置文件 config.json 内容无效或已损坏，软件禁止启动。\n\n请恢复有效的 config.json 文件后重试：\n{CONFIG_FILE}"
+        )
+        sys.exit(0)
+
     license_config = ConfigManager()
     login_time_valid, login_time_message = validate_and_record_login_time(license_config)
     if not login_time_valid:
