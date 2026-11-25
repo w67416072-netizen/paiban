@@ -17065,13 +17065,14 @@ class MainWindow(QMainWindow):
         return QIcon(pix)
 
     def _add_ps_icon_toolbar_button(self, toolbar, icon_kind, label, slot, tooltip, shortcut=None, checkable=False):
-        """在顶部工具栏创建与对齐按钮完全一致的 28x28 Photoshop 风格图标按钮。"""
+        """在顶部工具栏创建剪映风格无边框「上图标 + 下极轻 10px 二字标签」按钮（40x40）。"""
         btn = QToolButton()
         btn.setObjectName("psAlignBtn")
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setIcon(self._make_ps_toolbar_icon(icon_kind))
         btn.setIconSize(QSize(18, 18))
-        btn.setFixedSize(28, 28)
+        btn.setText(label)
+        btn.setFixedSize(40, 40)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setCheckable(checkable)
         btn.setToolTip(tooltip)
@@ -17122,29 +17123,31 @@ class MainWindow(QMainWindow):
         self.top_toolbar = top_toolbar
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, top_toolbar)
 
-        # [顶部组1] 历史与画布操作（统一 Photoshop 紧凑图标风格）
+        # [顶部组1] 历史与画布操作（统一剪映无边框图标+极轻小字风格）
         self._add_ps_icon_toolbar_button(
             top_toolbar, 'undo', "撤销", self.undo,
             "撤销上一步操作 (Ctrl+Z)", shortcut="Ctrl+Z"
         )
         self._add_ps_icon_toolbar_button(
-            top_toolbar, 'clear', "清空画布", self.clear_current_canvas,
+            top_toolbar, 'clear', "清空", self.clear_current_canvas,
             "清空当前画布上的所有内容（支持 Ctrl+Z 撤销）"
         )
 
-        # [顶部组2] Photoshop 风格紧凑图标对齐组（节省横向空间，一键直达 4 种对齐）
+        # [顶部组2] 紧凑对齐组（同套无边框图标+极轻二字标签）
         top_toolbar.addSeparator()
-        for kind, tip, slot in [
-            ('top', "顶部对齐", self.align_top),
-            ('center_v', "垂直居中对齐", self.align_center_vertical),
-            ('right', "右对齐", self.align_right),
-            ('center_h', "水平居中对齐", self.align_center_horizontal),
+        for kind, short_lbl, tip, slot in [
+            ('top', "顶齐", "顶部对齐", self.align_top),
+            ('center_v', "垂中", "垂直居中对齐", self.align_center_vertical),
+            ('right', "右齐", "右对齐", self.align_right),
+            ('center_h', "平中", "水平居中对齐", self.align_center_horizontal),
         ]:
             btn = QToolButton()
             btn.setObjectName("psAlignBtn")
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setIcon(self._make_ps_align_icon(kind))
             btn.setIconSize(QSize(18, 18))
-            btn.setFixedSize(28, 28)
+            btn.setText(short_lbl)
+            btn.setFixedSize(40, 40)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tip)
             btn.setStatusTip(tip)
@@ -17153,16 +17156,16 @@ class MainWindow(QMainWindow):
             act.setText(tip)
 
         self.btn_align_mode = self._add_ps_icon_toolbar_button(
-            top_toolbar, 'align_first', "对齐基准",
+            top_toolbar, 'align_first', "首个",
             self.on_align_mode_button_toggled,
             "对齐基准模式切换（Alt+A）：「首个选中对象」/「点选指定对象」",
             checkable=True
         )
 
-        # [顶部组3] 全局移动与视图约束开关（统一 28x28 图标开关风格，开启时亮蓝高亮）
+        # [顶部组3] 全局移动与视图约束开关（统一剪映无边框开关风格，开启时淡蓝底+底边蓝条）
         top_toolbar.addSeparator()
         self.btn_horizontal_move = self._add_ps_icon_toolbar_button(
-            top_toolbar, 'h_move', "仅水平移动",
+            top_toolbar, 'h_move', "横移",
             lambda checked: self.toggle_horizontal_move_only(checked),
             "仅水平移动：锁定垂直移动，只允许水平方向拖动选中对象 (Ctrl+H)",
             checkable=True
@@ -17172,7 +17175,7 @@ class MainWindow(QMainWindow):
         self.btn_horizontal_move.blockSignals(False)
 
         self.btn_select_parent = self._add_ps_icon_toolbar_button(
-            top_toolbar, 'select_parent', "选子即选父",
+            top_toolbar, 'select_parent', "选父",
             self.toggle_select_child_selects_parent,
             "选子即选父 (Alt+G)：点击或框选子文字自动选中并联动移动父级图片；双击文字仍可直接编辑",
             checkable=True
@@ -17182,7 +17185,7 @@ class MainWindow(QMainWindow):
         self.btn_select_parent.blockSignals(False)
 
         self.btn_show_cp = self._add_ps_icon_toolbar_button(
-            top_toolbar, 'show_cp', "显示连接点",
+            top_toolbar, 'show_cp', "连点",
             self.set_all_connection_points_visible,
             "显示/隐藏所有连接点 (Alt+P) — 隐藏后不影响点图片连线与智能连接",
             checkable=True
@@ -17192,7 +17195,7 @@ class MainWindow(QMainWindow):
         self.btn_show_cp.blockSignals(False)
 
         self.btn_perp_guide = self._add_ps_icon_toolbar_button(
-            top_toolbar, 'perp_guide', "辅助线垂线",
+            top_toolbar, 'perp_guide', "垂线",
             self.toggle_perpendicular_to_guide_enabled,
             "开启/关闭「连接点向辅助线画垂线」(Alt+V)",
             checkable=True
@@ -18300,6 +18303,7 @@ class MainWindow(QMainWindow):
             is_pick = (current == 'pick_reference')
             self.btn_align_mode.blockSignals(True)
             self.btn_align_mode.setChecked(is_pick)
+            self.btn_align_mode.setText("点选" if is_pick else "首个")
             self.btn_align_mode.setIcon(self._make_ps_toolbar_icon('align_pick' if is_pick else 'align_first'))
             self.btn_align_mode.setToolTip(
                 "当前对齐基准：点选指定对象（点击或按 Alt+A 切回首个选中对象）"
@@ -22449,33 +22453,39 @@ class MainWindow(QMainWindow):
             background: #f8fafc;
             border: none;
             border-bottom: 1px solid #e2e8f0;
-            spacing: 8px;
-            padding: 6px 12px;
+            spacing: 4px;
+            padding: 4px 10px;
         }
 
         QToolBar#toolbar_top QToolButton#psAlignBtn {
-            background: #ffffff;
-            border: 1px solid #dce1e8;
+            background: transparent;
+            border: none;
+            border-bottom: 2px solid transparent;
             border-radius: 6px;
-            padding: 3px;
-            min-width: 24px;
-            min-height: 24px;
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 500;
+            padding: 3px 2px 1px 2px;
+            min-width: 36px;
+            min-height: 36px;
         }
         QToolBar#toolbar_top QToolButton#psAlignBtn:hover {
-            background: #f0f6ff;
-            border-color: #93c5fd;
+            background: #e2e8f0;
+            color: #1e293b;
         }
-        QToolBar#toolbar_top QToolButton#psAlignBtn:pressed {
-            background: #dbeafe;
-            border-color: #0d6efd;
-        }
+        QToolBar#toolbar_top QToolButton#psAlignBtn:pressed,
         QToolBar#toolbar_top QToolButton#psAlignBtn:checked {
             background: #dbeafe;
-            border-color: #0d6efd;
+            border-bottom: 2px solid #0d6efd;
+            border-bottom-left-radius: 2px;
+            border-bottom-right-radius: 2px;
+            color: #0d6efd;
+            font-weight: 600;
         }
         QToolBar#toolbar_top QToolButton#psAlignBtn:checked:hover {
             background: #bfdbfe;
-            border-color: #0b5ed7;
+            border-bottom: 2px solid #0b5ed7;
+            color: #0b5ed7;
         }
         QToolBar#toolbar_main QToolButton#psSideBtn {
             background: transparent;
