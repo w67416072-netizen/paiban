@@ -236,6 +236,66 @@ def recover_expired_license(config_manager):
     )
     return True
 
+
+def initialize_missing_config_with_password(reason_text):
+    """缺少或损坏 config.json 时，要求验证管理员密码后重新初始化配置与授权到期时间。"""
+    password, ok = QInputDialog.getText(
+        None,
+        "授权验证",
+        f"{reason_text}\n请输入管理员授权密码以初始化并启动软件：",
+        QLineEdit.EchoMode.Password
+    )
+    if not ok:
+        return False
+
+    if hash_license_password(password) != hash_license_password(DEFAULT_LICENSE_PASSWORD):
+        QMessageBox.critical(None, "授权验证失败", "密码不正确，软件无法启动。")
+        return False
+
+    dialog = QDialog()
+    dialog.setWindowTitle("初始化软件授权")
+    dialog.setMinimumWidth(340)
+    layout = QFormLayout(dialog)
+    layout.addRow(QLabel("密码验证通过，请设置授权方式后重新生成 config.json："))
+
+    chk_limit = QCheckBox("启用到期时间限制", dialog)
+    chk_limit.setChecked(True)
+    layout.addRow(chk_limit)
+
+    default_dt = QDateTime.currentDateTime().addDays(30)
+    expiry_edit = QDateTimeEdit(default_dt, dialog)
+    expiry_edit.setCalendarPopup(True)
+    expiry_edit.setDisplayFormat(LICENSE_EXPIRY_DATETIME_FORMAT)
+    expiry_edit.setMinimumDateTime(next_license_expiry_minute())
+    layout.addRow("授权到期时间：", expiry_edit)
+    chk_limit.toggled.connect(expiry_edit.setEnabled)
+
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.button(QDialogButtonBox.StandardButton.Ok).setText("保存并启动")
+    buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("退出")
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    layout.addRow(buttons)
+
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return False
+
+    # 若原文件损坏，先移除以便重建干净的默认配置
+    if os.path.isfile(CONFIG_FILE):
+        try:
+            os.remove(CONFIG_FILE)
+        except OSError:
+            pass
+
+    cfg = ConfigManager()
+    expiry_val = expiry_edit.dateTime().toString(LICENSE_EXPIRY_DATETIME_FORMAT) if chk_limit.isChecked() else ""
+    cfg.config["license_expiry_date"] = expiry_val
+    cfg.config["license_password_hash"] = hash_license_password(DEFAULT_LICENSE_PASSWORD)
+    cfg.save_config()
+    return True
+
 # Vertically sensitive characters (Simple Heuristic for demo)
 ROTATE_CHARS = {'—', '…', '(', ')', '[', ']', '{', '}', '《', '》', '-', '_'}
 OFFSET_CHARS = {'，', '。', '、', '：', '；', '！', '？', ',', '.', '!', '?'}
@@ -22970,26 +23030,22 @@ if __name__ == "__main__":
     app.setApplicationVersion("1.0")
     app.setOrganizationName("VertiLayout")
 
-    # 强制检查配置文件是否存在且有效：缺失、空文件或损坏时直接禁止启动
+    # 强制检查配置文件是否存在且有效：缺失或损坏时需验证管理员密码后才允许初始化启动
+    _missing_reason = None
     if not os.path.isfile(CONFIG_FILE):
-        QMessageBox.critical(
-            None,
-            "缺少授权配置文件",
-            f"未找到配置文件 config.json，软件禁止启动。\n\n请确保软件目录中存在有效的 config.json 文件后重试：\n{CONFIG_FILE}"
-        )
-        sys.exit(0)
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as _cf:
-            _raw_cfg = json.load(_cf)
-        if not isinstance(_raw_cfg, dict) or not _raw_cfg:
-            raise ValueError("配置文件内容为空或格式无效")
-    except Exception:
-        QMessageBox.critical(
-            None,
-            "授权配置文件损坏",
-            f"配置文件 config.json 内容无效或已损坏，软件禁止启动。\n\n请恢复有效的 config.json 文件后重试：\n{CONFIG_FILE}"
-        )
-        sys.exit(0)
+        _missing_reason = "未找到授权配置文件 config.json。"
+    else:
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as _cf:
+                _raw_cfg = json.load(_cf)
+            if not isinstance(_raw_cfg, dict) or not _raw_cfg:
+                raise ValueError("配置文件内容为空或格式无效")
+        except Exception:
+            _missing_reason = "授权配置文件 config.json 内容无效或已损坏。"
+
+    if _missing_reason is not None:
+        if not initialize_missing_config_with_password(_missing_reason):
+            sys.exit(0)
 
     license_config = ConfigManager()
     login_time_valid, login_time_message = validate_and_record_login_time(license_config)
