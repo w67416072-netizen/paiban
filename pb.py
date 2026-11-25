@@ -20071,6 +20071,22 @@ class MainWindow(QMainWindow):
                 min(max(point.y(), canvas_rect.top()), canvas_rect.bottom())
             )
 
+        def align_items_right_to_x(items, target_right_x):
+            """将组合（顶层元素）整体水平对齐，使其整体右边缘精准落在 target_right_x。"""
+            if not items:
+                return
+            rect = QRectF()
+            for item in items:
+                rect = rect.united(item_scene_rect(item))
+            if rect.isEmpty():
+                return
+            dx = target_right_x - rect.right()
+            if abs(dx) > 0.01:
+                for item in items:
+                    if item.parentItem():
+                        continue
+                    item.moveBy(dx, 0.0)
+
         def keep_items_inside_canvas(items):
             if not items:
                 return
@@ -20148,8 +20164,9 @@ class MainWindow(QMainWindow):
                 imported_items.extend(new_items)
                 commands.extend(new_commands)
                 
-                # 计算组合位置（不包含d组）
+                # 将组合右边缘精准对齐到起始 X（第1人右侧）或上一节点的左侧间距基准
                 placed_items = new_items
+                align_items_right_to_x(placed_items, base_pos.x())
                 keep_items_inside_canvas(placed_items)
                 placed_rect = QRectF()
                 for item in placed_items:
@@ -20207,8 +20224,9 @@ class MainWindow(QMainWindow):
                 imported_items.append(text_item)
                 row_items.append(text_item)
             
-            # 计算主组合位置（不包含d组）
+            # 将主组合右边缘精准对齐到起始 X（第1人右侧）或上一节点的左侧间距基准
             placed_items = row_items
+            align_items_right_to_x(placed_items, base_pos.x())
             keep_items_inside_canvas(placed_items)
             placed_rect = QRectF()
             for item in placed_items:
