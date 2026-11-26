@@ -107,6 +107,7 @@ def _get_app_dir():
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+APP_VERSION = "1.0.0"  # 软件统一版本号（显示在标题栏并写入工程与 PDF 属性）
 APP_DIR = _get_app_dir()
 ASSETS_DIR = os.path.join(APP_DIR, "assets")  # 素材库目录
 DEFAULT_LINE_WIDTH = 3  # 默认连接线粗细（像素）
@@ -2472,7 +2473,7 @@ class GroupAssetItemDelegate(QStyledItemDelegate):
     ROW_HEIGHT = 58
 
     def sizeHint(self, option, index):
-        return QSize(max(180, option.rect.width()), self.ROW_HEIGHT)
+        return QSize(0, self.ROW_HEIGHT)
 
     def paint(self, painter, option, index):
         painter.save()
@@ -2587,6 +2588,7 @@ class AssetLibraryDockWidget(QDockWidget):
         gl.setContentsMargins(8, 8, 8, 8)
         gl.setSpacing(10)
         self.group_list = QListWidget()
+        self.group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.group_list.setItemDelegate(GroupAssetItemDelegate(self.group_list))
         self.group_list.setSpacing(2)
         self.group_list.setUniformItemSizes(True)
@@ -3028,6 +3030,7 @@ class ProjectData:
     def scene_to_dict(scene, quiet=False):
         project_data = {
             'version': '2.0',
+            'app_version': APP_VERSION,
             'items': [],
             'connectors': [],
             'image_text_connectors': [],
@@ -12980,6 +12983,8 @@ class LayoutView(QGraphicsView):
         self._cdr_nav_popup = None
         self._cdr_nav_btn = CdrNavigatorButton(self)
         self.setCornerWidget(self._cdr_nav_btn)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
 
     def set_main_window(self, mw):
         self._main_window = mw
@@ -13819,16 +13824,12 @@ class LayoutView(QGraphicsView):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             # 1. 优先处理标尺点击逻辑
             if self._in_h_ruler(pos) or self._in_v_ruler(pos):
-                if self._in_h_ruler(pos):
+                if event.button() == Qt.MouseButton.LeftButton:
                     self._guide_dragging = True
-                    self._guide_orientation = Qt.Orientation.Horizontal
-                    scene_y = self.mapToScene(pos).y()
-                    self._guide_preview = self.scene().add_guide(Qt.Orientation.Horizontal, scene_y)
-                elif self._in_v_ruler(pos):
-                    self._guide_dragging = True
-                    self._guide_orientation = Qt.Orientation.Vertical
-                    scene_x = self.mapToScene(pos).x()
-                    self._guide_preview = self.scene().add_guide(Qt.Orientation.Vertical, scene_x)
+                    self._guide_orientation = (
+                        Qt.Orientation.Horizontal if self._in_h_ruler(pos) else Qt.Orientation.Vertical
+                    )
+                    self._guide_preview = None  # 仅在真正拖入画布区域后再生成辅助线，防止单击标尺留下蓝线
                 event.accept()
                 return
 
@@ -13986,17 +13987,27 @@ class LayoutView(QGraphicsView):
                 return
             self._update_smart_brush_overlay(old_pos)
 
-        # 标尺辅助线拖拽预览
-        if self._guide_dragging and self._guide_preview:
-            scene_pos = self.mapToScene(event.pos())
-            if self._guide_orientation == Qt.Orientation.Horizontal:
-                self._guide_preview.pos_value = scene_pos.y()
-            else:
-                self._guide_preview.pos_value = scene_pos.x()
-            self._guide_preview._dragging = True
-            self._guide_preview._update_pos()
-            self._guide_preview.update()
-            if self.scene() and hasattr(self._guide_preview, 'format_coord_text'):
+        # 标尺辅助线拖拽预览（拖出标尺进入画布后才生成辅助线）
+        if self._guide_dragging:
+            ev_pos = event.pos()
+            scene_pos = self.mapToScene(ev_pos)
+            in_canvas = (
+                ev_pos.y() >= self.RULER_SIZE
+                if self._guide_orientation == Qt.Orientation.Horizontal
+                else ev_pos.x() >= self.RULER_SIZE
+            )
+            if self._guide_preview is None and in_canvas and self.scene():
+                init_val = scene_pos.y() if self._guide_orientation == Qt.Orientation.Horizontal else scene_pos.x()
+                self._guide_preview = self.scene().add_guide(self._guide_orientation, init_val)
+            if self._guide_preview is not None:
+                if self._guide_orientation == Qt.Orientation.Horizontal:
+                    self._guide_preview.pos_value = scene_pos.y()
+                else:
+                    self._guide_preview.pos_value = scene_pos.x()
+                self._guide_preview._dragging = True
+                self._guide_preview._update_pos()
+                self._guide_preview.update()
+            if self.scene() and self._guide_preview is not None and hasattr(self._guide_preview, 'format_coord_text'):
                 orient_lbl = "横向辅助线" if self._guide_orientation == Qt.Orientation.Horizontal else "竖向辅助线"
                 self.scene()._show_status_message(f"正在拖出{orient_lbl}  {self._guide_preview.format_coord_text(True)}", 2000)
             self.viewport().update()
@@ -14099,10 +14110,18 @@ class LayoutView(QGraphicsView):
                 elif sc._avatar_hover_target is not None:
                     sc._avatar_hover_target = None
                     self.viewport().update()
-            # 更新标尺的光标跟随线
-            self.update()
+            # 仅局部重绘顶部和左侧 20px 标尺条，实现蓝色光标追踪线丝滑跟随而不重绘整张画布
+            self._update_ruler_strips()
             super().mouseMoveEvent(event)
             self._sync_connection_point_hover(event.pos())
+
+    def _update_ruler_strips(self):
+        vp = self.viewport()
+        if vp is None:
+            return
+        r = self.RULER_SIZE
+        vp.update(QRect(0, 0, vp.width(), r))
+        vp.update(QRect(0, 0, r, vp.height()))
 
     def leaveEvent(self, event):
         if self._hovered_connection_point:
@@ -14110,6 +14129,7 @@ class LayoutView(QGraphicsView):
             self._hovered_connection_point.update()
             self._hovered_connection_point = None
         self._smart_brush_active = False
+        self._update_ruler_strips()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -14145,12 +14165,21 @@ class LayoutView(QGraphicsView):
             event.accept()
             return
 
-        # 结束辅助线拖拽
+        # 结束辅助线拖拽（若松手位置仍在标尺区域内则取消删除，不留多余蓝线）
         if self._guide_dragging:
             if self._guide_preview:
                 self._guide_preview._dragging = False
+                ev_pos = event.pos()
+                released_in_ruler = (
+                    ev_pos.y() < self.RULER_SIZE
+                    if self._guide_orientation == Qt.Orientation.Horizontal
+                    else ev_pos.x() < self.RULER_SIZE
+                )
                 if self.scene():
-                    self.scene().select_guide(self._guide_preview)
+                    if released_in_ruler:
+                        self.scene().remove_guide(self._guide_preview)
+                    else:
+                        self.scene().select_guide(self._guide_preview)
             self._guide_dragging = False
             self._guide_preview = None
             self._guide_orientation = None
@@ -15613,7 +15642,7 @@ class MainWindow(QMainWindow):
         self._startup_fit_done = False
         self._startup_fit_last_viewport_size = None
         self._startup_fit_attempts = 0
-        self.setWindowTitle("VertiLayout Pro - 竖排排版引擎")
+        self.setWindowTitle(f"VertiLayout Pro v{APP_VERSION} - 竖排排版引擎")
         self.setGeometry(100, 100, 1400, 900)
         self.setMinimumSize(800, 600)  # 设置最小窗口尺寸，允许自由调整
         # 应用Fluent Design样式
@@ -15860,7 +15889,7 @@ class MainWindow(QMainWindow):
             suffix = f" - {active_doc.name}" if active_doc.name else ""
             if self._current_project_path:
                 suffix = f" - {os.path.basename(self._current_project_path)}{suffix}"
-            self.setWindowTitle(f"VertiLayout Pro{suffix}")
+            self.setWindowTitle(f"VertiLayout Pro v{APP_VERSION}{suffix}")
         if tab_bar is not None and hasattr(tab_bar, '_move_plus_btn'):
             tab_bar._move_plus_btn()
 
@@ -16111,6 +16140,85 @@ class MainWindow(QMainWindow):
             doc.view._needs_initial_fit = True
         self.document_tabs.setCurrentIndex(0)
         self._on_document_changed(0)
+
+    def _is_blank_document(self, doc):
+        """判断指定文档标签是否为空白未编辑状态（可直接载入拖入的 PDF/工程而不浪费空标签）。"""
+        if doc is None or not hasattr(doc, 'scene') or doc.scene is None:
+            return False
+        sc = doc.scene
+        has_elements = any(isinstance(it, (VImageItem, VTextItem)) for it in sc.items())
+        if has_elements:
+            return False
+        if getattr(sc, 'image_text_connectors', None):
+            return False
+        if getattr(sc, 'free_connection_points', None):
+            return False
+        bg = getattr(sc, 'background_pixmap', None)
+        if bg is not None and not bg.isNull():
+            return False
+        return True
+
+    def _append_or_fill_documents(self, document_data, source_path=''):
+        """多标签安全打开：保留其他已打开文档，若当前页为空白则载入当前页，否则在右侧新开标签页。"""
+        if not document_data:
+            return []
+        existing_names = {d.name for d in self._documents}
+        file_stem = os.path.splitext(os.path.basename(source_path))[0].strip() if source_path else ''
+        cur_idx = self.document_tabs.currentIndex()
+        cur_doc = self._documents[cur_idx] if (0 <= cur_idx < len(self._documents)) else None
+        reuse_current = self._is_blank_document(cur_doc)
+        if reuse_current and cur_doc is not None:
+            existing_names.discard(cur_doc.name)
+
+        def _pick_tab_name(raw_name, idx):
+            base = (raw_name or '').strip()
+            # 单页 PDF 若内部名为通用“文档 1”或与现有标签重名，优先采用文件名更易区分
+            if len(document_data) == 1 and file_stem and (not base or base in existing_names or base == '文档 1'):
+                base = file_stem
+            if not base:
+                base = f"{file_stem} ({idx + 1})" if file_stem else f"文档 {len(self._documents) + 1}"
+            cand = base
+            n = 2
+            while cand in existing_names:
+                cand = f"{base} ({n})"
+                n += 1
+            existing_names.add(cand)
+            return cand
+
+        opened_docs = []
+        first_target_idx = None
+        self._loading_documents = True
+        try:
+            for index, data in enumerate(document_data):
+                tab_name = _pick_tab_name(data.get('name', ''), index)
+                if index == 0 and reuse_current and cur_doc is not None:
+                    cur_doc.name = tab_name
+                    ProjectData.load_scene(cur_doc.scene, data.get('data', {}))
+                    cur_doc.mark_saved()
+                    cur_doc._needs_initial_fit = True
+                    cur_doc.view._needs_initial_fit = True
+                    self._update_document_tab_title(cur_doc)
+                    opened_docs.append(cur_doc)
+                    first_target_idx = self.document_tabs.indexOf(cur_doc.view)
+                else:
+                    doc = self._create_document(tab_name)
+                    ProjectData.load_scene(doc.scene, data.get('data', {}))
+                    doc.mark_saved()
+                    doc._needs_initial_fit = True
+                    doc.view._needs_initial_fit = True
+                    self._documents.append(doc)
+                    new_idx = self.document_tabs.addTab(doc.view, doc.name)
+                    self._set_document_tab_close_text(new_idx)
+                    opened_docs.append(doc)
+                    if first_target_idx is None:
+                        first_target_idx = new_idx
+        finally:
+            self._loading_documents = False
+
+        if first_target_idx is not None and first_target_idx >= 0:
+            self.document_tabs.setCurrentIndex(first_target_idx)
+            self._on_document_changed(first_target_idx)
+        return opened_docs
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -21475,6 +21583,7 @@ class MainWindow(QMainWindow):
 
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setCreator(f"VertiLayout Pro v{APP_VERSION}")
         printer.setOutputFileName(path)
         printer.setResolution(metrics['dpi'])
         self._apply_pdf_page_layout(printer, metrics['page_w_mm'], metrics['page_h_mm'])
@@ -21516,6 +21625,7 @@ class MainWindow(QMainWindow):
         first_metrics = self._get_pdf_page_metrics(documents[0].scene)
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setCreator(f"VertiLayout Pro v{APP_VERSION}")
         printer.setOutputFileName(path)
         printer.setResolution(first_metrics['dpi'])
         self._apply_pdf_page_layout(printer, first_metrics['page_w_mm'], first_metrics['page_h_mm'])
@@ -21818,17 +21928,16 @@ class MainWindow(QMainWindow):
                 "✅", 4500
             )
 
-    def open_project_file(self, path):
-        """打开指定工程文件，供菜单和拖放入口共用。"""
+    def open_project_file(self, path, replace_all=False):
+        """打开指定工程或可编辑 PDF（默认保留其他已打开标签页，载入当前空白页或新开标签页）。"""
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             QMessageBox.warning(self, "打开工程失败", f"找不到工程文件：\n{path}")
             return False
-        is_pdf = path.lower().endswith('.pdf')
         if not path.lower().endswith(('.vlayout', '.pdf')):
             QMessageBox.warning(self, "打开工程失败", "请选择 .vlayout 工程文件或本软件导出的 PDF 文件。")
             return False
-        if not self._ask_save_before_action("打开工程"):
+        if replace_all and not self._ask_save_before_action("打开工程"):
             return False
         try:
             document_data = ProjectData.read_documents(path)
@@ -21836,17 +21945,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "打开工程失败", f"无法读取工程文件：\n{e}")
             return False
 
-        self._replace_documents(document_data)
-        self._current_project_path = path
-        for document in self._documents:
+        if replace_all:
+            self._replace_documents(document_data)
+            opened_docs = list(self._documents)
+            self._current_project_path = path
+        else:
+            opened_docs = self._append_or_fill_documents(document_data, source_path=path)
+            if not self._current_project_path:
+                self._current_project_path = path
+
+        for document in opened_docs:
             document.mark_saved()
             self._update_document_tab_title(document)
         self.scene.config_manager.set('default_save_dir', os.path.dirname(path))
-        # 文档标签和视图刚替换完成时尺寸可能尚未更新；下一轮事件循环再适配，
-        # 可确保拖入或菜单打开工程后均以“合适屏幕”显示完整画布。
         QTimer.singleShot(0, self.view.fit_in_view)
         self.status_bar.showMessage(
-            f"已打开: {os.path.basename(path)}（{len(self._documents)} 个文档）", 3000
+            f"已打开: {os.path.basename(path)}（新增/载入 {len(opened_docs)} 个文档，当前共 {len(self._documents)} 个标签）", 3000
         )
         return True
 
@@ -23055,7 +23169,7 @@ if __name__ == "__main__":
     
     # 设置应用图标和信息
     app.setApplicationName("VertiLayout Pro")
-    app.setApplicationVersion("1.0")
+    app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("VertiLayout")
 
     # 强制检查配置文件是否存在且有效：缺失或损坏时需验证管理员密码后才允许初始化启动
