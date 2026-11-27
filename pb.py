@@ -13037,10 +13037,19 @@ class LayoutView(QGraphicsView):
             rect = rect.united(old_rect)
         self.viewport().update(rect.toAlignedRect())
 
-    def _smart_brush_scene_path(self, pos):
+    def _smart_brush_scene_path(self, pos, prev_pos=None):
         center = self.mapToScene(pos)
         scale = max(abs(self.transform().m11()), 0.001)
         radius = self._smart_brush_radius / scale
+        if prev_pos is not None and (pos - prev_pos).manhattanLength() >= 2:
+            prev_center = self.mapToScene(prev_pos)
+            seg = QPainterPath(prev_center)
+            seg.lineTo(center)
+            stroker = QPainterPathStroker()
+            stroker.setWidth(radius * 2.0)
+            stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+            stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            return stroker.createStroke(seg)
         path = QPainterPath()
         path.addEllipse(center, radius, radius)
         return path
@@ -13062,10 +13071,10 @@ class LayoutView(QGraphicsView):
             return bool(cp and cp.isVisible())
         return True
 
-    def _items_under_smart_brush(self, pos):
+    def _items_under_smart_brush(self, pos, prev_pos=None):
         if not self.scene():
             return []
-        path = self._smart_brush_scene_path(pos)
+        path = self._smart_brush_scene_path(pos, prev_pos=prev_pos)
         raw_items = self.scene().items(path, Qt.ItemSelectionMode.IntersectsItemShape,
                                        Qt.SortOrder.DescendingOrder, self.transform())
         found = []
@@ -13081,35 +13090,40 @@ class LayoutView(QGraphicsView):
                 seen.add(element)
         return found
 
-    def _apply_smart_brush_at(self, pos, subtract=False):
+    def _apply_smart_brush_at(self, pos, subtract=False, prev_pos=None):
         scene = self.scene()
         if not scene:
             return
         changed = False
-        for item in self._items_under_smart_brush(pos):
-            key = (item, subtract)
-            if key in self._smart_brush_seen:
-                continue
-            self._smart_brush_seen.add(key)
-            if subtract:
-                if item.isSelected():
-                    item.setSelected(False)
-                    if item in scene.selection_order:
-                        scene.selection_order = [i for i in scene.selection_order if i != item]
-                    changed = True
-            else:
-                if not item.isSelected():
-                    item.setSelected(True)
-                    if item in scene.selection_order:
-                        scene.selection_order = [i for i in scene.selection_order if i != item]
-                    scene.selection_order.append(item)
-                    changed = True
+        prev_batch = getattr(scene, '_smart_brush_batching', False)
+        scene._smart_brush_batching = True
+        try:
+            for item in self._items_under_smart_brush(pos, prev_pos=prev_pos):
+                key = (item, subtract)
+                if key in self._smart_brush_seen:
+                    continue
+                self._smart_brush_seen.add(key)
+                if subtract:
+                    if item.isSelected():
+                        item.setSelected(False)
+                        if item in scene.selection_order:
+                            scene.selection_order = [i for i in scene.selection_order if i != item]
+                        changed = True
+                else:
+                    if not item.isSelected():
+                        item.setSelected(True)
+                        if item in scene.selection_order:
+                            scene.selection_order = [i for i in scene.selection_order if i != item]
+                        scene.selection_order.append(item)
+                        changed = True
+        finally:
+            scene._smart_brush_batching = prev_batch
         if changed:
             scene.last_selection_by_marquee = False
             if self._main_window and hasattr(self._main_window, 'status_bar'):
                 action = "减去" if subtract else "加入"
                 self._main_window.status_bar.showMessage(
-                    f"智能笔刷：已{action}对象，当前选中 {len(scene.selectedItems())} 个", 1500
+                    f"智能笔刷：已{action}对象，当前选中 {len(scene.selectedItems())} 个（右键/Esc/B 退出）", 1500
                 )
 
     def _connection_point_at(self, pos, tolerance=7, exclude_point=None):
@@ -13274,7 +13288,9 @@ class LayoutView(QGraphicsView):
         super().paintEvent(event)
         # 标尺画在 viewport 上
         painter = QPainter(self.viewport())
-        self._draw_rulers(painter)
+        dirty = event.rect()
+        if dirty.top() < self.RULER_SIZE or dirty.left() < self.RULER_SIZE:
+            self._draw_rulers(painter)
         if self.scene() and self.scene().is_isolation_active():
             self._draw_isolation_banner(painter)
         if self._smart_brush_enabled:
@@ -13697,12 +13713,21 @@ class LayoutView(QGraphicsView):
 
     def mousePressEvent(self, event):
         pos = event.pos()
+        if self._smart_brush_enabled and event.button() == Qt.MouseButton.RightButton:
+            if self._main_window and hasattr(self._main_window, 'toggle_smart_brush'):
+                self._main_window.toggle_smart_brush(False)
+            else:
+                self.set_smart_brush_enabled(False)
+            self._suppress_next_context_menu = True
+            event.accept()
+            return
         if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
             self._smart_brush_active = True
             self._smart_brush_seen.clear()
+            old_pos = self._smart_brush_pos
             self._smart_brush_pos = pos
             self._apply_smart_brush_at(pos, bool(event.modifiers() & Qt.KeyboardModifier.AltModifier))
-            self.viewport().update()
+            self._update_smart_brush_overlay(old_pos)
             event.accept()
             return
         # 处理中键：一键退出所有连线模式，并支持拖拽平移画布
@@ -13981,11 +14006,14 @@ class LayoutView(QGraphicsView):
             old_pos = self._smart_brush_pos
             self._smart_brush_pos = event.pos()
             if self._smart_brush_active and event.buttons() & Qt.MouseButton.LeftButton:
-                self._apply_smart_brush_at(event.pos(), bool(event.modifiers() & Qt.KeyboardModifier.AltModifier))
-                self._update_smart_brush_overlay(old_pos)
-                event.accept()
-                return
+                self._apply_smart_brush_at(
+                    event.pos(),
+                    bool(event.modifiers() & Qt.KeyboardModifier.AltModifier),
+                    prev_pos=old_pos
+                )
             self._update_smart_brush_overlay(old_pos)
+            event.accept()
+            return
 
         # 标尺辅助线拖拽预览（拖出标尺进入画布后才生成辅助线）
         if self._guide_dragging:
@@ -14158,10 +14186,10 @@ class LayoutView(QGraphicsView):
         if self._smart_brush_enabled and event.button() == Qt.MouseButton.LeftButton:
             self._smart_brush_active = False
             self._smart_brush_seen.clear()
-            self.viewport().update()
-            # 完成选择后自动退出笔刷模式
-            if self._main_window:
-                self._main_window.toggle_smart_brush(False)
+            self._update_smart_brush_overlay()
+            # 单笔涂抹结束后统一刷新一次属性栏与层级树，并保持笔刷开启支持连续多笔加选/Alt减选（右键/Esc/B 退出）
+            if self._main_window and hasattr(self._main_window, 'on_selection_changed'):
+                self._main_window.on_selection_changed()
             event.accept()
             return
 
@@ -14364,6 +14392,18 @@ class LayoutView(QGraphicsView):
         super().mouseDoubleClickEvent(event)
 
     def wheelEvent(self, event):
+        if self._smart_brush_enabled and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            delta = 4 if event.angleDelta().y() > 0 else -4
+            old_r = self._smart_brush_radius
+            self.adjust_smart_brush_radius(delta)
+            clear_r = max(old_r, self._smart_brush_radius) + 6
+            self.viewport().update(QRect(
+                self._smart_brush_pos.x() - clear_r,
+                self._smart_brush_pos.y() - clear_r,
+                clear_r * 2, clear_r * 2
+            ))
+            event.accept()
+            return
         if event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
             # Shift+滚轮 保留原始滚动行为；若刚因按下Shift进入点图连且未连线，自动退出点图连
             if self.scene() and getattr(self.scene(), '_entered_by_shift_key', False) and getattr(self.scene(), 'avatar_connect_mode', False):
@@ -19666,6 +19706,9 @@ class MainWindow(QMainWindow):
         elif event.type() == QEvent.Type.KeyPress:
             if event.key() == Qt.Key.Key_Escape and isinstance(obj, QWidget) and not event.isAutoRepeat():
                 if self.scene and not isinstance(obj, (InlineTextEditor, QDialog)):
+                    if getattr(self, 'view', None) and self.view.is_smart_brush_enabled():
+                        self.toggle_smart_brush(False)
+                        return True
                     if getattr(self.scene, 'stamping_session', None):
                         self.scene.abort_stamping_session()
                         return True
@@ -20572,6 +20615,8 @@ class MainWindow(QMainWindow):
     
     def on_selection_changed(self):
         try:
+            if self.scene and getattr(self.scene, '_smart_brush_batching', False):
+                return
             self._update_mode_selection_status()
             # 检查场景是否还存在
             if not self.scene:
