@@ -12178,10 +12178,20 @@ class LayoutScene(QGraphicsScene):
             if mw and hasattr(mw, 'prompt_exit_group_edit'):
                 QTimer.singleShot(0, mw.prompt_exit_group_edit)
             return False
-        return self.isolation_manager.exit_level(silent=silent)
+        res = self.isolation_manager.exit_level(silent=silent)
+        if not self.is_isolation_active():
+            for v in self.views():
+                if hasattr(v, '_reset_isolation_banner_hover_and_cursor'):
+                    v._reset_isolation_banner_hover_and_cursor()
+        return res
 
     def exit_all_isolation_modes(self, silent=False) -> bool:
-        return self.isolation_manager.exit_all(silent=silent)
+        res = self.isolation_manager.exit_all(silent=silent)
+        if not self.is_isolation_active():
+            for v in self.views():
+                if hasattr(v, '_reset_isolation_banner_hover_and_cursor'):
+                    v._reset_isolation_banner_hover_and_cursor()
+        return res
 
     def handle_isolation_shortcut(self):
         """处理按 I 键：进入独立模式，或在独立模式中选中子对象时深入下一隔离层级"""
@@ -13790,6 +13800,8 @@ class LayoutView(QGraphicsView):
                             sc.handle_isolation_shortcut()
                         elif btn_id == 'exit_level':
                             sc.exit_isolation_level()
+                            if not sc.is_isolation_active():
+                                self._reset_isolation_banner_hover_and_cursor()
                         event.accept()
                         return
             # 0a) 若点击在图片缩放控制点（ResizeHandle）上，最高优先级直接交由控制点处理（支持按住Shift自由拉伸、Alt中心缩放，不触发任何连线）
@@ -13978,6 +13990,16 @@ class LayoutView(QGraphicsView):
             # 6. 如果点击的是普通非锁定物体，执行系统默认的选择/拖拽逻辑
             super().mousePressEvent(event)
 
+    def _reset_isolation_banner_hover_and_cursor(self):
+        self._hovered_isolation_btn = None
+        if not (self.scene() and self.scene().is_isolation_active()):
+            self._isolation_banner_buttons = []
+        if getattr(self, '_smart_brush_enabled', False):
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.viewport().update()
+
     def mouseMoveEvent(self, event):
         sc = self.scene()
         if sc and sc.is_isolation_active() and not (event.buttons() & Qt.MouseButton.LeftButton):
@@ -13994,11 +14016,12 @@ class LayoutView(QGraphicsView):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
                 event.accept()
                 return
-            elif not self._smart_brush_enabled:
+            elif self._smart_brush_enabled:
+                self.setCursor(Qt.CursorShape.BlankCursor)
+            else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
         elif getattr(self, '_hovered_isolation_btn', None) is not None:
-            self._hovered_isolation_btn = None
-            self.viewport().update()
+            self._reset_isolation_banner_hover_and_cursor()
         # 智能笔刷模式下不需要连接点悬停扫描；该扫描会遍历整个场景。
         if not self._smart_brush_enabled:
             self._sync_connection_point_hover(event.pos())
