@@ -16312,7 +16312,10 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             # 窗口状态改变后延迟执行，确保布局已完成
-            if self.isMaximized() and self._startup_fit_done:
+            old_state = event.oldState()
+            was_maximized = bool(old_state & Qt.WindowState.WindowMaximized)
+            is_restored_from_max = was_maximized and not self.isMaximized() and not self.isMinimized()
+            if self._startup_fit_done and (self.isMaximized() or is_restored_from_max):
                 QTimer.singleShot(100, self.fit_in_view)
 
     def _fit_window_to_available_screen(self):
